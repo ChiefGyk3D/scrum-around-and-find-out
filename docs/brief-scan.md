@@ -29,13 +29,13 @@ show `-` instead. A deny-list finding names the entry label (`#4` is line 4 of t
 
 ## What it looks for (reuse first)
 
-- Credential shapes: `safo.gemini.SECRET_SHAPES` (Google, GitHub, AWS, `sk-`, Slack, Doppler tokens and PEM private
+- Credential shapes: the `SECRET_SHAPES` list of the `gemini` module (Google, GitHub, AWS, `sk-`, Slack, Doppler tokens and PEM private
   key headers), used unchanged.
 - Three shapes added here because the list has none: an `Authorization` or bare bearer header with a token, a JWT
   (three dot separated base64url parts, first two starting `eyJ`), and a `password`, `secret`, `token` or `api_key`
   assignment with a long mixed value (shell references and low-variety fillers are not values).
-- Private data: the detectors of `safo.localdraft` (IPv4 and IPv6 addresses, private hostnames, serial numbers, callsign
-  and grid-square shapes with `N0CALL`, `N0TST` and `FN31pr` allowed, claude.ai session URLs, and the private deny file
+- Private data: the detectors of the `localdraft` module (IPv4 and IPv6 addresses, private hostnames, serial numbers, callsign
+  and grid-square shapes with `N0CALL`, `N0TST` and `FN31pr` allowed, Claude session URLs, and the private deny file
   `SAFO_DRAFT_DENY_FILE` / `SAFO_DRAFT_DENY`, see [Privacy check](privacy.md)). `SAFO_DRAFT_ALLOW` and
   `SAFO_DRAFT_ALLOW_FILE` extend the allowed callsign and grid tokens. The Markdown, HTML and epic checks of the draft
   checker are not used: a brief may hold all of those.
@@ -46,7 +46,7 @@ show `-` instead. A deny-list finding names the entry label (`#4` is line 4 of t
 - No network, no subprocess, nothing written.
 - Input is read as bytes with a hard cap of 1 MiB (files by descriptor, no symlink, regular files only); one byte over
   is exit 2, never a truncated scan. Invalid UTF-8 is exit 2.
-- Hook JSON is parsed with `safo.bounded.loads` (size and depth limits, duplicate keys refused); every string inside
+- Hook JSON is parsed with the `bounded` JSON loader (size and depth limits, duplicate keys refused); every string inside
   `tool_input` is scanned, labelled by its key path.
 
 ## False-positive control: the allow marker
