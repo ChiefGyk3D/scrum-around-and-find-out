@@ -131,14 +131,16 @@ def check_hashes(data: bytes) -> int:
 def _analyze(value: str) -> tuple[str, list[str]]:
     """Parse one index or links value with urllib: the safe form (scheme, host and path only) and its secret parts.
 
-    Userinfo, the whole query and the fragment are secret. Scp-like (`user@host:path`) and bare (`user:pw@host/p`)
-    forms are treated as carrying userinfo. A local path has no secret. Whitespace, control characters, an empty value
-    and an unparsable URL are refused.
+    Userinfo, the whole query and the fragment are secret, with or without a host. Scp-like (`user@host:path`) and
+    bare (`user:pw@host/p`) forms are treated as carrying userinfo. A plain local path has no other secret. A value with
+    a scheme but no host (`https:token`, `file:///x`) is refused, as are whitespace, control characters, an empty value
+    and an unparsable URL: tools disagree on how to read those, so none is guessed.
     """
     if not value or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise Refused("an index or links value is empty or holds whitespace or control characters")
     try:
         parts = urllib.parse.urlsplit(value)
+        parts.port  # noqa: B018 - reading the port validates it (a bad port raises ValueError)
     except ValueError as exc:
         raise Refused("an index or links value is not a valid URL") from exc
     secrets: list[str] = []
@@ -150,21 +152,27 @@ def _analyze(value: str) -> tuple[str, list[str]]:
             secrets.extend([password, urllib.parse.unquote(password)])
         secrets.append(urllib.parse.unquote(userinfo))
 
-    if parts.netloc:
-        userinfo, at, host = parts.netloc.rpartition("@")
-        if at:
-            userinfo_parts(userinfo)
+    def query_parts() -> None:
         if parts.query:
             secrets.append(parts.query)
             secrets.extend(v for _, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if v)
         if parts.fragment:
             secrets.append(parts.fragment)
+
+    if parts.netloc:
+        userinfo, at, host = parts.netloc.rpartition("@")
+        if at:
+            userinfo_parts(userinfo)
+        query_parts()
         return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", "")), [x for x in secrets if x]
-    if value.startswith(("/", ".", "~")) or "@" not in value:
-        return value, []
-    userinfo, _, rest = value.rpartition("@")
-    userinfo_parts(userinfo)
-    return rest, [x for x in secrets if x]
+    if "@" in value and not value.startswith(("/", ".", "~")):
+        userinfo, _, rest = value.rpartition("@")
+        userinfo_parts(userinfo)
+        return rest, [x for x in secrets if x]
+    if parts.scheme:
+        raise Refused("an index or links value has a scheme but no host (a plain local path or a full URL is required)")
+    query_parts()
+    return parts.path, [x for x in secrets if x]
 
 
 def url_has_secret(value: str) -> bool:
@@ -176,6 +184,7 @@ def safe_url(value: str) -> str:
 
 
 _REGISTERED: list[tuple[str, str, list[str]]] = []
+REDACTED_URL = "<redacted-url>"
 _PIP_FLAGS = ("--index-url", "--find-links")
 
 
@@ -216,6 +225,7 @@ def redact(text: str) -> str:
         try:
             safe, secrets = _analyze(candidate)
         except Refused:
+            text = text.replace(candidate, REDACTED_URL)  # cannot be read cleanly: mask the whole token, fail closed
             continue
         if secrets:
             text = text.replace(candidate, safe)

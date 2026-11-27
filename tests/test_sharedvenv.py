@@ -852,3 +852,43 @@ def test_ancestor_made_writable_while_the_root_is_created_is_caught_before_retur
     monkeypatch.setattr(sharedvenv, "_after_mkdir", open_up)
     with pytest.raises(sharedvenv.Refused, match="writable"):
         sharedvenv.open_root(root)
+
+
+# ---- round 5: fail closed ----
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["https:token", "https:?token=tok3n", "file:///tmp/wheels", "file:/tmp/wheels", "https:", "ftp:///x?token=tok3n"],
+)
+def test_a_scheme_without_a_host_is_refused(value: str) -> None:
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.url_has_secret(value)
+
+
+@pytest.mark.parametrize("value", ["/tmp/wheels?token=tok3n", "relative/w#tok3n", "./w?x=tok3n", "~/w?a=b#tok3n"])
+def test_a_query_or_fragment_is_secret_with_or_without_a_host(value: str) -> None:
+    assert sharedvenv.url_has_secret(value)
+    safe = sharedvenv.safe_url(value)
+    assert "tok3n" not in safe and "?" not in safe and "#" not in safe
+
+
+def test_command_line_refuses_odd_forms_without_echoing_them(tmp_path: Path, lock: Path) -> None:
+    for value in ("file:///tmp/wheels", "https:tok3n", "/tmp/w?token=tok3n"):
+        done = cli(lock, "--root", tmp_path / "root", "--find-links", value)
+        assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
+
+
+@pytest.mark.parametrize(
+    "token", ["https://[::1/x?token=tok3n", "ftp:///x?token=tok3n", "file:///tok3n/w", "https://h:notaport/tok3n"]
+)
+def test_an_unparsable_url_like_token_is_masked_whole(token: str) -> None:
+    out = sharedvenv.redact(f"WARNING: Retrying after connection broken by '{token}': /simple/x/\nERROR: done")
+    assert "tok3n" not in out and "<redacted-url>" in out and "ERROR: done" in out
+
+
+def test_a_clean_url_token_without_secrets_is_left_alone() -> None:
+    assert (
+        sharedvenv.redact("Looking in indexes: https://example.invalid/simple")
+        == "Looking in indexes: https://example.invalid/simple"
+    )
