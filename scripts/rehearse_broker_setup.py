@@ -1171,7 +1171,7 @@ def contained_argv(
     etc_dir: Path,
     bwrap: str | None = None,
     prlimit: str | None = None,
-    limits: Limits = Limits(),  # noqa: B008 - a frozen value object
+    limits: Limits = Limits(),
 ) -> list[str]:
     """`argv` wrapped to run under prlimit and bubblewrap: resource limits; new user, network, IPC, PID and UTS
     namespaces; a new empty root with read-only /usr, a synthetic /etc, this checkout and the Python environment; a
