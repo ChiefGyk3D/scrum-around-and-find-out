@@ -432,17 +432,210 @@ def test_an_inert_repository_config_still_passes_real_git(tmp_path: Path) -> Non
     codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
 
 
-def test_core_worktree_is_accepted_only_in_a_submodule_and_only_when_relative(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(codexrun, "_git", lambda *args, **kwargs: "local\0core.worktree\n../../../sub\0")
-    monkeypatch.setattr(codexrun, "_submodule_folders", lambda *args, **kwargs: [])
+def sub_gitdir(sub: Path) -> Path:
+    return Path(git(sub, "rev-parse", "--absolute-git-dir"))
+
+
+def test_a_real_initialized_submodule_has_a_core_worktree_and_is_accepted(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    assert git(sub, "config", "--local", "core.worktree")  # git itself wrote it, relative to the git directory
+    assert go(world, "implementer") == 0
+
+
+def test_core_worktree_pointing_outside_the_submodule_is_refused(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    gitdir = sub_gitdir(sub)
+    git(sub, "config", "--local", "core.worktree", os.path.relpath(outside, gitdir))
+    assert Path(git(sub, "rev-parse", "--show-toplevel")).resolve() == outside.resolve()  # real git follows it
+    refused(world, go(world, "implementer"))
+    refused(world, go(world, "review"))
+
+
+def test_core_worktree_reaching_outside_through_a_symlink_is_refused(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    gitdir = sub_gitdir(sub)
+    (gitdir / "lnk").symlink_to(outside)
+    git(sub, "config", "--local", "core.worktree", "lnk")
+    assert Path(git(sub, "rev-parse", "--show-toplevel")).resolve() == outside.resolve()
+    refused(world, go(world, "implementer"))
+
+
+@pytest.mark.parametrize("value", ["/abs/elsewhere", "", "../.."])
+def test_core_worktree_with_another_value_is_refused(world: World, tmp_path: Path, value: str) -> None:
+    sub = add_submodule(world, tmp_path)
+    git(sub, "config", "--local", "core.worktree", value)
+    refused(world, go(world, "implementer"))
+
+
+HOSTILE_VALUES = [  # (key, value): an allowlisted key with a value that starts a helper, moves trust or is not a URL
+    ("remote.origin.url", "ext::sh -c id"),
+    ("remote.origin.url", "fd::17"),
+    ("remote.origin.url", "file:///etc"),
+    ("remote.origin.url", "/some/local/path"),
+    ("remote.origin.url", "../relative"),
+    ("remote.origin.url", "-oProxyCommand=x"),
+    ("remote.origin.url", "https://example.invalid/a b.git"),
+    ("remote.origin.pushurl", "ext::sh -c id"),
+    ("remote.origin.pushurl", "file:///tmp/x"),
+    ("submodule.sub.url", "ext::sh -c id"),
+    ("submodule.sub.url", "/local/upstream"),
+    ("remote.origin.fetch", "+ext::x:refs/remotes/o/*"),
+    ("remote.origin.fetch", "--upload-pack=x"),
+    ("remote.origin.fetch", "+heads/*:refs/x"),
+    ("remote.origin.fetch", "+refs/heads/*:../../x"),
+    ("remote.origin.tagopt", "--upload-pack=x"),
+    ("branch.main.remote", "ext::x"),
+    ("branch.main.remote", "-x"),
+    ("branch.main.merge", "-x"),
+    ("branch.main.merge", "heads/main"),
+    ("branch.main.pushremote", "ext::x"),
+    ("branch.main.rebase", "!sh"),
+]
+
+
+@pytest.mark.parametrize(("key", "value"), HOSTILE_VALUES)
+def test_an_allowlisted_key_with_a_hostile_value_is_refused_by_real_git(tmp_path: Path, key: str, value: str) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    real_config(gitbin, repo, key, value)
     with pytest.raises(codexrun.CodexRunError):
-        codexrun.check_repo_config("git", "/home/x", "/home/x/r")  # the top-level repository
-    codexrun.check_repo_config("git", "/home/x", "/home/x/r", depth=1)  # a submodule
-    monkeypatch.setattr(codexrun, "_git", lambda *args, **kwargs: "local\0core.worktree\n/etc\0")
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+def test_a_hostile_second_value_of_a_repeated_key_is_refused_by_real_git(tmp_path: Path) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    real_config(gitbin, repo, "remote.origin.url", "https://example.invalid/a.git")
+    env = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+    subprocess.run(  # noqa: S603
+        [gitbin, "-C", str(repo), "config", "--add", "remote.origin.url", "ext::sh -c id"], check=True, env=env
+    )
     with pytest.raises(codexrun.CodexRunError):
-        codexrun.check_repo_config("git", "/home/x", "/home/x/r", depth=1)
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+@pytest.mark.parametrize("byte", ["\x01", "\x1b", "\x7f"])
+def test_a_control_byte_in_any_value_is_refused_by_real_git(tmp_path: Path, byte: str) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    with open(repo / ".git" / "config", "a", encoding="utf-8") as handle:
+        handle.write(f'[user]\n\tname = "a{byte}b"\n')
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+def test_a_value_with_a_newline_or_a_leading_dash_is_refused_by_real_git(tmp_path: Path) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    with open(repo / ".git" / "config", "a", encoding="utf-8") as handle:
+        handle.write('[user]\n\tname = "a\\nb"\n')
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+    (tmp_path / "two").mkdir()
+    gitbin, repo2 = real_repo(tmp_path / "two")
+    real_config(gitbin, repo2, "user.name", "-x")
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo2))
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("remote.origin.url", "https://example.invalid/x.git"),
+        ("remote.origin.url", "ssh://git@example.invalid/x.git"),
+        ("remote.origin.url", "git@example.invalid:owner/x.git"),
+        ("remote.origin.pushurl", "git@example.invalid:owner/x.git"),
+        ("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
+        ("remote.origin.fetch", "refs/heads/main:refs/remotes/origin/main"),
+        ("remote.origin.tagopt", "--no-tags"),
+        ("branch.feat/x.merge", "refs/heads/feat/x"),
+        ("branch.main.remote", "origin"),
+        ("branch.main.rebase", "true"),
+        ("branch.main.description", "a plain description"),
+    ],
+)
+def test_an_allowlisted_key_with_an_ordinary_value_still_passes_real_git(tmp_path: Path, key: str, value: str) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    real_config(gitbin, repo, key, value)
+    codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+def fake_git(tmp_path: Path, text: str) -> str:
+    script = tmp_path / "fakegit"
+    script.write_text(f"#!/bin/sh\necho '{text}'\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+@pytest.mark.parametrize("text", ["git version 2.31.9", "git version 1.8.0", "no version here", "", "git version x.y"])
+def test_a_git_that_is_too_old_or_unreadable_is_refused(tmp_path: Path, text: str) -> None:
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_git_version(fake_git(tmp_path, text), str(tmp_path))
+
+
+@pytest.mark.parametrize("text", ["git version 2.32.0", "git version 2.47.3", "git version 3.0.1.windows.1"])
+def test_a_git_at_or_above_the_minimum_is_accepted(tmp_path: Path, text: str) -> None:
+    codexrun.check_git_version(fake_git(tmp_path, text), str(tmp_path))
+
+
+def test_the_real_git_passes_the_version_gate(tmp_path: Path) -> None:
+    gitbin = shutil.which("git")
+    assert gitbin
+    codexrun.check_git_version(gitbin, str(tmp_path))
+
+
+def test_the_version_gate_runs_in_the_worktree_check(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codexrun, "MIN_GIT_VERSION", (99, 0))
+    refused(world, go(world, "review"))
+
+
+def test_real_git_resolves_every_hostile_setting_to_the_forced_value(world: World, tmp_path: Path) -> None:
+    """Ask real git which value wins, using the environment the child really got, against a repository config that
+    sets every one of them to a hostile program."""
+    assert go(world, "review") == 0
+    env = dict(world.calls()[0]["env"])
+    gitbin = shutil.which("git")
+    assert gitbin
+    repo = tmp_path / "hostile-repo"
+    subprocess.run([gitbin, "init", "-q", str(repo)], check=True, env={"PATH": "/usr/bin:/bin"})  # noqa: S603
+    script = str(tmp_path / "hostile.sh")
+    keys = [
+        "core.editor",
+        "sequence.editor",
+        "core.askPass",
+        "core.gitProxy",
+        "interactive.diffFilter",
+        "core.pager",
+        "core.sshCommand",
+        "gpg.program",
+        "gpg.ssh.program",
+        "commit.gpgsign",
+        "tag.gpgsign",
+        "core.alternateRefsCommand",
+        "core.fsmonitor",
+        "core.hooksPath",
+    ]
+    for key in keys:
+        real_config(gitbin, repo, key, script)
+    real_config(gitbin, repo, "credential.helper", script)
+    env["PATH"] = "/usr/bin:/bin"
+
+    def ask(*args: str) -> str:
+        done = subprocess.run(  # noqa: S603
+            [gitbin, "-C", str(repo), *args], env=env, capture_output=True, text=True, check=True
+        )
+        return done.stdout.strip()
+
+    for key in keys:
+        assert script not in ask("config", "--get", key), key
+    assert ask("config", "--get", "commit.gpgsign") == "false"
+    assert ask("var", "GIT_EDITOR") == "/bin/false"
+    assert ask("var", "GIT_PAGER") == "cat"
+    assert ask("var", "GIT_SEQUENCE_EDITOR") == "/bin/false"
+    assert (
+        ask("config", "--show-scope", "--get-all", "credential.helper").splitlines()[-1].startswith("command")
+    )  # reset
+    assert env["GIT_ASKPASS"] == "/bin/false" and "GIT_EXTERNAL_DIFF" not in env
 
 
 def test_the_allowlist_refuses_a_key_with_a_subsection_in_an_exact_only_section() -> None:
@@ -519,7 +712,14 @@ def add_submodule(world: World, tmp_path: Path) -> Path:
     wt = world.worktree
     git(wt, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(upstream), "sub")
     git(wt, "commit", "-q", "-m", "add sub")
+    web_urls(wt, wt / "sub")
     return wt / "sub"
+
+
+def web_urls(wt: Path, sub: Path) -> None:
+    """Point the local-path URLs git recorded at an https URL: a local path is not an accepted URL form."""
+    git(wt, "config", "submodule.sub.url", "https://example.invalid/sub.git")
+    git(sub, "config", "remote.origin.url", "https://example.invalid/sub.git")
 
 
 @pytest.mark.parametrize("key", ["filter.x.clean", "diff.x.textconv", "alias.st", "core.sshCommand"])

@@ -93,6 +93,7 @@ import fcntl
 import hashlib
 import os
 import pwd
+import re
 import secrets
 import shutil
 import signal
@@ -409,6 +410,44 @@ def config_key_is_inert(key: str) -> bool:
     return bool(dot and subsection and name in INERT_SUBSECTION_NAMES.get(section, ()))
 
 
+URL_FORMS = (
+    re.compile(r"^https://[\w.-]+(:\d+)?(/[\w.~%+@:/-]*)?$"),
+    re.compile(r"^ssh://([\w.-]+@)?[\w.-]+(:\d+)?/[\w.~%+/-]*$"),
+    re.compile(r"^[\w.-]+@[\w.-]+:(?!-)[\w.~/-]+$"),  # scp-like user@host:path
+)
+REFSPEC_FORM = re.compile(r"^\+?refs/[\w./*-]+:refs/[\w./*-]+$")
+REF_FORM = re.compile(r"^refs/[\w./-]+$")
+NAME_FORM = re.compile(r"^[\w./-]+$")
+
+
+def config_value_is_inert(key: str, value: str) -> bool:
+    """A value must not carry a control byte or newline, name a helper (`::`) or look like an option (leading `-`,
+    except the two tag options), and the subsection keys that move trust or traffic must have their exact shape.
+    Local paths and file:// are not accepted as URLs."""
+    key = key.lower()
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value) or "::" in value or ".." in value.split("/"):
+        return False
+    section, _, rest = key.partition(".")
+    name = rest.rpartition(".")[2] if "." in rest else rest
+    subsectioned = "." in rest
+    if section in INERT_SUBSECTION_NAMES and subsectioned:
+        if name in {"url", "pushurl"}:
+            return any(form.match(value) for form in URL_FORMS)
+        if name == "fetch":
+            return bool(REFSPEC_FORM.match(value))
+        if name == "tagopt":
+            return value in {"--tags", "--no-tags"}
+        if name in {"prune", "active"}:
+            return value in {"true", "false"}
+        if name == "rebase":
+            return value in {"true", "false", "merges", "interactive"}
+        if name == "merge":
+            return bool(REF_FORM.match(value))
+        if name in {"remote", "pushremote", "vscode-merge-base"}:
+            return bool(NAME_FORM.match(value)) and not value.startswith("-")
+    return not value.startswith("-")
+
+
 def _git(git: str, home: str, root: str, *args: str, errors: str = "replace") -> str:
     try:
         done = subprocess.run(  # noqa: S603 - absolute git, fixed argv, no shell, stdin closed, bounded time
@@ -482,6 +521,19 @@ def worktree_identity(worktree: str, home: str) -> tuple[tuple[int, int], ...]:
         raise CodexRunError("the worktree changed while it was being checked; nothing was run") from None
 
 
+MIN_GIT_VERSION = (2, 32)  # `config --list --show-scope -z` (2.26), GIT_CONFIG_COUNT (2.31), GIT_CONFIG_GLOBAL (2.32)
+
+
+def check_git_version(git: str, home: str) -> None:
+    """Fail closed unless git reports a version that has the config listing form and the environment config settings
+    this wrapper relies on."""
+    out = _git(git, home, home, "--version")
+    found = re.match(r"^git version (\d+)\.(\d+)", out)
+    if not found or (int(found.group(1)), int(found.group(2))) < MIN_GIT_VERSION:
+        needed = ".".join(str(n) for n in MIN_GIT_VERSION)
+        raise CodexRunError(f"git is missing or older than {needed}; nothing was run")
+
+
 MAX_SUBMODULE_DEPTH = 4
 
 
@@ -501,11 +553,21 @@ def _check_config_keys(git: str, home: str, folder: str, submodule: bool = False
             raise CodexRunError("the repository config listing is not in the expected form; nothing was run")
         if scope == "command" and (key, value) in WRAPPER_COMMAND_SETTINGS:
             continue
-        if submodule and key == "core.worktree" and value and not os.path.isabs(value):
-            continue  # git itself writes a relative core.worktree into a submodule's config
+        if submodule and key == "core.worktree":
+            # git writes a relative path from the submodule's git directory to its working folder. Resolve it the way
+            # git does and require it to be exactly that folder; anything else moves the worktree somewhere unchecked.
+            gitdir = _git(git, home, folder, "rev-parse", "--absolute-git-dir").strip()
+            if value and os.path.realpath(os.path.join(gitdir, value)) == os.path.realpath(folder):
+                continue
+            raise CodexRunError("a submodule's core.worktree does not name the submodule's own folder; nothing was run")
         if not config_key_is_inert(key):
             raise CodexRunError(
                 f"the repository config sets {output.line(key[:60])}, which is not on the list of inert settings; "
+                "nothing was run"
+            )
+        if not config_value_is_inert(key, value):
+            raise CodexRunError(
+                f"the repository config sets {output.line(key[:60])} to a value that is not an accepted form; "
                 "nothing was run"
             )
 
@@ -607,6 +669,7 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
     git = shutil.which("git", path=SAFE_PATH)
     if not git:
         raise CodexRunError("git was not found; nothing was run")
+    check_git_version(git, home)
     top = os.path.realpath(_git(git, home, real, "rev-parse", "--show-toplevel").strip())
     if top != real:
         raise CodexRunError("the folder named is not the top of its git worktree; nothing was run")
@@ -804,6 +867,10 @@ def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch:
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_PAGER": "cat",
+        "GIT_EDITOR": "/bin/false",
+        "GIT_SEQUENCE_EDITOR": "/bin/false",
+        "GIT_ASKPASS": "/bin/false",
     }
     forced = (
         ("core.fsmonitor", "false"),
@@ -821,6 +888,12 @@ def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch:
         ("core.alternateRefsCommand", "/bin/false"),
         ("core.pager", "cat"),
         ("core.sshCommand", "/bin/false"),
+        ("core.editor", "/bin/false"),
+        ("sequence.editor", "/bin/false"),
+        ("core.askPass", "/bin/false"),
+        ("core.gitProxy", "/bin/false"),
+        ("interactive.diffFilter", "/bin/false"),
+        ("credential.helper", ""),
     )
     env["GIT_CONFIG_COUNT"] = str(len(forced))
     for number, (key, value) in enumerate(forced):
