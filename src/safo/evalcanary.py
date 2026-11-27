@@ -28,6 +28,7 @@ import stat
 import sys
 import time
 from collections.abc import Callable, Sequence
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ MAX_MODELS = 16
 BASELINE_VERSION = 1
 BUSY_SLEEP = 30.0
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}")
-_MODEL_FAILURES = ("exit 3", "exit 4")  # the model's own failure (truncated, over the cap): counted as not passed
+_MODEL_FAILURE = re.compile(r"exit [34]:.*", re.DOTALL)  # the model's own failure (truncated, over the cap): not passed
 
 Runner = Callable[[Any, str], dict[str, Any]]
 
@@ -151,16 +152,19 @@ def write_baseline(path: Path, scores: dict[str, float]) -> None:
         raise CanaryError("refusing to write the baseline through a symlink or an unusable folder") from exc
     try:
         try:
-            mode: int | None = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False).st_mode
-        except FileNotFoundError:
-            mode = None
-        if mode is not None and not stat.S_ISREG(mode):
-            raise CanaryError("refusing to replace a baseline that is a symlink or not a regular file")
-        try:
+            try:
+                mode: int | None = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                mode = None
+            if mode is not None and not stat.S_ISREG(mode):
+                raise CanaryError("refusing to replace a baseline that is a symlink or not a regular file")
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.rename(tmp, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.fsync(dir_fd)
         except OSError as exc:
             with contextlib.suppress(OSError):
                 os.unlink(tmp, dir_fd=dir_fd)
@@ -173,13 +177,18 @@ def _classify(records: Sequence[dict[str, Any]]) -> tuple[str, float | None]:
     """('ok', score) | ('unreachable', None) | ('busy', None). Any busy record makes the whole attempt busy."""
     passed = scored = busy = 0
     for rec in records:
+        if not isinstance(rec, dict):  # a buggy runner: not a quality signal
+            return "unreachable", None
         status = rec.get("status")
         if status == "busy":
             busy += 1
         elif status == "ok":
+            score = rec.get("score")
+            if not isinstance(score, dict):
+                return "unreachable", None
             scored += 1
-            passed += 1 if rec.get("score", {}).get("passed") is True else 0
-        elif status == "failed" and str(rec.get("error", "")).startswith(_MODEL_FAILURES):
+            passed += 1 if score.get("passed") is True else 0
+        elif status == "failed" and _MODEL_FAILURE.fullmatch(str(rec.get("error", ""))):
             scored += 1
         else:  # any other failure: the server, the wrapper or the call did not work; not a quality signal
             return "unreachable", None
@@ -202,6 +211,13 @@ def measure(
         if attempt < busy_retries:
             sleep(BUSY_SLEEP * 2**attempt)
     return state
+
+
+def dropped(base: float, score: float, threshold: float) -> bool:
+    """True when the drop is more than the threshold, compared as four-decimal fixed point (no binary float noise)."""
+    quantum = Decimal("0.0001")
+    drop = Decimal(repr(base)).quantize(quantum) - Decimal(repr(score)).quantize(quantum)
+    return drop > Decimal(repr(threshold)).quantize(quantum)
 
 
 def _default_runner(wait: int) -> Runner:
@@ -256,20 +272,17 @@ def entry(argv: Sequence[str] | None = None, *, runner: Runner | None = None, sl
             write_baseline(args.baseline, {m: round(float(results[m][1] or 0.0), 4) for m in models})
             output.write(sys.stdout, "eval-canary: baseline written for " + ", ".join(models))
             return EXIT_OK
+        if unreachable or busy:  # an incomplete run never turns into a verdict, in either direction
+            output.write(sys.stderr, _problem_line(unreachable, busy))
+            return EXIT_UNREACHABLE if unreachable else EXIT_BUSY
         drops = [
             f"{m} {baseline[m]:.2f} -> {score:.2f} (-{baseline[m] - score:.2f})"
-            for m, (state, score) in results.items()
-            if state == "ok" and score is not None and baseline[m] - score > threshold
+            for m, (_, score) in results.items()
+            if score is not None and dropped(baseline[m], score, threshold)
         ]
-        if unreachable or busy:
-            output.write(sys.stderr, _problem_line(unreachable, busy))
         if drops:
             output.write(sys.stderr, f"ALERT eval-canary: quality drop over {threshold:.2f}: " + "; ".join(drops))
             return EXIT_DROP
-        if unreachable:
-            return EXIT_UNREACHABLE
-        if busy:
-            return EXIT_BUSY
         output.write(
             sys.stdout, "eval-canary: ok " + ", ".join(f"{m} {s:.2f}" for m, (_, s) in results.items() if s is not None)
         )

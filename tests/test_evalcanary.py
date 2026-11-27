@@ -282,3 +282,85 @@ def test_write_creates_missing_folders_privately_and_reads_back(tmp_path: Path) 
     assert (path.parent.stat().st_mode & 0o777) == 0o700
     assert (path.stat().st_mode & 0o777) == 0o600
     assert [p.name for p in path.parent.iterdir()] == ["base.json"]
+
+
+def test_a_busy_model_beats_a_drop_in_the_other_model(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    write_base(tmp_path, {m: 1.0 for m in MODELS})
+    code, _ = run(tmp_path, {MODELS[0]: "busy", MODELS[1]: 0.0})
+    assert code == 75
+    assert "ALERT" not in capsys.readouterr().err
+
+
+def test_an_unreachable_model_beats_a_drop_in_the_other_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_base(tmp_path, {m: 1.0 for m in MODELS})
+    code, _ = run(tmp_path, {MODELS[0]: "unreachable", MODELS[1]: 0.0})
+    assert code == 3
+    assert "ALERT" not in capsys.readouterr().err
+
+
+def _exit_runner(error: str) -> Any:
+    def call(fixture: Any, model: str) -> dict[str, Any]:
+        return {"fixture": fixture.id, "status": "failed", "error": error}
+
+    return call
+
+
+@pytest.mark.parametrize(
+    "error", ["exit 30: x", "exit 31: x", "exit 40: x", "exit 49: x", "exit 3", "exit 33", "exit 5: x"]
+)
+def test_only_exit_3_and_4_are_model_failures(tmp_path: Path, error: str) -> None:
+    path = write_base(tmp_path, {m: 0.9 for m in MODELS})
+    before = path.read_bytes()
+    assert ec.entry(args(tmp_path, "--update-baseline"), runner=_exit_runner(error), sleep=lambda _s: None) == 3
+    assert path.read_bytes() == before
+    assert ec.entry(args(tmp_path), runner=_exit_runner(error), sleep=lambda _s: None) == 3
+
+
+@pytest.mark.parametrize("error", ["exit 3: truncated", "exit 4: over the cap"])
+def test_exit_3_and_4_still_count_as_not_passed(error: str) -> None:
+    assert ec._classify([{"status": "failed", "error": error}]) == ("ok", 0.0)
+
+
+@pytest.mark.parametrize(
+    "rec",
+    [None, "x", 5, {"status": "ok", "score": None}, {"status": "ok", "score": []}, {"status": "ok", "score": "x"}],
+)
+def test_malformed_runner_records_are_unreachable_not_a_crash(rec: Any) -> None:
+    assert ec._classify([rec]) == ("unreachable", None)
+
+
+def test_an_overlong_baseline_name_is_exit_2_not_a_traceback(tmp_path: Path) -> None:
+    long = tmp_path / ("x" * 5000)
+    code, _ = run(tmp_path, {m: 0.9 for m in MODELS}, "--update-baseline")
+    assert code == 0
+    with pytest.raises(ec.CanaryError):
+        ec.write_baseline(long, {m: 0.9 for m in MODELS})
+    assert (
+        ec.entry(
+            ["--baseline", str(long), "--update-baseline", "--tasks", "commit-message"],
+            runner=FakeClient({m: 0.9 for m in MODELS}),
+            sleep=lambda _s: None,
+        )
+        == 2
+    )
+
+
+@pytest.mark.parametrize(("base", "score"), [(0.8, 0.7), (0.9, 0.8), (0.3, 0.2), (0.7, 0.6), (0.6, 0.5)])
+def test_a_drop_of_exactly_the_threshold_is_not_an_alert(base: float, score: float) -> None:
+    assert not ec.dropped(base, score, 0.1)
+    assert ec.dropped(base, score - 0.01, 0.1)
+
+
+def test_the_baseline_file_and_folder_are_fsynced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kinds: list[str] = []
+    real = os.fsync
+
+    def spy(fd: int) -> None:
+        kinds.append("dir" if os.path.isdir(f"/proc/self/fd/{fd}") else "file")
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS})
+    assert kinds == ["file", "dir"]
