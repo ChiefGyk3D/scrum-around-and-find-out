@@ -57,6 +57,7 @@ its status. One row per SAFO issue or page: a shared portable-edition reference 
 
 | SAFO item | Decision | Portable edition | Proposal |
 | --- | --- | --- | --- |
+| [#587](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/587): `safo-threads`, list, reply to and resolve review threads | Proposed | none yet | Port as configurable; nothing in it is specific to SAFO (any repo, bounded `gh` calls, strict dispositions file) |
 | [#540](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/540): weekly eval canary | Proposed | none yet | Port as configurable after [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) lands; interval and models from config |
 | [#569](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/569): qwen3.5:4b truncation regression probe | Proposed | none yet | Port as a generic truncation probe after [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); the model name is config |
 | [#533](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/533): keep_alive measurement | Proposed | none yet | Port as a documented setting inside [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); no number is carried over |

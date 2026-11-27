@@ -195,6 +195,7 @@ replaced are gone.
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [Codex-run](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Codex-run)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
+- [safo-threads](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threads): list, reply to and resolve review threads from a dispositions file
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
 - [Board-kind](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-kind): `safo kind` and the reconcile write cap
 - [Protection-audit](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Protection-audit): `safo protection --all`, the default-branch drift audit
