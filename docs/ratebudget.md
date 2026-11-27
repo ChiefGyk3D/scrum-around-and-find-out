@@ -42,6 +42,19 @@ directory, a hard-linked or foreign file is a configuration error, not a map. Up
 lock `boardmap.lock` the file is re-read and only what this run learned (new items, new options) is laid over it, so
 two concurrent edits both persist.
 
+## Conditional reads (#532)
+
+A plain REST read, `ghw api [--hostname H] ENDPOINT` with no other option (no `--jq`, `--paginate`, `-H`, fields or
+method), keeps its `ETag` and body in `etags.json` beside the ledger. The next identical read sends `If-None-Match`; a
+304 answer prints the kept body, exits 0 and is recorded with `cache: "hit"`. GitHub documents that a 304 does not count against the
+primary limit (unverified here: the docs page was not fetched and tests use a stub).
+`safo-ratebudget --by-caller` shows the hits. Rules: the file is mode 0600 in the private state folder (a symlink or
+foreign file is not read), holds at most 64 entries, 128 KiB per body and 4 MiB in all (oldest go first), and an entry
+older than 24 hours is not used. The entry name is a hash of host, account scope and request, so another account or
+another URL never matches; no token or login is stored. Nothing is cached outside the state folder. Any cache error,
+a malformed ETag or a 200 that changed means a normal request and a fresh entry. Writes, GraphQL and calls with
+options are never cached.
+
 ## `safo-ratebudget`
 
     safo-ratebudget [--by-caller] [--refresh] [--json]
