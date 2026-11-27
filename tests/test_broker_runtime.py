@@ -13,6 +13,7 @@ import os
 import resource
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
@@ -728,15 +729,32 @@ def tree(tmp_path: Path, key: Path) -> Iterator[Tree]:
     t.sock.close()
 
 
-def ask(tree: Tree, body: bytes) -> list[bytes]:
+def ask_once(tree: Tree, body: bytes) -> list[bytes]:
     client = tree.connect()
-    client.sendall(protocol.frame(body, protocol.MAX_REQUEST_FRAME))
-    client.shutdown(socket.SHUT_WR)
-    data = b""
-    while chunk := client.recv(1 << 20):
-        data += chunk
-    client.close()
+    try:
+        client.sendall(protocol.frame(body, protocol.MAX_REQUEST_FRAME))
+        client.shutdown(socket.SHUT_WR)
+        data = b""
+        while chunk := client.recv(1 << 20):
+            data += chunk
+    finally:
+        client.close()
     return split_frames(data)
+
+
+def ask(tree: Tree, body: bytes, *, tries: int = 100) -> list[bytes]:
+    """One request. The server frees a connection slot a moment after it closes the socket, so a client that
+    reconnects at once can land on a full per-user bound and be refused unread (a closed or reset socket, no
+    reply). That is the server's `busy` behavior, so retry a few times before failing."""
+    for attempt in range(tries):
+        try:
+            frames = ask_once(tree, body)
+        except (BrokenPipeError, ConnectionResetError):
+            frames = []
+        if frames:
+            return frames
+        time.sleep(0.05 * min(attempt + 1, 10))
+    return ask_once(tree, body)
 
 
 def serve_in_thread(tree: Tree, environ: dict[str, str], transport: Any = None) -> tuple[threading.Thread, list[Any]]:
@@ -789,6 +807,22 @@ def test_the_switch_file_is_read_per_request_by_the_running_service(tree: Tree) 
     assert json.loads(ask(tree, begin)[0])["ok"] is True
     box[0].stop()
     join_or_fail(thread)
+
+
+def test_a_client_that_reconnects_while_the_per_user_bound_is_full_is_served_once_a_slot_frees(tree: Tree) -> None:
+    thread, box = serve_in_thread(tree, tree.environ())
+    held = [tree.connect(), tree.connect()]  # both per-user slots taken by idle connections
+    with pytest.raises((BrokenPipeError, ConnectionResetError, AssertionError)):
+        refused = ask_once(tree, protocol.request_body("status"))
+        assert refused  # a refused connection is closed unread: no reply frame
+    threading.Timer(0.3, lambda: [c.close() for c in held]).start()
+    try:
+        assert json.loads(ask(tree, protocol.request_body("status"))[0])["ok"] is True
+    finally:
+        for c in held:
+            c.close()
+        box[0].stop()
+        join_or_fail(thread)
 
 
 def begin_for(tree: Tree, req: Any) -> dict[str, Any]:
