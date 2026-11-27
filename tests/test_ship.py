@@ -50,6 +50,8 @@ STUB = textwrap.dedent(
         reply(pop("merges"))
     if key == "api graphql":
         reply({{"out": json.dumps(pop("threads"))}})
+    if rest[0] == "api" and "update-branch" in rest[1]:
+        reply(state.get("update", {{}}))
     if rest[0] == "api" and "/reviews" in rest[1]:
         state.setdefault("reviews", [[]])
         reply({{"out": "\\n".join(json.dumps(i) for i in pop("reviews"))}})

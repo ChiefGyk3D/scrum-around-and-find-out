@@ -14,6 +14,10 @@ For each pull request, in order:
    most twice per run. Any other failure is real and is never re-run.
 4. Optionally (`--wait-for-review SECONDS`) wait, bounded, for the automated reviewer's review of the pinned head, then
    require 0 unresolved review threads; otherwise stop and list each (author, file:line, first 600 characters).
+   `--queue` (issue #586): the pull requests are taken one at a time, and the queue stops at the first one that does
+   not merge (later ones print SKIPPED and are never read). A head the API shows late (`--pin N=SHA`) is re-read for
+   up to HEAD_LAG_POLLS polls before HEAD-MOVED. A branch that is BEHIND gets update-branch once (guarded with
+   expected_head_sha), then the new head is pinned and CI is waited for again. A conflict is CONFLICT (8).
 5. Merge with `--match-head-commit <pinned sha>`, retry once on "Base branch was modified", then read the state back.
 
 `--open-pr` first pushes the branch (never forced), opens the pull request from `--title` and `--issue`, and pins the
@@ -24,6 +28,7 @@ Exit codes (several pull requests: the highest code wins):
     1 CI failed (a real failure)       5 timed out while still pending
     3 unresolved review threads        6 merge refused, or the read-back did not say MERGED
     7 an error: gh missing or failing, push or open failed, unreadable protection
+    8 conflict (queue mode only)       9 branch protection refused the merge (queue mode only)
     (argparse's 2 is a usage error)
 """
 
@@ -50,6 +55,8 @@ EXIT_HEAD_MOVED = 4
 EXIT_TIMEOUT = 5
 EXIT_MERGE_REFUSED = 6
 EXIT_ERROR = 7
+EXIT_CONFLICT = 8  # queue mode: the pull request conflicts with its base; an agent must resolve it
+EXIT_PROTECTED = 9  # queue mode: branch protection refused the merge
 
 GATE = "CI green"
 CANARY = "EX-0001"
@@ -57,6 +64,9 @@ CANCEL_RERUNS = 1  # per run
 CANARY_RERUNS = 2  # per run
 STALE_GRACE_POLLS = 3  # polls a just-re-run failure may still show before it counts again
 CALL_TIMEOUT = 60
+HEAD_LAG_POLLS = 6  # queue mode: reads of the head, at --interval, while the API still shows an older commit
+UPDATE_WAIT_POLLS = 10  # queue mode: reads after update-branch, at --interval, for the head to change
+PROTECTED_WORDS = ("policy", "protect", "required status", "required review", "not mergeable", "blocked")
 OK_REQUIRED = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 FAILING = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE", "ERROR"}
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -258,7 +268,9 @@ class Watcher:
         sleep: Sleep = time.sleep,
         clock: Clock = time.monotonic,
         wait_for_review: float = 0.0,
+        queue: bool = False,
     ):
+        self.queue = queue
         self.wait_for_review = wait_for_review
         self.gh, self.out = gh, out
         self.timeout, self.interval, self.max_polls = timeout, interval, max_polls
@@ -278,7 +290,7 @@ class Watcher:
             "-R",
             repo,
             "--json",
-            "state,headRefOid,baseRefName,statusCheckRollup,url",
+            "state,headRefOid,baseRefName,statusCheckRollup,url,mergeable,mergeStateStatus",
         )
         if not isinstance(data, dict) or not SHA.fullmatch(str(data.get("headRefOid") or "")):
             raise ShipError(EXIT_ERROR, f"PR #{number}: no head commit in the answer")
@@ -510,11 +522,101 @@ class Watcher:
             head = pin
         if head != pin:
             return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
-        return Result(
-            EXIT_MERGE_REFUSED, "MERGE-REFUSED", err.strip().splitlines()[0][:200] if err.strip() else "gh refused"
+        reason = err.strip().splitlines()[0][:200] if err.strip() else "gh refused"
+        if self.queue and any(word in reason.lower() for word in PROTECTED_WORDS):
+            return Result(EXIT_PROTECTED, "PROTECTED", reason)
+        return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", reason)
+
+    # queue mode
+
+    def pinned_view(self, repo: str, number: int, expect: str) -> dict[str, Any] | Result:
+        """The view whose head is `expect`; an older head is re-read (bounded) in case the API lags the push."""
+        data = self.view(repo, number)
+        for _ in range(HEAD_LAG_POLLS):
+            if str(data["headRefOid"]) == expect:
+                return data
+            self.sleep(self.interval)
+            data = self.view(repo, number)
+        if str(data["headRefOid"]) == expect:
+            return data
+        return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {expect[:12]}, head is now {data['headRefOid']}")
+
+    @staticmethod
+    def conflicting(data: dict[str, Any]) -> Result | None:
+        if data.get("mergeable") == "CONFLICTING" or data.get("mergeStateStatus") == "DIRTY":
+            return Result(EXIT_CONFLICT, "CONFLICT", "conflicts with the base branch; needs an agent")
+        return None
+
+    def update_branch(self, repo: str, number: int, pin: str) -> str | Result:
+        """Ask GitHub to merge the base into the branch (once), then return the new head to pin."""
+        code, _out, err = self.gh.gh_call(
+            "api", f"repos/{repo}/pulls/{number}/update-branch", "-X", "PUT", "-f", f"expected_head_sha={pin}"
         )
+        if code != 0:
+            if "conflict" in err.lower():
+                return Result(EXIT_CONFLICT, "CONFLICT", "update-branch hit a conflict; needs an agent")
+            return Result(EXIT_ERROR, "ERROR", f"update-branch failed: {err.strip()[:200]}")
+        for poll in range(1, UPDATE_WAIT_POLLS + 1):
+            data = self.view(repo, number)
+            head = str(data["headRefOid"])
+            if head != pin:
+                self.say(f"  updated the branch: pinned {pin[:12]} -> {head[:12]}")
+                return head
+            if poll < UPDATE_WAIT_POLLS:
+                self.sleep(self.interval)
+        return Result(EXIT_TIMEOUT, "TIMEOUT", f"update-branch accepted but the head stayed {pin[:12]}")
+
+    def one_queued(self, repo: str, number: int, expect: str = "") -> Result:
+        try:
+            started = self.clock()
+            first = self.pinned_view(repo, number, expect) if expect else self.view(repo, number)
+            if isinstance(first, Result):
+                return first
+            pin = str(first["headRefOid"])
+            updated = False
+            data = first
+            while True:
+                if (stop := self.conflicting(data)) is not None:
+                    return stop
+                if data.get("mergeStateStatus") == "BEHIND" and not updated and data.get("state") == "OPEN":
+                    updated = True
+                    new = self.update_branch(repo, number, pin)
+                    if isinstance(new, Result):
+                        return new
+                    pin = new
+                ended = self.wait_ci(repo, number, pin)
+                if ended is not None:
+                    return ended
+                data = self.view(repo, number)
+                if str(data["headRefOid"]) != pin:
+                    return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {data['headRefOid']}")
+                if (stop := self.conflicting(data)) is not None:
+                    return stop
+                if data.get("mergeStateStatus") == "BEHIND":
+                    if updated:
+                        return Result(
+                            EXIT_MERGE_REFUSED, "MERGE-REFUSED", "still behind the base after one update-branch"
+                        )
+                    continue  # the loop head updates once and waits for CI on the new head
+                break
+            ended = self.await_review(repo, number, pin, started + self.timeout)
+            if ended is not None:
+                return ended
+            open_threads = self.threads(repo, number)
+            if open_threads:
+                return Result(
+                    EXIT_THREADS,
+                    "THREADS",
+                    f"{len(open_threads)} unresolved review thread(s)",
+                    [line for t in open_threads for line in t.lines()],
+                )
+            return self.merge(repo, number, pin)
+        except ShipError as error:
+            return Result(error.code, "ERROR", str(error))
 
     def one(self, repo: str, number: int, expect: str = "") -> Result:
+        if self.queue:
+            return self.one_queued(repo, number, expect)
         try:
             started = self.clock()
             pin = expect or str(self.view(repo, number)["headRefOid"])
@@ -582,6 +684,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--delete-branch", action="store_true")
     p.add_argument(
+        "--queue",
+        action="store_true",
+        help="take the pull requests one at a time and stop at the first that does not merge; retry a lagging head, "
+        "update-branch once when behind, name each stop (exit 8 conflict, 9 protection refusal)",
+    )
+    p.add_argument(
+        "--pin", action="append", default=[], metavar="N=SHA", help="queue only: pin this 40-hex head for PR N"
+    )
+    p.add_argument(
         "--open-pr", action="store_true", help="push the branch and open the PR first (needs --title, --issue)"
     )
     p.add_argument("--title", default="")
@@ -603,6 +714,14 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error("--max-polls must be 1 to 1000")
     if not 0 <= args.wait_for_review <= MAX_WAIT_FOR_REVIEW:
         parser.error(f"--wait-for-review must be 0 to {MAX_WAIT_FOR_REVIEW}")
+    pins: dict[int, str] = {}
+    for item in args.pin:
+        number, _eq, sha = item.partition("=")
+        if not number.isdigit() or int(number) not in args.pr or not SHA.fullmatch(sha):
+            parser.error("--pin is N=<40-hex commit> for a pull request N named in the queue")
+        pins[int(number)] = sha
+    if (args.queue or args.pin) and (not args.queue or args.open_pr or args.expect_head):
+        parser.error("--queue takes pull request numbers (and --pin); --pin needs --queue; no --open-pr, --expect-head")
     if args.expect_head and (not SHA.fullmatch(args.expect_head) or len(args.pr) > 1 or args.open_pr):
         parser.error("--expect-head is one 40-hex commit for one existing PR")
     if args.branch and not BRANCH.fullmatch(args.branch):
@@ -652,6 +771,7 @@ def main(
         sleep=sleep,
         clock=clock,
         wait_for_review=args.wait_for_review,
+        queue=args.queue,
     )
     results: list[tuple[str, Result]] = []
     try:
@@ -665,12 +785,19 @@ def main(
             number, sha = open_pr(gh, repo, branch, args.base, args.title.strip(), issue)
             targets = [(number, sha)]
         else:
-            targets = [(n, args.expect_head) for n in args.pr]
+            pins = dict(item.split("=", 1) for item in args.pin)
+            targets = [(n, pins.get(str(n), args.expect_head)) for n in args.pr]
     except ShipError as error:
         output.write(out, f"ERROR {error}")
         return error.code
+    stopped = 0
     for number, expect in targets:
+        if stopped:
+            output.write(out, f"SKIPPED {repo}#{number} queue stopped at #{stopped}")
+            continue
         result = watcher.one(repo, number, expect)
+        if args.queue and result.code != EXIT_MERGED:
+            stopped = number
         results.append((f"{repo}#{number}", result))
         output.write(out, f"{result.word} {repo}#{number} {result.detail}".rstrip())
         for line in result.extra:

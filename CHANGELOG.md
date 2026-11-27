@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-ship --queue` (#586, epic #518): PRs one at a time, stopping at the first that does not merge (later ones print SKIPPED); `--pin N=SHA` re-reads a lagging head for a bounded time before HEAD-MOVED; a BEHIND branch gets update-branch once (guarded by expected_head_sha), is re-pinned and CI is waited for again; new stops CONFLICT (exit 8) and PROTECTED (exit 9) beside the existing CI-FAILED, THREADS (count) and MERGE-REFUSED. Single-PR behavior and exit codes unchanged. Tests: `tests/test_ship_queue.py`.
 - `safo-eval-canary` (#540, epic #527): runs the safo-eval fixtures on the two configured local models (read from `safo.localdraft`), compares each pass rate with a stored baseline and exits 1 with one `ALERT` line when a score drops by more than `--threshold` (default 0.10). A busy queue is retried (exit 75 if it stays busy), an unreachable server is reported (exit 3) and never scored as zero, a hostile baseline (symlink, FIFO, oversized, malformed, wrong types) is exit 2, and the baseline is written only with `--update-baseline`. Separate entry point because a `safo` subcommand needs the guard's `TOP_LEVEL_COMMANDS`. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
 - `safo-codex-run` (#557): harden git config handling. The repository config check is now an allowlist and the child git environment forces more settings off. Docs: `docs/codex-run.md`. Tests: `tests/test_codexrun.py`.
 - Update the sister-project rule now that the portable edition is public (#573)
