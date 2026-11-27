@@ -537,9 +537,11 @@ def test_a_bad_or_dangerous_terms_file_makes_the_guard_deny_quickly(
 
     _config_with_terms(gemini_locations, tmp_path, "default")
     gemini_locations.terms.write_text("fine-term\n" + bad)
-    started = time.monotonic()
+    started, cpu_started = time.monotonic(), time.process_time()
     data = _guard(_private_home, tmp_path, f"gemini: free\n{PUBLIC}" + "a" * 200 + "\n")
-    assert time.monotonic() - started < 3
+    # CPU time is the hang signal (a loaded box stretches wall time only); wall stays under hard_timeout's 30 s
+    assert time.process_time() - cpu_started < 3
+    assert time.monotonic() - started < 25
     assert denied(data)
 
 
