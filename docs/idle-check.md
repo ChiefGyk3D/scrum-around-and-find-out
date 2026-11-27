@@ -35,8 +35,8 @@ lead continue). `stop_hook_active: true` always allows, so one block cannot loop
    or in its command line (processes).
    Only PRs from a trusted author count (#601): the repo owner (the part of `owner/repo` before the slash), a login in
    `trusted_authors`, and a PR from the same repository (`isCrossRepository` false). A fork PR is skipped unless
-   `allow_forks` is on. Bots such as dependabot count only when listed (`app/` is ignored when matching, case is
-   ignored). `gh pr list` has no `authorAssociation` field, so association is not used. Fails closed: a missing or
+   `allow_forks` is on; the fork flag must be a real true or false either way. Bots count only when listed by their
+   exact login, which keeps the prefix gh gives apps (`app/dependabot`); an app is never the owner. Case is ignored. `gh pr list` has no `authorAssociation` field, so association is not used. Fails closed: a missing or
    unreadable author or fork flag is not trusted, and an old cache entry without an author is not trusted. A skipped
    PR is counted in the log field `skipped_untrusted` (failing or conflicting PRs only) and is never listed in the
    reason, so an outsider cannot steer dispatch with a PR.

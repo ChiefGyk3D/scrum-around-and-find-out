@@ -346,9 +346,8 @@ def store_prs(env: Mapping[str, str], repos: list[str], prs: list[tuple[str, dic
 
 
 def login_key(login: Any) -> str:
-    """A login in comparison form: lower case, without the `app/` prefix gh puts on bot logins."""
-    text = login.strip().lower() if isinstance(login, str) else ""
-    return text.removeprefix("app/")
+    """A login in comparison form: lower case. A GitHub App keeps its `app/` prefix, so `app/x` is never user `x`."""
+    return login.strip().lower() if isinstance(login, str) else ""
 
 
 def trusted_author(repo: str, pr: dict[str, Any], allow: set[str], forks: bool) -> bool:
@@ -358,7 +357,8 @@ def trusted_author(repo: str, pr: dict[str, Any], allow: set[str], forks: bool) 
     login = login_key(author.get("login")) if isinstance(author, dict) else ""
     if not login:
         return False
-    if not forks and pr.get("isCrossRepository") is not False:
+    fork = pr.get("isCrossRepository")
+    if not isinstance(fork, bool) or (fork and not forks):  # a malformed flag is untrusted even when forks are allowed
         return False
     return login == login_key(repo.split("/")[0]) or login in allow
 
@@ -487,7 +487,15 @@ def decide(
 def main_with(stdin: TextIO, stdout: TextIO, env: Mapping[str, str], runner: Runner = subprocess.run) -> int:
     now = time.time()
     stamp = dt.datetime.fromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%S")
-    row: dict[str, Any] = {"ts": stamp, "session": "", "running": None, "ready": None, "floor": None, "degraded": []}
+    row: dict[str, Any] = {
+        "ts": stamp,
+        "session": "",
+        "running": None,
+        "ready": None,
+        "floor": None,
+        "skipped_untrusted": 0,  # on every log path, including the stop_hook_active and error paths
+        "degraded": [],
+    }
     try:
         payload = loads(stdin.read(INPUT_CAP))
         if not isinstance(payload, dict):
