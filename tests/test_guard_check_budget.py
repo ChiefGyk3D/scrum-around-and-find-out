@@ -14,7 +14,7 @@ import pytest
 
 from geminidata import write_config
 from guardhealthdata import event, guard
-from hooksdata import agents_file
+from hooksdata import agents_file, read_log
 from safo import geminibrief
 from safo.gemini import Locations
 from safo.hooks import GUARD_TIMEOUT_SECONDS
@@ -84,3 +84,35 @@ def test_the_shell_check_is_given_the_computed_budget_and_still_fails_closed(
     out = guard(agents, _private_home, event("echo hello"))
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert seen and 3.5 < seen[0] <= 4.25
+
+
+# -- the budget never exceeds what is left of the hook's own (#615 review) ---------------------------------------------
+
+
+def test_the_check_deadline_is_bounded_by_what_is_left_of_the_hook_budget(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hooks_mode, "shell_check_seconds", lambda: 4.25)
+    monkeypatch.setattr(hooks_mode, "budget_points", lambda begun: (begun + 0.75, begun + 8.0, begun + 9.0))
+    seen: list[float] = []
+
+    def check(_command: str, deadline: float | None = None) -> None:
+        assert deadline is not None
+        seen.append(deadline - time.monotonic())
+
+    monkeypatch.setattr(geminibrief, "shell_command_class", check)
+    guard(agents, _private_home, event("echo hello"))
+    assert seen and seen[0] <= 0.75, seen
+
+
+def test_with_no_time_left_the_command_is_denied_at_once_as_input_shell(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun + 9.0))
+    called: list[str] = []
+    monkeypatch.setattr(geminibrief, "shell_command_class", lambda c, deadline=None: called.append(c))
+    out = guard(agents, _private_home, event("echo hello"))
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    last = read_log(_private_home)[-1]
+    assert (last["decision"], last["diagnostic"]) == ("error", "input-shell") and last["check_ms"] == 0
+    assert called == [], "no check is started with no time left"

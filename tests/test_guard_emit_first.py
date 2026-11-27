@@ -2744,6 +2744,8 @@ def test_a_decision_whose_deadline_has_passed_is_not_waited_for_or_written(
     monkeypatch.setattr(mod, "notice_unclaimed", blocker)
     monkeypatch.setattr(mod, "log_failure_pending", blocker)
     monkeypatch.setattr(mod, "budget_points", lambda begun: (begun - 3.0, begun - 0.001, begun + 9.0))
+    # Not the subject: the shell check, which with no time left denies at once as input-shell (#615), is stubbed out.
+    monkeypatch.setattr(mod, "shell_vendor_check", lambda *_a, **_k: None)
     # The mode read is injected: with decide_by already behind us its real read gets a zero budget, and on a slow
     # machine that read can lose the race and fall back to block (SAFO #188), which is not what this test is about.
     # What is asserted here is the passed deadline, so the mode is a fixed input, not a race.

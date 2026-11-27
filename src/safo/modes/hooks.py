@@ -1204,7 +1204,7 @@ def shell_check_seconds() -> float:
     return min(SHELL_CHECK_CAP_SECONDS, max(SHELL_CHECK_FLOOR_SECONDS, SHELL_CHECK_FLOOR_SECONDS * load / cores))
 
 
-def shell_vendor_check(payload: dict[str, Any]) -> None:
+def shell_vendor_check(payload: dict[str, Any], limit: float | None = None) -> None:
     """Deny a Bash command that goes straight to the vendor API or its key (#209): a cheap, fail-closed speed bump,
     not a sandbox. There is no exemption. The denial names the
     rule and the phrase class and never the command. An event without a usable command is left to the lead-wait rule,
@@ -1217,8 +1217,11 @@ def shell_vendor_check(payload: dict[str, Any]) -> None:
 
     # its own short budget, like the isolated Gemini check, so a late guard deadline never denies a clean command
     started = time.monotonic()
+    # The load-aware budget never exceeds what is left of the hook's own: `limit` is the guard's pre-decision deadline,
+    # and with none left the command is denied at once, unchecked (fail closed), so the decision is still written.
+    until = started + shell_check_seconds() if limit is None else min(started + shell_check_seconds(), limit)
     try:
-        found = geminibrief.shell_command_class(command, started + shell_check_seconds())
+        found = geminibrief.SHELL_UNVERIFIED if until <= started else geminibrief.shell_command_class(command, until)
     except Exception:  # fail closed: any error in the check is "could not be checked"; no exception text is kept
         found = geminibrief.SHELL_UNVERIFIED
     if found:
@@ -1273,7 +1276,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
     if payload.get("tool_name") == BASH_TOOL:
-        shell_vendor_check(payload)
+        shell_vendor_check(payload, deadline)
         lead_wait(ctx, args, payload, deadline, run)
         return
     if payload.get("tool_name") not in AGENT_TOOLS:

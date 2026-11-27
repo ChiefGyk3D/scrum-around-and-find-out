@@ -494,7 +494,9 @@ wrapper; it never repeats the command. A command that cannot be checked before t
 **The check's time budget (#615).** The deadline is not fixed. It starts at 3 s (it was 1.5 s) and grows with the
 one-minute load average per core, `3 s x load / cores` when that is above 3 s, up to a cap of 5 s, half the 10 s hook
 timeout, so the decision is still written in time. A load that cannot be read, or is not a number, gives the 3 s floor
-(a load that is infinite gives the cap). Nothing else changes: a check that still runs out is denied as above and logged
+(a load that is infinite gives the cap). The budget never exceeds what is left of the hook's own: the check's deadline is the lesser of the load-aware value and
+the guard's pre-decision deadline, and when none is left the command is denied at once, unchecked, as `input-shell`
+(fail closed). Nothing else changes: a check that still runs out is denied as above and logged
 as `input-shell` with its duration. The tradeoff: the check itself is slowed by a busy machine, and a fixed budget turned
 that load into denials of clean commands. A longer budget costs at most the cap in added wait on a command that is slow
 to check, and it never lets a command through that was not checked. Nothing here is a new measurement; the floor and the
