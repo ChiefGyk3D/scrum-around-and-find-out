@@ -38,7 +38,8 @@ safo audit | safo-draft digest board-drift -
 ## What it does
 
 - **Models.** `qwen3.5:4b` for short input, `gemma4:12b` when the prompt and facts exceed 600 characters; `--model`
-  overrides. `llm-local` is always called with stdin from /dev/null, because it hangs on an open stdin.
+  overrides. The short-input default is `qwen3.5:4b` today. Open pull request #515 proposes a different default; this
+  page says qwen until that merges. `llm-local` is always called with stdin from /dev/null, because it hangs on an open stdin.
 - **Checks before filing** (a failing draft is printed with the reasons and never filed, even with `--yes`). The
   same checks run on the body and on `--title` (a title failure is named `title: ...`): no em dash (U+2014 and the
   look-alike dashes; the horizontal bar U+2015 is not blocked), no IPv4 or IPv6 address, no
@@ -222,5 +223,5 @@ same counts per project. A `fact-error` mark replaces the earlier outcome of the
 | 13 | `gh` failed when filing or commenting (nonzero exit; the message has gh's own code and text) |
 | 75 | local queue still busy after the retries |
 
-Any other code is the `llm-local` exit code passed through, so a passed-through 10, 11, 12 or 13 is ambiguous: read the
+Any other code is the `llm-local` exit code passed through (3 when the server truncated the prompt, 4 when the prompt is over the model's cap; see [Local LLM](local-llm.md)), so a passed-through 10, 11, 12 or 13 is ambiguous: read the
 message. A failing `gh` is always 13, never gh's own code. The table is also in `safo-draft --help`. Before this change a decline exited 1.

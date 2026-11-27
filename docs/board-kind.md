@@ -1,8 +1,8 @@
-# Kind for a board's open cards, and a write cap for reconcile
+# Kind for a board's open cards, and write controls for reconcile
 
 Phase 1 of cleaning up a large board (#479). Two small tools, both safe to re-run.
 
-## `safo reconcile --max-writes N` and `--no-adds`
+## `safo reconcile --max-writes N`, `--no-adds` and `--closed-only`
 
 - `--max-writes N` stops the run after N mutations (an add counts one, each field write counts one). It prints
   `stopped at the write cap (N), re-run to continue` and exits 0: a planned stop, not drift. Reconcile is idempotent, so
@@ -10,10 +10,10 @@ Phase 1 of cleaning up a large board (#479). Two small tools, both safe to re-ru
   batch would do.
 - `--no-adds` repairs the cards already on the board (the Done status, the Done date, blank Area and defaults) and adds
   no missing work. A `NOT ADDED n cards` line says how many were left off.
-
 - `--closed-only` is phase 1 of a big cleanup: it writes only the Status and the Done date, and only on closed cards
   already on the board. Open cards are left alone (counted), nothing is added, and the blank Area and Priority of closed
-  cards are not touched. Use it with `--max-writes` for batches.
+  cards are not touched. It implies `--no-adds`. A `LEFT ALONE n open cards` line counts what it skipped. Use it with
+  `--max-writes` for batches.
 
 Reconcile never writes Kind, Epic or Effort. It prints them as `HUMAN` lines.
 
