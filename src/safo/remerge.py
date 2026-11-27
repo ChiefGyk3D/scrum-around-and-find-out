@@ -163,7 +163,7 @@ def resolve_table_page(base: str, ours: str, theirs: str) -> str | None:
 
 
 _SCRIPT_LINE = re.compile(r'^([A-Za-z0-9_-]+) = "safo\.[a-z0-9_]+:[a-z_]+"\n$')
-_SCRIPT_KEY = re.compile(r"^([A-Za-z0-9_-]+)\s*=")
+_SCRIPT_KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")  # a bare key, leading space allowed (valid TOML)
 
 
 def _script_block(block: list[str]) -> bool:
@@ -177,11 +177,11 @@ def resolve_pyproject(base: str, ours: str, theirs: str) -> str | None:
     not match the strict pattern, or any change outside the table goes to an agent.
     """
     lines = base.splitlines(keepends=True)
-    starts = [n for n, line in enumerate(lines) if line.rstrip() == "[project.scripts]"]
+    starts = [n for n, line in enumerate(lines) if line.strip() == "[project.scripts]"]
     if len(starts) != 1:
         return None
     first = starts[0] + 1
-    stop = next((n for n in range(first, len(lines)) if lines[n].startswith("[")), len(lines))
+    stop = next((n for n in range(first, len(lines)) if lines[n].lstrip().startswith("[")), len(lines))
     last = stop
     while last > first and not lines[last - 1].strip():
         last -= 1  # the blank lines that end the table are not inside it
@@ -189,8 +189,15 @@ def resolve_pyproject(base: str, ours: str, theirs: str) -> str | None:
     if merged is None:
         return None
     new = merged.splitlines(keepends=True)
-    end = next((n for n in range(first, len(new)) if new[n].startswith("[")), len(new))
-    keys = Counter(m.group(1) for line in new[first:end] if (m := _SCRIPT_KEY.match(line)))
+    end = next((n for n in range(first, len(new)) if new[n].lstrip().startswith("[")), len(new))
+    keys: Counter[str] = Counter()
+    for line in new[first:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _SCRIPT_KEY.match(line)
+        if match is None:  # a quoted key, a dotted key or a continued value: the rule cannot reason about it
+            return None
+        keys[match.group(1)] += 1
     return None if any(n > 1 for n in keys.values()) else merged
 
 

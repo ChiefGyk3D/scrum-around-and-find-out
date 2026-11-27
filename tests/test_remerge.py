@@ -466,3 +466,43 @@ def test_pyproject_a_value_outside_the_pattern_is_refused(tmp_path: Path, line: 
 
 def test_pyproject_resolver_is_registered() -> None:
     assert remerge.RESOLVERS["pyproject.toml"] is remerge.resolve_pyproject
+
+
+def test_pyproject_an_indented_existing_key_still_counts_as_a_duplicate(tmp_path: Path) -> None:
+    base = PYPROJECT.replace(LAST, ' safo-card = "safo.card_cli:entry"\n')
+    ours = {
+        "pyproject.toml": base.replace(
+            ' safo-card = "safo.card_cli:entry"\n',
+            ' safo-card = "safo.card_cli:entry"\n' + 'safo-card = "safo.dup:entry"\n',
+        )
+    }
+    theirs = {
+        "pyproject.toml": base.replace(
+            ' safo-card = "safo.card_cli:entry"\n',
+            ' safo-card = "safo.card_cli:entry"\n' + 'safo-theirs = "safo.theirs:entry"\n',
+        )
+    }
+    _, work = scene(tmp_path, {"pyproject.toml": base}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+@pytest.mark.parametrize("existing", ['"safo-card" = "safo.card_cli:entry"\n', 'safo.card = "safo.card_cli:entry"\n'])
+def test_pyproject_a_quoted_or_dotted_key_in_the_table_refuses_the_file(tmp_path: Path, existing: str) -> None:
+    base = PYPROJECT.replace(LAST, existing)
+    ours = {"pyproject.toml": base.replace(existing, existing + 'safo-ours = "safo.ours:entry"\n')}
+    theirs = {"pyproject.toml": base.replace(existing, existing + 'safo-theirs = "safo.theirs:entry"\n')}
+    _, work = scene(tmp_path, {"pyproject.toml": base}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+@pytest.mark.parametrize(
+    "line", [' safo-x = "safo.x:entry"\n', 'safo-x\t= "safo.x:entry"\n', '"safo-x" = "safo.x:entry"\n']
+)
+def test_pyproject_an_added_line_that_is_not_the_strict_shape_is_refused(tmp_path: Path, line: str) -> None:
+    ours = with_script(line)
+    theirs = with_script('safo-theirs = "safo.theirs:entry"\n')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
