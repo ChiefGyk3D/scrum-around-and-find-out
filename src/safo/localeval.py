@@ -54,7 +54,9 @@ INSTRUCTIONS: dict[str, str] = {
     "pr-summary": "Write a pull request summary for the diff or notes below: a one-line title, then short bullets. "
     "Use only what is in the input.",
     "commit-message": "Write one git commit message for the change below: a subject line of at most 72 characters in "
-    "the form type: subject (type is feat, fix, docs, refactor, test or chore), a blank line, then a short body.",
+    "the form type: subject (type is feat, fix, docs, refactor, test or chore), a blank line, then a short body. "
+    "Use fix: only for a bug fix, feat: only for a new user-visible capability, docs: only for documentation, "
+    "chore: for dependency bumps and tooling, refactor: for restructuring with no behavior change.",
     "first-pass-review-comment": "Review the small diff below. Find the single planted defect and write one review "
     "comment that names the defect and the line or function it is in.",
     "doc-skeleton": "Write a Markdown documentation skeleton for the topic below: a title, then one heading per "

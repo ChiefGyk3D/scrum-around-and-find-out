@@ -9,7 +9,7 @@
   "forbidden": [
     "\\bfix:",
     "\\bdocs:",
-    "\\byaml\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|includ(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\byaml\\b|\\byaml\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
     "--format=yml"
   ],
   "max_chars": 600,
@@ -20,6 +20,7 @@
   ],
   "correct_alts": [
     "feat: JSON output for reportctl summary\n\nPass --format=json to get machine-readable results; text stays the default. tests/test_summary.py covers it.",
-    "feat: let reportctl summary print JSON\n\nThe new --format=json option emits the summary as JSON and leaves the default untouched. Cases live in tests/test_summary.py."
+    "feat: let reportctl summary print JSON\n\nThe new --format=json option emits the summary as JSON and leaves the default untouched. Cases live in tests/test_summary.py.",
+    "feat: add --format=json to reportctl summary\n\nText stays the default. Tests are in tests/test_summary.py. YAML output is out of scope for this change."
   ]
 }

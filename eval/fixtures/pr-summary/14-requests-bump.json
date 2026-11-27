@@ -15,7 +15,7 @@
     }
   ],
   "forbidden": [
-    "\\burllib3\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|upgrad(?:e|es|ed)|updat(?:e|es|ed)|pin(?:s|ned)?|includ(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\burllib3\\b|\\burllib3\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
     "\\b2\\.32\\.1\\b",
     "\\b421\\b"
   ],
@@ -27,6 +27,7 @@
   ],
   "correct_alts": [
     "Update requests to 2.32.3.\n- requirements.txt moves from 2.31.0 to the new release and the lockfile is regenerated.\n- No source edits were required.\n- The suite of 412 tests is green.",
-    "A routine upgrade of the requests library.\n\n- Old version: 2.31.0; new version: 2.32.3, pinned in requirements.txt.\n- Lock regenerated with pip-compile.\n- All four hundred twelve tests still pass."
+    "A routine upgrade of the requests library.\n\n- Old version: 2.31.0; new version: 2.32.3, pinned in requirements.txt.\n- Lock regenerated with pip-compile.\n- All four hundred twelve tests still pass.",
+    "Bump requests to 2.32.3\n- requests moves from 2.31.0 to 2.32.3 in requirements.txt.\n- The lockfile is regenerated and all 412 tests pass.\n- urllib3 is not bumped in this PR."
   ]
 }

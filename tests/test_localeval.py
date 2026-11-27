@@ -1467,3 +1467,104 @@ def test_cli_partial_judging_then_the_rest_with_replace(tmp_path: Path) -> None:
     assert "| pr-summary | local-qwen |" in report()  # the stored file is untouched
     assert ingest_cli(1, flip=True, extra=("--replace",)) == 0
     assert json.loads((out / "calibration-agreement.json").read_text())["replaced"]
+
+
+# ---- #484 fixture patterns: a forbidden pattern for a dropped idea scores ADOPTING it, not mentioning it
+
+# fixture id -> a fragment of the forbidden pattern that encodes the dropped idea (the excluded item)
+ADOPTION_FIXTURES: dict[str, str] = {
+    "pr-summary/07-request-timeout": "per-route",
+    "pr-summary/08-syncctl-dry-run": "retry",
+    "pr-summary/10-ios-keychain-fix": "Android",
+    "pr-summary/14-requests-bump": "urllib3",
+    "pr-summary/17-retrypolicy-extract": "jitter",
+    "pr-summary/19-focus-ring": "dark theme",
+    "issue-draft/07-android-locale-crash": "widget",
+    "issue-draft/08-flaky-sync-test": "retry decorator",
+    "issue-draft/09-p95-latency-regression": "cold start",
+    "issue-draft/12-cookie-samesite": "SameSite=Strict",
+    "issue-draft/20-orderservice-refactor": "CamelCase constants",
+    "commit-message/07-ios-reachability-crash": "Android",
+    "commit-message/11-pytest-bump": "test_cache",
+    "commit-message/15-spdx-apache-headers": "GPL",
+    "commit-message/20-reportctl-json": "yaml",
+}
+
+
+@pytest.mark.parametrize("fid", sorted(ADOPTION_FIXTURES))
+def test_dropped_idea_fixture_passes_an_out_of_scope_mention_and_fails_adopting_it(fid: str) -> None:
+    f = shipped()[fid]
+    term = ADOPTION_FIXTURES[fid]
+    # (a) a correct output that names the excluded item as out of scope passes
+    scoped = [o for o in f.correct_alts if term.lower() in o.lower()]
+    assert scoped, f"{fid}: no correct_alts entry mentions {term!r} as out of scope"
+    for o in scoped:
+        s = le.score_output(f, o)
+        assert s.passed and not s.forbidden_hits, (fid, o, s)
+    # (b) a wrong output that adopts it fails ON the dropped-idea pattern
+    adopting = [w for w in f.wrong if term.lower() in w.lower()]
+    assert adopting, f"{fid}: no wrong entry adopts {term!r}"
+    assert any(any(term.lower() in h.lower() for h in le.score_output(f, w).forbidden_hits) for w in adopting), fid
+
+
+def test_pr_summary_11_does_not_punish_the_inputs_own_no_code_changes_phrase() -> None:
+    f = shipped()["pr-summary/11-quickstart-port"]
+    assert not any("code" in p for p in f.forbidden)
+    out = (
+        "Fix the quickstart URL\n- docs/quickstart.md pointed at port 8080; the container listens on 8443.\n"
+        "- The URL is now https://app.example.com:8443 and the curl example drops -k.\n- No code changes."
+    )
+    s = le.score_output(f, out)
+    assert s.passed and not s.forbidden_hits, s
+
+
+def test_triage_18_epic_echo_with_its_description_is_not_a_wrong_label_but_a_wrong_epic_still_is() -> None:
+    f = shipped()["issue-triage/18-thread-search-crash"]
+    assert le.score_output(f, '{"label": "bug", "epic": "E-search (index, queries)"}').passed
+    bad = le.score_output(f, '{"label": "bug", "epic": "E-searching"}')
+    assert not bad.passed and bad.forbidden_hits
+    assert not le.score_output(f, '{"label": "bug", "epic": "E-platform"}').passed
+
+
+def test_commit_message_prompt_states_the_commit_type_rules() -> None:
+    p = le.build_prompt(shipped()["commit-message/11-pytest-bump"])
+    for rule in (
+        "Use fix: only for a bug fix",
+        "feat: only for a new user-visible capability",
+        "docs: only for documentation",
+        "chore: for dependency bumps and tooling",
+        "refactor: for restructuring with no behavior change",
+    ):
+        assert rule in p, rule
+
+
+_NESTED_QUANTIFIER = re.compile(r"\([^()]*[+*][^()]*\)[+*]")  # a group with an inner + or * under an outer + or *
+
+
+def has_nested_unbounded_quantifier(pattern: str) -> bool:
+    return bool(_NESTED_QUANTIFIER.search(pattern))
+
+
+def test_shipped_forbidden_patterns_have_no_nested_unbounded_quantifier() -> None:
+    fixtures = le.load_fixtures(FIXTURES)
+    assert len(fixtures) == FIXTURE_TOTAL
+    for f in fixtures:
+        for p in (*f.forbidden, *(v for x in f.facts for v in x.variants)):
+            assert not has_nested_unbounded_quantifier(p), (f.id, p)
+    # the guard bites on a known ReDoS shape and passes the bounded forms the fixtures use
+    assert has_nested_unbounded_quantifier(r"(a+)+$") and has_nested_unbounded_quantifier(r"(\w*\s)*x")
+    assert not has_nested_unbounded_quantifier(r"(?:\W+\w+){0,4}x") and not has_nested_unbounded_quantifier(
+        r"a.{0,20}b"
+    )
+
+
+def test_adoption_patterns_run_fast_on_a_long_hostile_input() -> None:
+    import time
+
+    hostile = ("add " + "x" * 30 + " ") * 4000
+    for fid in ADOPTION_FIXTURES:
+        f = shipped()[fid]
+        t0 = time.perf_counter()
+        for p in f.forbidden:
+            re.search(p, hostile, re.IGNORECASE)
+        assert time.perf_counter() - t0 < 2.0, fid

@@ -19,7 +19,7 @@
     }
   ],
   "forbidden": [
-    "\\bjitter\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|includ(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bjitter\\b|\\bjitter\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
     "\\bbehavior (?:change|differs)",
     "\\b(?:max_attempts|attempts)\\D{0,5}\\b5\\b"
   ],
@@ -31,6 +31,7 @@
   ],
   "correct_alts": [
     "Pull retry handling out of Client into a RetryPolicy class.\n- src/retry.py defines RetryPolicy with max_attempts and a default backoff of 250 ms.\n- src/client.py now holds a policy instead of its own loop.\n- Six new tests; behavior is unchanged.",
-    "A pure move: retries live in their own class now.\n\n- RetryPolicy (src/retry.py) owns attempts and the 250 backoff value.\n- src/client.py just uses it.\n- 6 test cases were added for the new module."
+    "A pure move: retries live in their own class now.\n\n- RetryPolicy (src/retry.py) owns attempts and the 250 backoff value.\n- src/client.py just uses it.\n- 6 test cases were added for the new module.",
+    "Extract RetryPolicy into src/retry.py\n- src/client.py now uses a RetryPolicy with a 250 ms backoff.\n- 6 new cases cover it and behavior is the same.\n- The jitter TODO is left for later."
   ]
 }
