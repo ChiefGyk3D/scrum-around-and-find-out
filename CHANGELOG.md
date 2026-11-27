@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `safo-shared-venv` (#534, epic #518): one shared, read-only, hash-locked venv per lockfile, built once under a file
+  lock (`pip install --require-hashes --no-deps --only-binary=:all:`, never system site-packages, atomic rename into
+  place) and keyed by the lockfile hash, the interpreter identity and the acquisition policy. Prints the interpreter
+  path. Strict lockfile grammar, a private copy read through a descriptor, an allowlisted child environment, isolated
+  pip, owner, mode and manifest checks on reuse, root ancestor checks, interpreter binding (resolved
+  once, trusted chain, re-verified on every use), whitelisted acquisition values (https URL or absolute local path, never credentials), child output never relayed, validated numeric parameters
+  and a stated trust boundary. `--gc --max-age-days N` lists old
+  venvs it built, `--delete` removes them. Docs: `docs/shared-venv.md`. Tests: `tests/test_sharedvenv.py`.
 - `safo-remerge` (#588): a second resolver settles `pyproject.toml` conflicts when both sides only add `key = "MODULE:FUNCTION"` lines to the `[project.scripts]` table (ours first, no duplicate key, strict value pattern); every other pyproject conflict still goes to an agent. Docs: `docs/remerge.md`. Tests: `tests/test_remerge.py`.
 - `safo-brief-scan` hardening (#537): `--hook` mode ignores `safo-scan-allow` markers (content cannot suppress its own findings), the marker's reason gets the full check (credentials, private data, deny list), and JSON object keys are scanned as text and never printed raw in a label. Docs: `docs/brief-scan.md`. Tests: `tests/test_briefscan.py`.
 - `safo-idle-check` (#601): count a PR as ready work only when its author is the repo owner or in `trusted_authors` / `SAFO_IDLE_TRUSTED` and it is not a fork PR (`allow_forks` / `SAFO_IDLE_FORKS=1`); an unreadable author is not trusted; skipped PRs are counted in the log field `skipped_untrusted`, never listed. Docs: `docs/idle-check.md`. Tests: `tests/test_idlecheck.py`.

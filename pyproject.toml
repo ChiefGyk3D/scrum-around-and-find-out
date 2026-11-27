@@ -38,6 +38,7 @@ safo-eval-canary = "safo.evalcanary:run"
 safo-brief-scan = "safo.briefscan:run"
 safo-threads = "safo.threads:run"
 safo-runner-check = "safo.runner_check:run"
+safo-shared-venv = "safo.sharedvenv:run"
 safo-digest = "safo.digest:run"
 
 [tool.setuptools.dynamic]

@@ -29,6 +29,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
 - [safo-rmguard](rmguard.md): the Bash hook that blocks wildcard and parent deletes in shared dev directories.
 - [safo-idle-check](idle-check.md): the Stop hook that blocks the end of a turn while workers are under the floor and ready work exists.
+- [safo-shared-venv](shared-venv.md): one read-only, hash-locked venv per lockfile shared by every agent, built once under a lock, with its trust boundary.
 - [safo-codex-run repository checks](codex-run.md): what the wrapper checks in a worktree before codex starts, and the residual risk it does not close.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
 - [Protection audit](protection-audit.md): `safo protection --all` audits every board repository's default branch against the standard.
