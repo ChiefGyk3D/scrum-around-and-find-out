@@ -105,9 +105,8 @@ def classify(env: Mapping[str, str]) -> Trust:
     elif event == "schedule":
         if on_default and not fork:
             return Trust(event, ref, "scheduled run on the default branch")
-    elif event == "workflow_dispatch":
-        if (_BRANCH.fullmatch(ref) or _TAG.fullmatch(ref)) and not fork:
-            return Trust(event, ref, "manual run, which GitHub allows only to users with write access")
+    elif event == "workflow_dispatch" and (_BRANCH.fullmatch(ref) or _TAG.fullmatch(ref)) and not fork:
+        return Trust(event, ref, "manual run, which GitHub allows only to users with write access")
     raise ConfigError(refusal)
 
 
