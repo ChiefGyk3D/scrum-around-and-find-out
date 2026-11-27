@@ -8,10 +8,10 @@ counted workers at turn end. This check counts them in code and blocks the end o
 
 ## Shape (a separate check; no frozen code is touched)
 
-- New module `safo.idlecheck`, new console script `safo-idle-check` (and `python3 -m safo.idlecheck`). It is its own
+- New module `idlecheck` in the safo package, new console script `safo-idle-check`. It is its own
   Stop-hook entry point, like `safo-guard`. It does not use argparse, does not import the mode registry, and adds
   nothing to `TOP_LEVEL_COMMANDS`. The frozen guard code, `safo hooks stop` and `settings.json` are not edited.
-- The only shared-file change is one line in `pyproject.toml` `[project.scripts]` (the console script).
+- The only shared-file change is one line in the scripts table of the project file (the console script).
 
 ## What it decides
 

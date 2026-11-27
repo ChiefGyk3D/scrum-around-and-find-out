@@ -345,3 +345,86 @@ def test_cache_with_big_rollups_is_still_read_back(env: Env) -> None:
     assert (env.tmp / "idle-check-prs.json").stat().st_size < 100_000  # only the fields the rule reads are kept
     env.run()
     assert len(env.calls) == 1
+
+
+def test_fifo_queue_does_not_hang_and_is_degraded(env: Env) -> None:
+    fifo = env.tmp / "q.fifo"
+    os.mkfifo(fifo)
+    env.vars["SAFO_IDLE_QUEUE"] = str(fifo)
+    _, out = env.run()
+    assert out is not None and "DEGRADED" in out["systemMessage"] and "queue" in out["systemMessage"]
+
+
+def test_symlinked_queue_is_refused(env: Env) -> None:
+    link = env.tmp / "q.link"
+    link.symlink_to(env.queue)
+    env.queue.write_text(TABLE)
+    env.vars["SAFO_IDLE_QUEUE"] = str(link)
+    _, out = env.run()
+    assert out is not None and "DEGRADED" in out["systemMessage"]
+
+
+def test_oversized_queue_is_degraded_not_truncated(env: Env) -> None:
+    env.queue.write_text("x" * (idlecheck.QUEUE_CAP + 10) + "\nREADY: tail item\n")
+    _, out = env.run()
+    assert out is not None and "DEGRADED" in out["systemMessage"] and "tail" in out["systemMessage"]
+
+
+def test_a_negated_ready_state_is_not_ready() -> None:
+    head = "| item | depends on | state |\n|---|---|---|\n"
+    table = head + "| a | none | not ready |\n| b | none | never ready |\n| c | none | ready |\n"
+    assert idlecheck.parse_queue(table) == ["c"]
+
+
+def test_branch_match_respects_token_boundaries(env: Env) -> None:
+    env.prs["o/r"] = [pr(8, mergeable="CONFLICTING", headRefName="feat/x-8")]
+    make_subagent(env.projects, "a", "work on branch feat/x-80")
+    _, out = env.run()
+    assert out is not None and "o/r#8" in out["reason"]
+
+
+def test_one_failing_source_does_not_hide_the_other(env: Env) -> None:
+    env.prs["o/r"] = [pr(7, mergeable="CONFLICTING", headRefName="fix-7")]
+    make_proc(env.proc, 20, 1, "timeout 3300 codex exec work on fix-7")
+    _, out = env.run({"transcript_path": ""})  # the registry is unreadable, the process table is not
+    assert out is not None and "DEGRADED" in out["systemMessage"] and "agents" in out["systemMessage"]
+    assert env.rows()[-1]["ready"] == 0  # the process text was still read, so PR 7 is covered
+
+
+def test_output_text_is_escaped(env: Env) -> None:
+    env.prs["o/r"] = [pr(1, mergeable="CONFLICTING", title="::error::boom" + chr(27) + "[31m")]
+    _, out = env.run()
+    assert out is not None
+    assert "::" not in out["reason"] and chr(27) not in out["reason"]
+
+
+def test_event_with_duplicate_keys_is_degraded(env: Env) -> None:
+    out = io.StringIO()
+    idlecheck.main_with(io.StringIO('{"a": 1, "a": 2}'), out, env.vars, runner=env.runner)
+    assert "DEGRADED" in out.getvalue()
+
+
+def test_config_with_duplicate_keys_is_degraded(env: Env) -> None:
+    cfg = env.tmp / ".config" / "safo"
+    cfg.mkdir(parents=True)
+    (cfg / "idle-check.json").write_text('{"floor": 1, "floor": 9}')
+    _, out = env.run()
+    assert out is not None and "DEGRADED" in out["systemMessage"]
+
+
+def test_read_event_returns_when_a_writer_keeps_the_pipe_open() -> None:
+    rd, wr = os.pipe()
+    try:
+        os.write(wr, b'{"session_id": "s"}')
+        began = time.monotonic()
+        with os.fdopen(rd, "r", closefd=False) as stream:
+            text = idlecheck.read_event(stream, wait=5.0).read()
+        assert text == '{"session_id": "s"}' and time.monotonic() - began < 2.5
+        os.write(wr, b'{"half": ')  # an incomplete event on an open pipe ends at the deadline
+        began = time.monotonic()
+        with os.fdopen(rd, "r", closefd=False) as stream:
+            idlecheck.read_event(stream, wait=0.3)
+        assert time.monotonic() - began < 2.5
+    finally:
+        os.close(rd)
+        os.close(wr)

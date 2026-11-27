@@ -17,6 +17,7 @@ import json
 import os
 import re
 import select
+import stat
 import subprocess
 import sys
 import time
@@ -25,6 +26,9 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TextIO
+
+from safo import output
+from safo.bounded import loads
 
 DEFAULT_FLOOR = 6
 DEFAULT_WINDOW = 300.0
@@ -43,7 +47,8 @@ LOG_CAP = 5_000_000
 PR_FIELDS = "number,title,headRefName,isDraft,mergeable,reviewDecision,statusCheckRollup"
 DEFAULT_QUEUE = ".local/share/agent-box-dev/QUEUE.md"
 DEFAULT_LOG = ".local/share/safo-dev/idle-check.log"
-JOB = re.compile(r"(?:^|[\s/])codex(?:\.js)? exec(?:\s|$)|daybreak-run")
+JOB = re.compile(r"(?:^|[\s/])codex(?:\.js)?\sexec\b|daybreak-run")
+NEGATED = re.compile(r"\b(?:not|never|isn't|no)\b[^;,.]{0,20}\bready\b")
 SELF = re.compile(r"idlecheck|safo-idle-check")
 NOT_READY = ("running", "blocked", "held", "hold", "done", "merged", "waits", "owner", "closed")
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -61,7 +66,7 @@ def load_config(env: Mapping[str, str]) -> dict[str, Any]:
     path = Path(env.get("HOME", "")) / ".config" / "safo" / "idle-check.json"
     try:
         raw = path.read_bytes()[:INPUT_CAP] if path.exists() else b""
-        data = json.loads(raw) if raw else {}
+        data = loads(raw) if raw else {}
     except (OSError, ValueError) as err:
         raise Degraded("config: idle-check.json unreadable") from err
     if isinstance(data, dict):
@@ -126,7 +131,7 @@ def last_line(path: Path) -> bytes:
 
 def finished(path: Path) -> bool:
     try:
-        entry = json.loads(last_line(path))
+        entry = loads(last_line(path))
     except (OSError, ValueError):
         return False
     message = entry.get("message") if isinstance(entry, dict) else None
@@ -206,27 +211,44 @@ def parse_queue(text: str) -> list[str]:
         name, dep, state = cells[0], cells[1].lower(), cells[2].lower()
         if not name or state.startswith(NOT_READY):
             continue
-        says_ready = re.search(r"\bready\b", state) is not None
+        says_ready = re.search(r"\bready\b", state) is not None and NEGATED.search(state) is None
         deps_met = dep in ("", "none", "-")
         if says_ready or (deps_met and state in ("", "todo", "queued", "unstarted")):
             items.append(name)
     return items
 
 
+def read_regular(path: str, limit: int) -> bytes:
+    """At most `limit` bytes of a regular file, opened without blocking and without following a link (a FIFO or a
+    swapped-in symlink must not hang or redirect the hook)."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read(limit)
+    finally:
+        os.close(fd)
+
+
 def read_queues(paths: list[str]) -> list[str]:
     items: list[str] = []
     for name in paths:
         try:
-            with open(os.path.expanduser(name), "rb") as fh:
-                items.extend(parse_queue(fh.read(QUEUE_CAP).decode("utf-8", "replace")))
+            raw = read_regular(os.path.expanduser(name), QUEUE_CAP + 1)
         except OSError as err:
-            raise Degraded("queue: a queue file is unreadable") from err
+            raise Degraded("queue: a queue file is unreadable (missing, not a regular file or a link)") from err
+        if len(raw) > QUEUE_CAP:
+            raise Degraded(f"queue: a queue file is over {QUEUE_CAP} bytes, so its tail would be missed")
+        items.extend(parse_queue(raw.decode("utf-8", "replace")))
     return items
 
 
 def names_pr(text: str, number: int, branch: str) -> bool:
     pattern = rf"(?<![\w/])#{number}(?!\d)|pull/{number}(?!\d)|\bPR #?{number}(?!\d)"
-    return re.search(pattern, text) is not None or bool(branch and branch in text)
+    if re.search(pattern, text) is not None:
+        return True
+    return bool(branch) and re.search(rf"(?<![\w-]){re.escape(branch)}(?![\w-])", text) is not None
 
 
 BAD_CHECKS = {"FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"}
@@ -256,7 +278,7 @@ def fetch_one(repo: str, runner: Runner, cwd: str, began: float) -> list[dict[st
     argv = ["gh", "pr", "list", "--repo", repo, "--state", "open", "--limit", "50", "--json", PR_FIELDS]
     try:
         done = runner(argv, capture_output=True, text=True, timeout=min(GH_TIMEOUT, left), cwd=cwd, check=False)
-        data = json.loads(done.stdout) if done.returncode == 0 else None
+        data = loads(done.stdout, CACHE_CAP) if done.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return (
@@ -288,7 +310,7 @@ def cached_prs(
 ) -> list[tuple[str, dict[str, Any]]] | None:
     """The PR list of the last complete scan of exactly these repos, if it is younger than ttl; else None."""
     try:
-        data = json.loads(cache_path(env).read_bytes()[:CACHE_CAP])
+        data = loads(cache_path(env).read_bytes()[:CACHE_CAP], CACHE_CAP)
         fresh = 0 <= now - float(data["ts"]) <= ttl and data["repos"] == repos
         return [(r, p) for r, p in data["prs"]] if fresh else None
     except (OSError, ValueError, KeyError, TypeError):
@@ -354,10 +376,10 @@ def reason_text(running: int, floor: int, ready: list[str], notes: list[str]) ->
     lines = [
         f"idle-check: {running} of {floor} workers running and ready work exists. Dispatch it before ending the turn:"
     ]
-    lines += [f"- {x}" for x in ready[:LIST_CAP]]
+    lines += [f"- {output.line(x)}" for x in ready[:LIST_CAP]]
     if len(ready) > LIST_CAP:
         lines.append(f"- ...and {len(ready) - LIST_CAP} more")
-    lines += [f"DEGRADED: {n}" for n in notes]
+    lines += [f"DEGRADED: {output.line(n)}" for n in notes]
     return "\n".join(lines)
 
 
@@ -370,14 +392,17 @@ def decide(
     window = as_float(cfg.get("window_seconds"), DEFAULT_WINDOW)
     notes: list[str] = []
     busy: list[str] = []
-    try:
-        agents = count_subagents(str(payload.get("transcript_path") or ""), now, window)
-        procs = count_processes(Path(env.get("SAFO_IDLE_PROC") or "/proc"))
-        busy = [*agents, *procs]
-    except Degraded as err:
-        notes.append(str(err))
-    except Exception:
-        notes.append("agents: unexpected failure reading the running workers")
+    sources: tuple[tuple[str, Callable[[], list[str]]], ...] = (
+        ("agents", lambda: count_subagents(str(payload.get("transcript_path") or ""), now, window)),
+        ("processes", lambda: count_processes(Path(env.get("SAFO_IDLE_PROC") or "/proc"))),
+    )
+    for name, source in sources:  # each source on its own: one failing never hides the other
+        try:
+            busy.extend(source())
+        except Degraded as err:
+            notes.append(str(err))
+        except Exception:
+            notes.append(f"{name}: unexpected failure reading the running workers")
     ready: list[str] = []
     try:
         default_queue = [str(Path(env.get("HOME", "")) / DEFAULT_QUEUE)]
@@ -410,7 +435,11 @@ def decide(
             return {"systemMessage": text}, "warn", fields
         return {"decision": "block", "reason": text}, "block", fields
     if notes:
-        return {"systemMessage": "idle-check " + "; ".join(f"DEGRADED: {n}" for n in notes)}, "degraded", fields
+        return (
+            {"systemMessage": "idle-check " + "; ".join(f"DEGRADED: {output.line(n)}" for n in notes)},
+            "degraded",
+            fields,
+        )
     return {}, "allow", fields
 
 
@@ -419,7 +448,7 @@ def main_with(stdin: TextIO, stdout: TextIO, env: Mapping[str, str], runner: Run
     stamp = dt.datetime.fromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%S")
     row: dict[str, Any] = {"ts": stamp, "session": "", "running": None, "ready": None, "floor": None, "degraded": []}
     try:
-        payload = json.loads(stdin.read(INPUT_CAP))
+        payload = loads(stdin.read(INPUT_CAP))
         if not isinstance(payload, dict):
             raise ValueError("event is not an object")
         row["session"] = str(payload.get("session_id", ""))[:64]
@@ -451,7 +480,7 @@ def stats(env: Mapping[str, str], out: TextIO) -> int:
     days: dict[str, Counter[str]] = {}
     for line in lines:
         with contextlib.suppress(ValueError, AttributeError, KeyError, TypeError):
-            row = json.loads(line)
+            row = loads(line)
             days.setdefault(row["ts"][:10], Counter())[row["decision"]] += 1
     for day in sorted(days):
         c = days[day]
@@ -459,15 +488,30 @@ def stats(env: Mapping[str, str], out: TextIO) -> int:
     return 0
 
 
-def read_event(stream: TextIO) -> TextIO:
-    """The event from a pipe, bounded; a terminal or a silent pipe is an empty event (reported as degraded)."""
+def read_event(stream: TextIO, wait: float = INPUT_WAIT) -> TextIO:
+    """The event from a pipe, read in chunks against ONE deadline (`wait` seconds in all). It stops at end of input, at
+    the size cap, at the deadline, or as soon as what has arrived is a whole JSON document, so a writer that sends the
+    event and keeps the pipe open cannot hold the hook. A terminal or a silent pipe is an empty event (degraded)."""
     if stream.isatty():
         return io.StringIO("")
+    until = time.monotonic() + wait
+    data = b""
     try:
-        ready, _, _ = select.select([stream], [], [], INPUT_WAIT)
+        fd = stream.fileno()
+        while len(data) < INPUT_CAP:
+            left = until - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+            with contextlib.suppress(ValueError):
+                loads(data)
+                break  # a complete document: do not wait for the writer to close
     except (OSError, ValueError):
-        return io.StringIO("")
-    return stream if ready else io.StringIO("")
+        pass
+    return io.StringIO(data.decode("utf-8", "replace"))
 
 
 def run() -> None:
