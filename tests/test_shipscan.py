@@ -204,3 +204,40 @@ def test_cd_state_does_not_leak_between_run_texts() -> None:
 
 def test_a_listed_name_that_is_not_a_plain_command_name_is_never_accepted() -> None:
     assert shipscan.analyze("-j x", commands=["-j"]).problem
+
+
+def test_the_directory_each_file_is_run_from_is_reported() -> None:
+    facts = shipscan.analyze("bash a.sh\ncd ci\nbash b.sh\n./c.sh")
+    assert facts.runs == (("a.sh", ""), ("ci/b.sh", "ci"), ("ci/c.sh", "ci"))
+    assert shipscan.analyze("bash b.sh", cwd="ci").runs == (("ci/b.sh", "ci"),)
+    assert shipscan.analyze("cd sub\nbash b.sh", cwd="ci").runs == (("ci/sub/b.sh", "ci/sub"),)
+
+
+@pytest.mark.parametrize(
+    ("text", "ok"),
+    [
+        ("", True),
+        ("echo hi", True),
+        ("#!/bin/bash", True),
+        ("#!/bin/sh\nrest", True),
+        ("#!/usr/bin/env bash", True),
+        ("#!/usr/bin/env python3\r\nrest", True),
+        ("#!/usr/bin/node", True),
+        ("#!/usr/bin/pwsh", True),
+        ("# not a shebang", True),
+        ("x\n#!/bin/zsh", True),  # only the first line is a shebang
+        ("#!/bin/zsh", False),
+        ("#!/bin/bash -e", False),
+        ("#!/bin/bash\t", False),
+        ("#!/usr/bin/env -S bash", False),
+        ("#!/usr/bin/env bash -e", False),
+        ("#!/opt/bin/bash", False),
+        ("#!/usr/local/bin/bash", False),
+        ("#!bash", False),
+        ("#!", False),
+        ("#!/usr/bin/env", False),
+        ("#!/bin/", False),
+    ],
+)
+def test_the_shebang_rule(text: str, ok: bool) -> None:
+    assert (shipscan.shebang_problem(text) == "") is ok, text

@@ -126,6 +126,15 @@ substitution, backticks, heredocs, continuations, tabs, globs or `~`. A path has
 (by content sha); a difference is `NEEDS-HUMAN` naming the file. A file missing at both refs is a generated one and is left
 alone. The same grammar applies to the steps of local composite actions (which must name `shell: bash` or `sh`).
 
+Every script that is found is followed: its text is read at the pinned head (it is identical to the base, or the run
+already stopped) and held to the same grammar, from the directory it was run from, and each file it runs is compared and
+followed in turn, down to three levels and at most 20 files. A script line outside the grammar (`source`, `.`, `exec`,
+`eval`, a pipe, a redirection, a substitution, an unknown command, a path outside the repository) is `NEEDS-HUMAN`, naming
+the file and the line. A first line `#!` must name an allowed interpreter exactly (`/bin/`, `/usr/bin/` or
+`/usr/bin/env`, then the name, no arguments); a script with no shebang is fine. A file that is not text, contains a NUL
+byte or is over 64 KiB is `NEEDS-HUMAN`; one that cannot be read is exit 7. A script in another language (Python, Node)
+is held to the same shell grammar and so always stops for a human: that is the price of closing the gap by construction.
+
 Each step also runs from the repository root in bash or sh: a `working-directory`, and a shell other than bash or sh, in
 the step, the `run` defaults of the job or of the workflow (the job's own value wins, key by key), is
 `NEEDS-HUMAN`; an unset shell counts as bash only on a literal `ubuntu-` or `macos-` runner label (on Windows it would be
@@ -133,8 +142,7 @@ pwsh, on any other label it is unknown). An unreadable workflow or action file i
 counts as missing); a local action directory that does not exist is exit 7, and one without an `action.yml` or
 `action.yaml` is `NEEDS-HUMAN`.
 
-What this does not see, stated plainly: the text of the scripts themselves (what a script sources or runs is not read; list
-those paths with `--protect-path`), Makefile targets and the files a listed command uses, configuration, test
+What this does not see, stated plainly: Makefile targets and the files a listed command uses, configuration, test
 inventories, installed dependencies, and what a Python or Node program imports. The price of closing the gap by
 construction is more human stops, which is the right trade for an unattended merge gate. The real controls remain
 rulesets with required workflows and CODEOWNERS on the files the gate relies on; this tool narrows the gap and does not

@@ -114,7 +114,7 @@ STUB = textwrap.dedent(
                 reply({{"rc": 1, "out": "HTTP/2.0 500 Server Error\\r\\n\\r\\nboom", "err": "Not Found 404"}})
             default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: ubuntu-latest\\n")
             if not cpath.endswith((".yml", ".yaml")):
-                default = "echo ok\\n"
+                default = "#!/bin/bash\\n# nothing to run\\n"
             reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + state.get("texts", {{}}).get(cpath, default)}})
         if cpath == ".github/workflows":
             reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
@@ -239,6 +239,7 @@ class Rig:
         }
         self.slept: list[float] = []
         self.now = 0.0
+        self.undecodable = ""  # a repository path whose contents are not text
         self.raise_on = ""  # a gh subcommand pair (such as "pr merge") whose process times out
         self.tick = 0.0  # fake seconds a gh call takes
         self.tick_by: dict[str, float] = {}  # extra seconds for one gh subcommand pair, such as "pr merge"
@@ -257,6 +258,8 @@ class Rig:
             self.timeouts.append((self.now, kw.get("timeout")))
             if self.raise_on and " ".join(argv[1:3]) == self.raise_on:
                 raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 0)
+            if self.undecodable and "-H" in argv and any(f"/contents/{self.undecodable}" in part for part in argv):
+                raise UnicodeDecodeError("utf-8", bytes([255]), 0, 1, "not text")
             done = subprocess.run(argv, **kw)  # noqa: S603 (argv is the fake gh the rig wrote)
             self.now += self.tick + self.tick_by.get(" ".join(argv[1:3]), 0.0)
             return done

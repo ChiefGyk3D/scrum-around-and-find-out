@@ -22,9 +22,10 @@ redirections, substitutions, expansions, heredocs or continuations to reason abo
 (except a leading `./`) or `..` part and does not start with `/`; an option with a value, a wrapper (`sudo`, `env`,
 `timeout`, `uv run`...), `-c`/`-m`/`-e` and every unknown command are refused.
 
-It is a gate by construction, at the price of more human stops. What it does not see: files that a script reads or
-sources, Makefile targets and the files a listed command uses, configuration, installed dependencies, and what a Python
-or Node program imports.
+It is a gate by construction, at the price of more human stops. The caller applies the same grammar to the text of every
+script found (from the directory it was run from) and to what those scripts run, down to a depth cap; `shebang_problem`
+checks a script's first line. What it does not see: Makefile targets and the files a listed command uses,
+configuration, installed dependencies, and what a Python or Node program imports.
 """
 
 from __future__ import annotations
@@ -58,10 +59,12 @@ COMMAND_NAME = re.compile(r"[A-Za-z0-9._+-]+")
 
 @dataclass(frozen=True)
 class RunFacts:
-    """The repository files a `run:` text executes (sorted), or the first line that is not in the grammar."""
+    """The repository files a `run:` text executes (sorted), the directory each one is run from, or the first line
+    that is not in the grammar."""
 
     files: tuple[str, ...] = ()
     problem: str = ""
+    runs: tuple[tuple[str, str], ...] = ()  # (file, directory it is run from), sorted
 
 
 class _Stop(Exception):
@@ -85,11 +88,27 @@ def _literal_path(word: str, cwd: str) -> str:
     return posixpath.join(cwd, *parts) if cwd else "/".join(parts)
 
 
-def analyze(text: str, *, commands: Iterable[str] = ()) -> RunFacts:
-    """The files a `run:` text executes, if every line is in the grammar; else the first offending line as `problem`."""
+SHEBANG = re.compile(r"#!(?:/usr/bin/env |/usr/bin/|/bin/)([A-Za-z0-9._-]+)")
+
+
+def shebang_problem(text: str) -> str:
+    """ "" when the first line is not a shebang or names an allowed interpreter (as /bin/NAME, /usr/bin/NAME or
+    /usr/bin/env NAME, with no arguments), else why not."""
+    first = text.split("\n", 1)[0].rstrip("\r")
+    if not first.startswith("#!"):
+        return ""
+    found = SHEBANG.fullmatch(first)
+    if found is None or found.group(1) not in INTERPRETERS:
+        return f"a shebang line that is not an allowed interpreter ({first[:60]})"
+    return ""
+
+
+def analyze(text: str, *, commands: Iterable[str] = (), cwd: str = "") -> RunFacts:
+    """The files a `run:` text executes, if every line is in the grammar; else the first offending line as `problem`.
+    `cwd` is the directory the text runs from (the repository root for a `run:` step)."""
     allowed = frozenset(commands)
     files: set[str] = set()
-    cwd = ""
+    runs: set[tuple[str, str]] = set()
     for number, raw in enumerate(text.split("\n"), 1):
         line = raw.rstrip("\r").strip(" ")
         if not line or line.startswith("#"):
@@ -97,13 +116,15 @@ def analyze(text: str, *, commands: Iterable[str] = ()) -> RunFacts:
         try:
             if LINE_CHARS.fullmatch(line) is None:
                 raise _Stop("a character outside A-Za-z0-9 . _ / = : @ , + - and spaces")
-            cwd = _simple_line([w for w in line.split(" ") if w], cwd, allowed, files)
+            cwd = _simple_line([w for w in line.split(" ") if w], cwd, allowed, files, runs)
         except _Stop as why:
             return RunFacts(problem=f"line {number} ({line[:80]}): {why}")
-    return RunFacts(files=tuple(sorted(files)))
+    return RunFacts(files=tuple(sorted(files)), runs=tuple(sorted(runs)))
 
 
-def _simple_line(words: list[str], cwd: str, allowed: frozenset[str], files: set[str]) -> str:
+def _simple_line(
+    words: list[str], cwd: str, allowed: frozenset[str], files: set[str], runs: set[tuple[str, str]]
+) -> str:
     command, rest = words[0], words[1:]
     if command == "cd":
         if len(rest) != 1:
@@ -118,11 +139,15 @@ def _simple_line(words: list[str], cwd: str, allowed: frozenset[str], files: set
             index += 1
         if index >= len(rest):
             raise _Stop(f"`{command}` without a script path")
-        files.add(_literal_path(rest[index], cwd))
+        script = _literal_path(rest[index], cwd)
+        files.add(script)
+        runs.add((script, cwd))
         _plain_args(rest[index + 1 :])
         return cwd
     if "/" in command:
-        files.add(_literal_path(command, cwd))
+        script = _literal_path(command, cwd)
+        files.add(script)
+        runs.add((script, cwd))
         _plain_args(rest)
         return cwd
     if command in allowed and valid_command_name(command):

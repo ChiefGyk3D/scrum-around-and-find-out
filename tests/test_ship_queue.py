@@ -1254,10 +1254,119 @@ def test_a_workflow_file_that_cannot_be_read_is_an_error_not_a_pass(rig: Rig) ->
     assert code == ship.EXIT_ERROR and "HTTP status 500" in out and merges(calls) == []
 
 
-def test_what_a_script_itself_reads_is_outside_the_derivation(rig: Rig) -> None:  # noqa: F811
-    """Documented residual: a script's own text is not read, so what it sources is only covered by --protect-path."""
-    code, out, _calls = merges_through(rig, gate("bash ci/gate.sh"), texts={"ci/gate.sh": "source ci/lib.sh\n"})
+def test_a_script_that_sources_another_file_needs_a_human_naming_file_and_line(rig: Rig) -> None:  # noqa: F811
+    texts = {"ci/gate.sh": "#!/bin/bash\n# gate\nsource ci/lib.sh\n"}
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), texts=texts)
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and "line 3" in out and merges(calls) == []
+    assert "source ci/lib.sh" in out
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "source ci/x.sh",
+        ". ci/x.sh",
+        "exec ./ci/x.sh",
+        "eval x",
+        "a | b",
+        "./x.sh > out",
+        "echo $(date)",
+        "make test",
+        "ls",
+    ],
+)
+def test_every_construct_outside_the_grammar_stops_a_script_too(rig: Rig, line: str) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), texts={"ci/gate.sh": f"bash ci/ok.sh\n{line}\n"})
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and "line 2" in out and merges(calls) == []
+
+
+def test_a_script_run_by_the_gate_script_is_compared_and_a_changed_callee_stops(rig: Rig) -> None:  # noqa: F811
+    texts = {"ci/a.sh": "bash ci/b.sh\n"}
+    changed = {"ci/b.sh@main": "one", f"ci/b.sh@{HEAD}": "two"}
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"), texts=texts, local_by_path=changed)
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/b.sh" in out and "differs" in out and merges(calls) == []
+    code, out, _calls = merges_through(rig, gate("bash ci/a.sh"), texts=texts, local_by_path={})
     assert code == 0, out
+
+
+def test_the_directory_a_script_was_run_from_is_carried_to_its_own_callees(rig: Rig) -> None:  # noqa: F811
+    texts = {"ci/a.sh": "bash b.sh\n"}  # relative: it means ci/b.sh because the gate did `cd ci`
+    changed = {"ci/b.sh@main": "one", f"ci/b.sh@{HEAD}": "two"}
+    code, out, _calls = stops_on(rig, gate("cd ci", "bash a.sh"), texts=texts, local_by_path=changed)
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/b.sh" in out
+
+
+def test_a_chain_of_scripts_three_deep_is_followed_and_four_deep_needs_a_human(rig: Rig) -> None:  # noqa: F811
+    texts = {
+        "ci/a.sh": "bash ci/b.sh\n",
+        "ci/b.sh": "bash ci/c.sh\n",
+        "ci/c.sh": "bash ci/d.sh\n",
+        "ci/d.sh": "# end\n",
+    }
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"), texts=texts)
+    assert code == ship.EXIT_NEEDS_HUMAN and "too many references or nesting too deep to verify" in out
+    assert merges(calls) == []
+    shorter = {"ci/a.sh": "bash ci/b.sh\n", "ci/b.sh": "bash ci/c.sh\n", "ci/c.sh": "# end\n"}
+    code, out, _calls = merges_through(rig, gate("bash ci/a.sh"), texts=shorter)
+    assert code == 0, out
+
+
+def test_too_many_scripts_need_a_human(rig: Rig) -> None:  # noqa: F811
+    lines = [f"bash ci/s{i}.sh" for i in range(ship.MAX_FILES + 1)]
+    code, out, calls = stops_on(rig, gate(*lines))
+    assert code == ship.EXIT_NEEDS_HUMAN and "too many" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("callee", ["bash ../outside.sh", "bash /etc/outside.sh", "./../x.sh", "bash ~/x.sh"])
+def test_a_callee_outside_the_repository_root_needs_a_human(rig: Rig, callee: str) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"), texts={"ci/a.sh": f"{callee}\n"})
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/a.sh" in out and "line 1" in out and merges(calls) == []
+
+
+def test_an_unreadable_script_is_an_error_and_a_binary_one_needs_a_human(rig: Rig) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"), error_files=["ci/a.sh"])
+    assert code == ship.EXIT_ERROR and "HTTP status 500" in out and merges(calls) == []
+    rig.state.pop("error_files")
+    rig.undecodable = "ci/a.sh"
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"))
+    assert code == ship.EXIT_NEEDS_HUMAN and "not text" in out and merges(calls) == []
+    rig.undecodable = ""
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"), texts={"ci/a.sh": "bash ci/ok.sh" + chr(0) + "\n"})
+    assert code == ship.EXIT_NEEDS_HUMAN and "binary or oversized" in out and merges(calls) == []
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"), texts={"ci/a.sh": "# " + "x" * 70000 + "\n"})
+    assert code == ship.EXIT_NEEDS_HUMAN and "binary or oversized" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize(
+    ("first_line", "ok"),
+    [
+        ("#!/bin/bash", True),
+        ("#!/bin/sh", True),
+        ("#!/usr/bin/env bash", True),
+        ("#!/usr/bin/env python3", True),
+        ("#!/usr/bin/perl", True),
+        ("# no shebang here", True),
+        ("#!/bin/zsh", False),
+        ("#!/bin/bash -e", False),
+        ("#!/usr/bin/env -S bash -e", False),
+        ("#!/tmp/evil", False),
+        ("#!bash", False),
+        ("#!/usr/bin/env", False),
+    ],
+)
+def test_a_shebang_must_name_an_allowed_interpreter(rig: Rig, first_line: str, ok: bool) -> None:  # noqa: F811
+    texts = {"ci/a.sh": first_line + "\n"}
+    if ok:
+        code, out, _calls = merges_through(rig, gate("bash ci/a.sh"), texts=texts)
+        assert code == 0, out
+    else:
+        code, out, calls = stops_on(rig, gate("bash ci/a.sh"), texts=texts)
+        assert code == ship.EXIT_NEEDS_HUMAN and "shebang" in out and merges(calls) == []
+
+
+def test_a_script_of_another_language_is_held_to_the_shell_grammar_so_a_human_reads_it(rig: Rig) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("python ci/check.py"), texts={"ci/check.py": "import os\nprint(os.name)\n"})
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/check.py" in out and merges(calls) == []
 
 
 def test_a_file_that_exists_at_neither_ref_is_a_generated_one_and_is_left_alone(rig: Rig) -> None:  # noqa: F811

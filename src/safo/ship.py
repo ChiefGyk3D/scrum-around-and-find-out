@@ -69,6 +69,7 @@ COMMENT = re.compile(r"(?:^|[ \t])#.*$", re.MULTILINE)
 MAX_WORKFLOW_BYTES = 262144  # a workflow file larger than this is not read
 MAX_FILES = 20  # workflow, action and script files read for one gate
 MAX_EXEC_FILES = 40  # repository files a gate runs that are compared
+MAX_SCRIPT_BYTES = 65536  # a script larger than this is not read
 RECOVERY_SECONDS = 30.0  # the read that settles what a merge call did may run this long past the deadline
 TOO_MANY = "too many references or nesting too deep to verify"
 PINNED_REF = re.compile(r"[^@\s]+@[0-9a-f]{40}")
@@ -101,6 +102,10 @@ RUN_URL = re.compile(r"/actions/runs/(\d+)(?:/job/(\d+))?")
 Run = Callable[..., Any]
 Sleep = Callable[[float], None]
 Clock = Callable[[], float]
+
+
+class BinaryFileError(Exception):
+    """A file that is not text: read_text raises it, the caller turns it into a human stop."""
 
 
 class ShipError(Exception):
@@ -707,6 +712,8 @@ class Watcher:
         code, out, err = self.gh.gh_call(
             "api", "-i", *contents_args(repo, path, ref)[1:], "-H", "Accept: application/vnd.github.raw"
         )
+        if err.strip() == "UnicodeDecodeError":
+            raise BinaryFileError
         head, _sep, body = out.replace("\r\n", "\n").partition("\n\n")
         found = re.match(r"HTTP/\S+ (\d{3})", head)
         status = int(found.group(1)) if found else 0
@@ -728,53 +735,76 @@ class Watcher:
           executes is identical on both. A line outside the grammar is itself a stop.
         Files that a script reads, Makefile targets, configuration, installed dependencies and what a program imports
         stay outside it; --protect-path and rulesets with required workflows are the other controls."""
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         compared: set[str] = set()
-        queue: list[tuple[str, int, str]] = [(gate, 0, "workflow")]
+        queue: list[tuple[str, int, str, str]] = [(gate, 0, "workflow", "")]
         while queue:
-            path, depth, kind = queue.pop(0)
-            if (kind, path) in seen:
+            path, depth, kind, cwd = queue.pop(0)
+            if (kind, path, cwd) in seen:
                 continue
             if len(seen) >= MAX_FILES:
                 return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-            seen.add((kind, path))
+            seen.add((kind, path, cwd))
             where = clean(path, 200)[0]
-            if kind == "action":
-                text = self.read_text(repo, f"{path}/action.yml", pin)
-                if text is None:
-                    text = self.read_text(repo, f"{path}/action.yaml", pin)
-                if text is None:
-                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: a local action without action.yml")
-            else:
-                text = self.read_text(repo, path, pin)
+            units: list[tuple[str, str]]
+            if kind == "script":
+                try:
+                    text = self.read_text(repo, path, pin)
+                except BinaryFileError:
+                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: a file that is not text")
                 if text is None:
                     raise ShipError(EXIT_ERROR, f"cannot read {where}: not found at the pinned head")
-            refs, runs, problem = workflow_refs(text, action=kind == "action")
-            if problem:
-                return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: {problem}")
-            for run_text in runs:
-                facts = shipscan.analyze(run_text, commands=self.gate_commands)
+                if len(text.encode("utf-8", "replace")) > MAX_SCRIPT_BYTES or chr(0) in text:
+                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: a binary or oversized file")
+                why = shipscan.shebang_problem(text)
+                if why:
+                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: {clean(why, 200)[0]}")
+                refs: list[str] = []
+                units = [(text, cwd)]  # a script is held to the same grammar, from the directory it was run from
+            else:
+                if kind == "action":
+                    text = self.read_text(repo, f"{path}/action.yml", pin)
+                    if text is None:
+                        text = self.read_text(repo, f"{path}/action.yaml", pin)
+                    if text is None:
+                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: a local action without action.yml")
+                else:
+                    text = self.read_text(repo, path, pin)
+                    if text is None:
+                        raise ShipError(EXIT_ERROR, f"cannot read {where}: not found at the pinned head")
+                refs, runs, problem = workflow_refs(text, action=kind == "action")
+                if problem:
+                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: {problem}")
+                units = [(run_text, "") for run_text in runs]
+            for run_text, run_cwd in units:
+                facts = shipscan.analyze(run_text, commands=self.gate_commands, cwd=run_cwd)
                 if facts.problem:
                     return Result(
                         EXIT_NEEDS_HUMAN,
                         "NEEDS-HUMAN",
-                        f"{where}: a run step is not in the allowed grammar: {clean(facts.problem, 200)[0]}",
+                        f"{where}: not in the allowed grammar: {clean(facts.problem, 200)[0]}",
                     )
-                for file in facts.files:
-                    if file in compared:
-                        continue
-                    if len(compared) >= MAX_EXEC_FILES:
-                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-                    compared.add(file)
-                    if not safe_repo_path(file):
-                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: an unusual path in a run step")
-                    before, after = self.local_state(repo, file, base), self.local_state(repo, file, pin)
-                    if before != after:
-                        return Result(
-                            EXIT_NEEDS_HUMAN,
-                            "NEEDS-HUMAN",
-                            f"{clean(file, 200)[0]} (run by {where}) differs between {base} and the pin",
-                        )
+                for file, from_dir in facts.runs:
+                    if file not in compared:
+                        if len(compared) >= MAX_EXEC_FILES:
+                            return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+                        compared.add(file)
+                        if not safe_repo_path(file):
+                            return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: an unusual path in a run step")
+                        before, after = self.local_state(repo, file, base), self.local_state(repo, file, pin)
+                        if before != after:
+                            return Result(
+                                EXIT_NEEDS_HUMAN,
+                                "NEEDS-HUMAN",
+                                f"{clean(file, 200)[0]} (run by {where}) differs between {base} and the pin",
+                            )
+                        exists = after is not None
+                    else:
+                        exists = True
+                    if exists:  # what a script runs is held to the same rules, down to MAX_DEPTH levels
+                        if depth + 1 > MAX_DEPTH:
+                            return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+                        queue.append((file, depth + 1, "script", from_dir))
             for ref in refs:
                 if ref.startswith("./"):
                     local = ref[2:].rstrip("/")
@@ -791,7 +821,7 @@ class Watcher:
                         )
                     if depth >= MAX_DEPTH:
                         return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-                    queue.append((local, depth + 1, "workflow" if local.endswith((".yml", ".yaml")) else "action"))
+                    queue.append((local, depth + 1, "workflow" if local.endswith((".yml", ".yaml")) else "action", ""))
                 elif ref.startswith("docker://"):
                     if not DOCKER_DIGEST.search(ref):
                         return Result(
