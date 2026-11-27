@@ -110,7 +110,9 @@ def scan_text(
         if marker and len(marker.group(1).strip()) >= MIN_REASON:
             # the reason is text too: a credential in it is never suppressed
             found = _line_findings(line[: marker.start()], allow, deny)
-            rows += [(n, k, t) for k, t in sorted(_credentials(marker.group(1)))]
+            reason = marker.group(1)
+            reason_found = _credentials(reason) | _credentials(unicodedata.normalize("NFKC", reason))
+            rows += [(n, k, t) for k, t in sorted(reason_found)]
             allowed += [n] * len(found)
             continue
         found = _line_findings(line, allow, deny)
@@ -127,12 +129,18 @@ def scan_text(
     return rows, allowed
 
 
+def _safe(label: str) -> str:
+    """A label for the output: control, format and line-separator characters escaped, so untrusted JSON keys or file
+    names cannot start a line or move the cursor in the diagnostic."""
+    return "".join(c if unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp") else f"\\u{ord(c):04x}" for c in label)
+
+
 def _walk(node: object, label: str) -> Iterator[tuple[str, str]]:
     if isinstance(node, str):
         yield label, node
     elif isinstance(node, dict):
         for key, value in node.items():
-            yield from _walk(value, f"{label}.{key}")
+            yield from _walk(value, f"{label}.{_safe(str(key))}")
     elif isinstance(node, list):
         for i, value in enumerate(node):
             yield from _walk(value, f"{label}[{i}]")
@@ -161,7 +169,7 @@ def _sources(argv: Sequence[str], hook: bool, stdin: BinaryIO, err: TextIO) -> t
             return [], True
         return list(_walk(doc["tool_input"], "tool_input")), False
     for name in argv or ["-"]:
-        label = "<stdin>" if name == "-" else name
+        label = "<stdin>" if name == "-" else _safe(name)
         try:
             raw = _read_stdin(stdin) if name == "-" else bounded.read_bounded(Path(name), MAX_BYTES + 1)
         except OSError as exc:

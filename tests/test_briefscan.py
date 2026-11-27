@@ -206,3 +206,19 @@ def test_the_scan_collects_something_and_a_clean_text_does_not() -> None:
     # guard negative case: the detectors are live (a secret is found) and the same text without it is clean
     assert scan(f"k {GH}")[0] == 1
     assert scan("k nothing")[0] == 0
+
+
+def test_a_fullwidth_credential_in_the_allow_reason_is_still_found() -> None:
+    wide = "".join(chr(ord(c) + 0xFEE0) if c.isascii() and c.isalnum() else c for c in AWS)
+    code, _, err = scan(f"{NAS} safo-scan-allow: because {wide} was shown\n")
+    assert code == 1 and "credential" in err
+
+
+def test_a_hook_key_with_control_characters_cannot_forge_a_diagnostic_line() -> None:
+    key = "prompt" + chr(10) + "INJECTED:1: credential [abc123]" + chr(13) + chr(27) + "[2J"
+    code, err = hook({"tool_input": {key: GH}})
+    assert code == 2
+    lines = [ln for ln in err.splitlines() if ln.startswith("tool_input")]
+    assert len(lines) == 1 and "credential" in lines[0]
+    assert not any(ln.startswith("INJECTED") for ln in err.splitlines())
+    assert chr(27) not in err and chr(13) not in err
