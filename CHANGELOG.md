@@ -2,13 +2,15 @@
 
 ## Unreleased
 
-- `safo-digest` (#531, child of #518): runs one allow-listed command from an argument list (never a shell), saves the full
-  output to a new 0600 file in a private 0700 directory (every path component opened without following symlinks,
-  exclusive create) and prints a capped digest: header with command name, exit code, counts and saved path, the first
-  failure lines when it failed, head and tail, cut to a byte cap. Escape sequences, control and binary bytes are
-  stripped from the digest; user name, host name, home, callsigns, grid squares and configured words are replaced
-  with placeholders (best effort, the saved file is raw). A timeout kills the whole process group (exit 124);
-  refusals exit 125. Docs: `docs/digest.md`. Tests: `tests/test_digest.py`.
+- `safo-digest` (#531, child of #518): runs one allow-listed command and prints a capped digest in a fixed untrusted-data
+  frame, saving the full output to a private file. The executable is an absolute path, opened without following
+  symlinks, owner and parent-directory checked, and started from the verified file descriptor. The command gets a
+  minimal environment and an empty private home (recreated each run), and its arguments are validated against a
+  per-entry option allowlist with typed values (no free-form option passes); git and gh have extra refusals. A timeout,
+  a normal exit or a SIGTERM, SIGHUP or SIGINT kills the command and every descendant, including detached ones.
+  The output directory and every parent are checked and re-verified after the run. Digest lines are cleaned and
+  prefixed, header fields are cleaned, and user, host, home, callsign and grid text is replaced (best effort, the saved
+  file is raw). Exit 124 timeout, 125 refused. Docs: `docs/digest.md`. Tests: `tests/test_digest.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
   frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
   stderr and kills and reaps the child on any exit, and a hung-child test proves the harness fails instead of hanging.
