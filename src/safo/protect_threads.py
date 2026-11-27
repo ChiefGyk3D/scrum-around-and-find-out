@@ -84,7 +84,10 @@ QUERY = (
     + " requiredApprovingReviewCount "
     + " ".join(STRING_LISTS)
     + " requiredStatusChecks{context app{databaseId}} "
-    + " ".join(f"{c}{{totalCount}}" for c in COUNTS)
+    + " ".join(
+        f"{c}(first:100){{totalCount pageInfo{{hasNextPage}} nodes{{actor{{__typename ... on Node{{id}}}}}}}}"
+        for c in COUNTS
+    )
     + " matchingRefs(first:100,query:$q){nodes{name}}}}}}"
 )
 MUTATION = (
@@ -147,11 +150,32 @@ class Gh:
 # -- reading ---------------------------------------------------------------------------------------------------------
 
 
-def _count(node: Any, where: str) -> int:
-    value = node.get("totalCount") if isinstance(node, dict) else None
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ProtectError(EXIT_REFUSED, f"{where} is not readable")
-    return value
+def _actors(node: Any, where: str) -> list[str]:
+    """The allowed actors of one allowance list as sorted `Type:id` text. A list longer than the page, one whose count
+    does not match what was read, or an actor without an id is refused, so the read-back compares who, not how many."""
+    total = node.get("totalCount") if isinstance(node, dict) else None
+    page = node.get("pageInfo") if isinstance(node, dict) else None
+    nodes = node.get("nodes") if isinstance(node, dict) else None
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or not isinstance(page, dict)
+        or page.get("hasNextPage") is not False
+        or not isinstance(nodes, list)
+        or len(nodes) != total
+    ):
+        raise ProtectError(
+            EXIT_REFUSED, f"{where} is not readable in full (more than one page, or a count that does not match)"
+        )
+    actors = []
+    for item in nodes:
+        actor = item.get("actor") if isinstance(item, dict) else None
+        kind = actor.get("__typename") if isinstance(actor, dict) else None
+        ident = actor.get("id") if isinstance(actor, dict) else None
+        if not isinstance(kind, str) or not isinstance(ident, str) or not kind or not ident:
+            raise ProtectError(EXIT_REFUSED, f"{where} has an actor that cannot be identified")
+        actors.append(f"{kind}:{ident}")
+    return sorted(actors)
 
 
 def snapshot(rule: Any) -> dict[str, Any]:
@@ -180,7 +204,9 @@ def snapshot(rule: Any) -> dict[str, Any]:
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
             raise ProtectError(EXIT_REFUSED, f"the rule's {key} is not readable")
         snap[key] = sorted(values)
-    checks = rule.get("requiredStatusChecks") or []
+    checks = rule.get("requiredStatusChecks")
+    if checks is None:
+        checks = []
     if not isinstance(checks, list):
         raise ProtectError(EXIT_REFUSED, "the rule's requiredStatusChecks is not readable")
     pairs = []
@@ -196,7 +222,7 @@ def snapshot(rule: Any) -> dict[str, Any]:
         pairs.append([check["context"], app_id])
     snap["requiredStatusChecks"] = sorted(pairs, key=lambda p: (p[0], p[1] if p[1] is not None else -1))
     for key in COUNTS:
-        snap[key] = _count(rule.get(key), f"the rule's {key}")
+        snap[key] = _actors(rule.get(key), f"the rule's {key}")
     return snap
 
 

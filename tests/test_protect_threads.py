@@ -22,6 +22,13 @@ REPO = "o/r"
 SECRET = "ghp_SECRETSECRETSECRET"
 
 
+def allow(prefix: str, count: int, *, more: bool = False) -> dict[str, Any]:
+    """An allowance list as GraphQL shows it: a count, a page marker and the actors (users, teams, apps)."""
+    kinds = ("User", "Team", "App")
+    nodes = [{"actor": {"__typename": kinds[i % 3], "id": f"{prefix}{i}"}} for i in range(count)]
+    return {"totalCount": count, "pageInfo": {"hasNextPage": more}, "nodes": nodes}
+
+
 def rule(rule_id: str = "BPR_1", pattern: str = "main", *, flag: bool = False, **over: Any) -> dict[str, Any]:
     """A rule with every field set to something other than its default, as GitHub's GraphQL shows it."""
     base: dict[str, Any] = {
@@ -52,10 +59,10 @@ def rule(rule_id: str = "BPR_1", pattern: str = "main", *, flag: bool = False, *
             {"context": "ci / CI green", "app": {"databaseId": 15368}},
             {"context": "legacy", "app": None},
         ],
-        "pushAllowances": {"totalCount": 3},
-        "bypassPullRequestAllowances": {"totalCount": 2},
-        "bypassForcePushAllowances": {"totalCount": 1},
-        "reviewDismissalAllowances": {"totalCount": 4},
+        "pushAllowances": allow("P", 3),
+        "bypassPullRequestAllowances": allow("B", 2),
+        "bypassForcePushAllowances": allow("F", 1),
+        "reviewDismissalAllowances": allow("D", 4),
     }
     base.update(over)
     return base
@@ -229,7 +236,20 @@ UNREADABLE = [
         "requiredStatusChecks",
     ),
     ("allowance count missing", lambda r: r.pop("pushAllowances"), "pushAllowances"),
-    ("allowance count text", lambda r: r.update(pushAllowances={"totalCount": "3"}), "pushAllowances"),
+    ("allowance count text", lambda r: r.update(pushAllowances={**allow("P", 3), "totalCount": "3"}), "pushAllowances"),
+    ("allowance longer than a page", lambda r: r.update(pushAllowances=allow("P", 3, more=True)), "pushAllowances"),
+    ("allowance page marker missing", lambda r: r["pushAllowances"].pop("pageInfo"), "pushAllowances"),
+    ("allowance fewer nodes than count", lambda r: r["pushAllowances"].update(totalCount=5), "pushAllowances"),
+    (
+        "allowance actor without id",
+        lambda r: r["pushAllowances"]["nodes"][0].update(actor={"__typename": "User"}),
+        "pushAllowances",
+    ),
+    ("allowance actor null", lambda r: r["pushAllowances"]["nodes"][0].update(actor=None), "pushAllowances"),
+    ("checks false", lambda r: r.update(requiredStatusChecks=False), "requiredStatusChecks"),
+    ("checks zero", lambda r: r.update(requiredStatusChecks=0), "requiredStatusChecks"),
+    ("checks empty text", lambda r: r.update(requiredStatusChecks=""), "requiredStatusChecks"),
+    ("checks object", lambda r: r.update(requiredStatusChecks={}), "requiredStatusChecks"),
     ("id missing", lambda r: r.pop("id"), "id"),
     ("id odd shape", lambda r: r.update(id="a b;c"), "id"),
 ]
@@ -310,7 +330,7 @@ def test_another_field_that_changed_prints_the_rollback_and_exits_6(
 
     def drop(r: dict[str, Any]) -> None:
         r["lockBranch"] = False
-        r["pushAllowances"] = {"totalCount": 0}
+        r["pushAllowances"] = allow("P", 0)
 
     rig.fake.after_mutation = drop
     code, out, err = rig.apply()
@@ -320,6 +340,31 @@ def test_another_field_that_changed_prints_the_rollback_and_exits_6(
     line = next(ln for ln in out.splitlines() if ln.startswith("rollback body"))
     assert json.loads(line.split(": ", 1)[1]) == pt.snapshot(old)
     assert pt.MUTATION % "false" in out and "id=BPR_1" in out and str(saved) in out
+
+
+def test_a_swap_of_one_allowed_actor_for_another_is_a_failed_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = make(tmp_path, monkeypatch)
+
+    def swap(r: dict[str, Any]) -> None:
+        r["pushAllowances"]["nodes"][1] = {"actor": {"__typename": "Team", "id": "SOMEONE_ELSE"}}  # same count
+
+    rig.fake.after_mutation = swap
+    code, _out, err = rig.apply()
+    assert code == pt.EXIT_VERIFY and "pushAllowances" in err
+
+
+@pytest.mark.parametrize("absent", [False, True])
+def test_absent_or_null_required_checks_are_an_empty_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, absent: bool
+) -> None:
+    bad = rule(requiredStatusChecks=None)
+    if absent:
+        del bad["requiredStatusChecks"]
+    rig = make(tmp_path, monkeypatch, [bad])
+    code, out, _ = rig.go(REPO)
+    assert code == 0 and "0 required check(s)" in out
 
 
 # -- usage, reads, secrets ---------------------------------------------------------------------------------------

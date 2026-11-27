@@ -25,13 +25,14 @@ as a non-null Boolean.
 
 ## What a dry run does
 
-1. Reads the default branch and every branch protection rule of the repository with one GraphQL query (up to 100 rules,
-   each with the branches it matches).
+1. Reads the default branch name with one GraphQL query, then reads it again together with every branch protection
+   rule of the repository (up to 100 rules, each with the branches it matches; the second query needs the branch name
+   to filter on). That is two GraphQL calls, and the ruleset read below is a third.
 2. Reads `GET /repos/{owner}/{repo}/rules/branches/{branch}`. A non-empty answer means a ruleset applies to the default
    branch, and the tool refuses (rulesets are a different API; it does not guess).
 3. Picks the one rule that covers the default branch. No rule, more than one rule, or more rules than one page: refused.
 4. Prints a diff of the rule as read against the rule with the flag set. Only that one line differs. The diff holds no
-   login, team or app names (the allowances are shown as counts). If the rule's pattern is wider than the branch name, a
+   login, team or app names (the allowances are shown as `Type:id` node ids). If the rule's pattern is wider than the branch name, a
    NOTE says the change applies to everything the pattern matches.
 
 If the flag is already true it says so and does nothing, with or without `--apply`.
@@ -43,7 +44,8 @@ If the flag is already true it says so and does nothing, with or without `--appl
 2. Sends the mutation with the one field.
 3. Reads the rule again. Every field must equal what was read before, except the flag, which must be true. The fields
    compared: all of the rule's booleans, the approving-review count, the required check contexts and each check's app, the
-   deployment environments, and the number of push, bypass, force-push-bypass and review-dismissal allowances.
+   deployment environments, and the actors (type and node id) in the push, bypass, force-push-bypass and review-dismissal
+   allowance lists.
 
 If the read-back does not match, it prints the rollback: the same mutation with `false`, the rule id, the saved file and
 the saved rule as JSON, and exits 6.
@@ -61,8 +63,9 @@ the saved rule as JSON, and exits 6.
 
 ## Limits
 
-- Allowance lists (who may push, bypass or dismiss) are compared by count, not by name. The mutation does not touch them;
-  the count check would catch one being emptied.
+- Allowance lists (who may push, bypass or dismiss) are compared by actor id, so swapping one actor for another is
+  caught. Each list is read in one page of 100; a longer list is refused (exit 3), as is a count that does not match
+  the actors returned, an actor without an id, or a required-checks field that is not a list or null.
 - The commit-signature requirement is a field of this rule in GraphQL and is compared like the others.
 - A branch protection rule that GitHub shows differently through REST and GraphQL is not reconciled here.
 - Not an atomic snapshot: the read before and the read after are two requests, so a settings change by someone else in
