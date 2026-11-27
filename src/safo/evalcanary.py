@@ -315,8 +315,17 @@ def dropped(base: float, score: float, threshold: float) -> bool:
     return drop > Decimal(repr(threshold)).quantize(quantum)
 
 
-def _default_runner(wait: int) -> Runner:
-    return lambda fx, model: le.run_one(fx, model, wait=wait)
+def _default_runner(wait: int, sleep: Callable[[float], None]) -> Runner:
+    """The real runner. Its own busy backoff sleeps through the run's budgeted `sleep` too, so no sleep escapes the
+    total; when the budget is spent the call counts as busy."""
+
+    def call(fx: Any, model: str) -> dict[str, Any]:
+        try:
+            return le.run_one(fx, model, wait=wait, sleep=sleep)
+        except _Deadline:
+            return {"fixture": getattr(fx, "id", ""), "model": model, "status": "busy"}
+
+    return call
 
 
 def _default_probe_runner(wait: int) -> ProbeRunner:
@@ -491,7 +500,7 @@ def _score(args: argparse.Namespace, runner: Runner | None, sleep: Any) -> int:
         pop = population_id(fixtures)
         if not args.update_baseline and pop != stored_pop:
             raise CanaryError("baseline was made from a different task or fixture set; run with --update-baseline")
-        call = runner or _default_runner(args.wait)
+        call = runner or _default_runner(args.wait, sleep)
         results = {m: measure(m, fixtures, args.repeats, call, args.busy_retries, sleep) for m in models}
         unreachable = [m for m, (s, _) in results.items() if s == "unreachable"]
         busy = [m for m, (s, _) in results.items() if s == "busy"]

@@ -799,3 +799,24 @@ def test_the_exact_threshold_boundary_at_the_command_level(tmp_path: Path) -> No
     assert run(tmp_path, {m: 0.5 for m in MODELS})[0] == 0, "a drop of exactly 0.10 is not an alert"
     write_base(tmp_path, {m: round(score + 0.1001, 4) for m in MODELS})
     assert run(tmp_path, {m: 0.5 for m in MODELS})[0] == 1
+
+
+def test_the_default_runner_sleeps_inside_the_same_total_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stand-in for run_one that is busy on every call and backs off like it (2, 4, 8, 16 seconds) through the
+    `sleep` it is given; a sleep it makes on its own (the default) is recorded as unbudgeted."""
+    unbudgeted: list[float] = []
+
+    def busy_run_one(fx: Any, model: str, *, sleep: Any = unbudgeted.append, **_kw: Any) -> dict[str, Any]:
+        for k in range(4):
+            sleep(2.0 * 2**k)
+        return {"fixture": fx.id, "task": fx.task, "model": model, "status": "busy"}
+
+    monkeypatch.setattr(le, "run_one", busy_run_one)
+    write_base(tmp_path, {m: 1.0 for m in MODELS})
+    naps: list[float] = []
+    argv = ["--baseline", str(tmp_path / "base.json"), "--tasks", "commit-message", "--busy-retries", "10"]
+    assert ec.entry(argv, sleep=naps.append) == 75
+    assert unbudgeted == [], "every sleep of the real runner goes through the run's budget"
+    assert naps and sum(naps) <= ec.MAX_TOTAL_SLEEP and max(naps) <= ec.MAX_SLEEP
