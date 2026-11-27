@@ -1340,3 +1340,43 @@ def test_a_config_path_that_would_expose_the_home_is_refused(world: World) -> No
         refused(world, go(world, "review"))
         world.configure(**{key: [str(world.home.parent)]})
         refused(world, go(world, "review"))
+
+
+def test_the_git_environment_never_fetches_lazily() -> None:
+    assert codexrun.git_env("/home/x")["GIT_NO_LAZY_FETCH"] == "1"
+
+
+def test_a_partial_clone_is_refused_and_a_missing_object_is_not_fetched(tmp_path: Path) -> None:
+    """The shared config check sets GIT_NO_LAZY_FETCH and refuses a partial clone: safo-codex-run refuses rather than
+    reaching for a promisor remote. The control shows plain git would have fetched the missing object."""
+    gitbin = shutil.which("git")
+    assert gitbin
+    src = tmp_path / "src"
+    src.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+
+    def run(cwd: Path, *args: str, extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(  # noqa: S603 - fixed argv
+            [gitbin, *ident, *args], cwd=cwd, env={**env, **(extra or {})}, capture_output=True, check=False
+        )
+
+    assert run(src, "init", "-q").returncode == 0
+    (src / "f").write_text("one\n")
+    assert run(src, "add", "f").returncode == 0
+    assert run(src, "commit", "-q", "-m", "m").returncode == 0
+    assert run(src, "config", "uploadpack.allowFilter", "true").returncode == 0
+    dst = tmp_path / "dst"
+    cloned = run(tmp_path, "clone", "-q", "--no-checkout", "--filter=blob:none", f"file://{src}", str(dst))
+    if cloned.returncode != 0:
+        pytest.skip("this git cannot make a partial clone over file://")
+    control = run(dst, "cat-file", "-p", "HEAD:f")
+    assert control.returncode == 0 and control.stdout == b"one\n"  # plain git fetches the missing blob lazily
+    shutil.rmtree(dst)
+    assert (
+        run(tmp_path, "clone", "-q", "--no-checkout", "--filter=blob:none", f"file://{src}", str(dst)).returncode == 0
+    )
+    shielded = run(dst, "cat-file", "-p", "HEAD:f", extra={"GIT_NO_LAZY_FETCH": "1"})
+    assert shielded.returncode != 0  # with the variable the same read fails instead of fetching
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(dst))

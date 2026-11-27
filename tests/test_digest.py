@@ -272,7 +272,7 @@ def test_missing_executable_is_127(env: Env) -> None:
 )
 def test_unsafe_allow_prefixes_are_refused_at_config_load(env: Env, prefix: list[str]) -> None:
     env.config(allow=[prefix])
-    r = env.digest("/usr/bin/git", "status")  # the real entry point and policy
+    r = env.digest("/usr/bin/git", "log")  # the real entry point and policy
     assert r.returncode == 125 and b"allow" in r.stderr
     assert b"not on the allow list" not in r.stderr  # refused at config load, not merely unmatched
 
@@ -280,7 +280,7 @@ def test_unsafe_allow_prefixes_are_refused_at_config_load(env: Env, prefix: list
 @pytest.mark.parametrize("exe", ["/usr/bin/python3", "/bin/sh", "/usr/bin/env", "/usr/bin/true", "/usr/bin/ls"])
 def test_only_git_and_gh_are_supported_with_a_clear_message(env: Env, exe: str) -> None:
     env.config(allow=[[exe, "x"]])
-    r = env.digest("/usr/bin/git", "status")
+    r = env.digest("/usr/bin/git", "log")
     assert r.returncode == 125 and b"only git and gh" in r.stderr
 
 
@@ -305,14 +305,14 @@ def test_the_executable_and_every_parent_must_be_root_owned(env: Env) -> None:
     copy = env.tmp / "git"
     shutil.copy(_REAL_GIT, copy)
     copy.chmod(0o755)
-    env.config(allow=[[str(copy), "status"]])
-    r = env.digest(str(copy), "status", real=True)
+    env.config(allow=[[str(copy), "log"]])
+    r = env.digest(str(copy), "log", real=True)
     assert r.returncode == 125 and b"not owned by root" in r.stderr and env.saved() == []
 
 
 def test_a_root_owned_git_is_accepted(env: Env, repo: Path) -> None:
     _git_cfg(env)
-    r = env.digest(_REAL_GIT, "diff", "--stat", cwd=repo)
+    r = env.digest(_REAL_GIT, "log", "-n", "1", cwd=repo)
     assert r.returncode == 0, r.stderr
 
 
@@ -465,7 +465,7 @@ def test_git_refuses_every_option_not_explicitly_allowed(env: Env, repo: Path, h
     assert env.digest(_REAL_GIT, "diff", "--stat", arg, cwd=repo).returncode == 125
     assert env.digest(_REAL_GIT, "diff", "--", arg, cwd=repo).returncode == 125
     assert not marker.exists()
-    assert env.digest(_REAL_GIT, "diff", "--stat", cwd=repo).returncode == 0  # listed: runs
+    assert env.digest(_REAL_GIT, "diff", "--cached", "--stat", cwd=repo).returncode == 0  # listed: runs
 
 
 _FAKE_OPTS = (
@@ -539,9 +539,15 @@ def repo(env: Env) -> Path:
         "GIT_COMMITTER_EMAIL": "t@example.invalid",
         "HOME": str(env.home),
     }
-    for args in (["init", "-q"], ["add", "f"], ["commit", "-q", "-m", "one"]):
+    for args in (
+        ["init", "-q"],
+        ["add", "f"],
+        ["commit", "-q", "-m", "one"],
+        ["add", "f"],
+        ["commit", "-q", "-m", "mid"],
+    ):
         if args[0] == "add":
-            (r / "f").write_text("one\n")
+            (r / "f").write_text("one\n" if len(list(r.glob("f"))) == 0 else "mid\n")
         subprocess.run([_REAL_GIT, *args], cwd=r, env=g, check=True, capture_output=True)  # noqa: S603 - fixed argv
     (r / "f").write_text("two\n")
     return r
@@ -550,7 +556,7 @@ def repo(env: Env) -> Path:
 def _git_cfg(env: Env) -> None:
     env.cfg.write_text(
         f'out_dir = "{env.out}"\nallow = [\n'
-        f'  {{ cmd = ["{_REAL_GIT}", "diff"], options = ["--stat", "--name-only"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "diff"], options = ["--stat", "--name-only", "--cached", "--staged"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "log"], options = {{ "-n" = "int", "--author" = "word",'
         ' "--oneline" = "flag" } },\n]\n'
     )
@@ -558,10 +564,18 @@ def _git_cfg(env: Env) -> None:
 
 def test_real_git_allowed_use_works_and_positionals_follow_end_of_options(env: Env, repo: Path) -> None:
     _git_cfg(env)
-    r = env.digest(_REAL_GIT, "diff", "--stat", "--name-only", "f", cwd=repo)
-    assert r.returncode == 0 and b"| f" in r.stdout, r.stdout
+    for args in (
+        ["diff", "--stat", "--cached", "HEAD~1"],
+        ["diff", "--name-only", "HEAD~1..HEAD"],
+        ["diff", "--name-only", "HEAD~1", "HEAD"],
+        ["diff", "--staged"],
+    ):
+        r = env.digest(_REAL_GIT, *args, cwd=repo)
+        assert r.returncode == 0, (args, r.stdout)
+    r = env.digest(_REAL_GIT, "diff", "--name-only", "HEAD~1", "HEAD", cwd=repo)
+    assert b"| f" in r.stdout, r.stdout
     r = env.digest(_REAL_GIT, "log", "-n", "1", "--oneline", "HEAD", cwd=repo)
-    assert r.returncode == 0 and b"one" in r.stdout, r.stdout
+    assert r.returncode == 0 and b"mid" in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize(
@@ -992,11 +1006,9 @@ def _wide_cfg(env: Env) -> None:
     flag = '"--show-signature" = "flag", "--alternate-refs" = "flag", "-n" = "int", "-p" = "flag"'
     env.cfg.write_text(
         f'out_dir = "{env.out}"\nallow = [\n'
-        f'  {{ cmd = ["{_REAL_GIT}", "diff"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "diff"], options = ["--cached", "--staged"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "log"], options = {{ {flag} }} }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "show"] }},\n'
-        f'  {{ cmd = ["{_REAL_GIT}", "status"], options = ["--porcelain"] }},\n'
-        f'  {{ cmd = ["{_REAL_GIT}", "blame"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "ls-files"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "rev-parse"], end_of_options = false }},\n]\n'
     )
@@ -1138,7 +1150,7 @@ def test_a_repository_whose_own_config_can_run_a_program_is_refused(env: Env, re
         assert "MARK.evil" in _marks(env), _marks(env)  # the control for a credential helper
         _clear_marks(env)
     _wide_cfg(env)
-    for args in (["diff"], ["status", "--porcelain"], ["rev-parse", "HEAD"]):
+    for args in (["diff", "--cached"], ["log", "-n", "1"], ["rev-parse", "HEAD"]):
         r = env.digest(_REAL_GIT, *args, cwd=repo)
         assert r.returncode == 125 and b"repository config" in r.stderr, (args, r.stderr)
         assert key.encode() in r.stderr.lower() or case == "includeif"
@@ -1148,13 +1160,13 @@ def test_a_repository_whose_own_config_can_run_a_program_is_refused(env: Env, re
 def test_a_harmless_repository_config_is_accepted(env: Env, repo: Path) -> None:
     _append_config(repo, '[user]\n\tname = someone\n[branch "main"]\n\tremote = origin\n')
     _wide_cfg(env)
-    assert env.digest(_REAL_GIT, "status", "--porcelain", cwd=repo).returncode == 0
+    assert env.digest(_REAL_GIT, "log", "-n", "1", cwd=repo).returncode == 0
 
 
 def test_a_repository_that_cannot_be_read_is_refused(env: Env, repo: Path) -> None:
     (repo / ".git" / "config").write_text("[core\n\tbroken\n")
     _wide_cfg(env)
-    r = env.digest(_REAL_GIT, "status", "--porcelain", cwd=repo)
+    r = env.digest(_REAL_GIT, "log", "-n", "1", cwd=repo)
     assert r.returncode == 125 and b"repository config" in r.stderr
 
 
@@ -1211,11 +1223,12 @@ def test_every_forced_git_setting_reaches_the_environment() -> None:
     assert mod.child_env(cfg, "/h", "/usr/bin/gh")["GIT_NO_LAZY_FETCH"] == "1"
 
 
-@pytest.mark.parametrize("sub", ["diff", "log", "show", "status"])
+@pytest.mark.parametrize("sub", ["diff", "log", "show"])
 def test_submodules_are_ignored_on_the_command_line_where_the_subcommand_accepts_it(sub: str) -> None:
     mod = lib()
-    entry = mod.AllowEntry(cmd=(_REAL_GIT, sub))
-    assert "--ignore-submodules=all" in mod.plan_args(entry, [_REAL_GIT, sub])
+    entry = mod.AllowEntry(cmd=(_REAL_GIT, sub), options={"--cached": "flag"})
+    argv = [_REAL_GIT, sub, *(["--cached"] if sub == "diff" else [])]
+    assert "--ignore-submodules=all" in mod.plan_args(entry, argv)
 
 
 def test_the_git_version_gate_is_shared_and_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1246,14 +1259,14 @@ def test_the_shared_listing_check_is_default_deny_and_refuses_odd_shapes() -> No
 @pytest.mark.parametrize("sub", ["evil", "git-evil", "diff-tree", "grep", "show-branch", "difftool", "config", "x"])
 def test_git_only_the_reviewed_subcommands_can_be_listed(env: Env, sub: str) -> None:
     env.config(allow=[[_REAL_GIT, sub]])
-    r = env.digest(_REAL_GIT, "status")
+    r = env.digest(_REAL_GIT, "log")
     assert r.returncode == 125 and b"subcommand" in r.stderr
 
 
-@pytest.mark.parametrize("sub", ["diff", "log", "show", "status", "rev-parse", "ls-files", "blame"])
+@pytest.mark.parametrize("sub", ["diff", "log", "show", "rev-parse", "ls-files"])
 def test_git_reviewed_subcommands_are_accepted(env: Env, sub: str) -> None:
     env.config(allow=[[_REAL_GIT, sub]])
-    r = env.digest(_REAL_GIT, "status")
+    r = env.digest(_REAL_GIT, "log")
     assert b"subcommand" not in r.stderr  # refused as unmatched or not at all, never for the subcommand
 
 
@@ -1399,11 +1412,11 @@ def test_a_submodule_with_hostile_config_is_refused_and_ignored_on_the_command_l
     with open(repo / ".git" / "modules" / "sub" / "config", "a", encoding="utf-8") as f:
         f.write(f"[core]\n\tfsmonitor = {prog}\n")
     (repo / "sub" / "f").write_text("two\n")
-    _plain_git(repo, env, "status")
+    _plain_git(repo, env, "status")  # plain git, outside the wrapper: this is the control
     assert "MARK.evil" in _marks(env), _marks(env)  # the control: plain git runs the submodule's program
     _clear_marks(env)
     _wide_cfg(env)
-    r = env.digest(_REAL_GIT, "status", "--porcelain", cwd=repo)
+    r = env.digest(_REAL_GIT, "log", "-n", "1", cwd=repo)
     assert r.returncode == 125 and b"repository config" in r.stderr, r.stderr
     assert _marks(env) == []
 
@@ -1430,3 +1443,126 @@ def test_a_descendant_that_survives_the_sweep_makes_the_run_not_contained(env: E
         if pidfile.exists():
             with contextlib.suppress(ProcessLookupError, ValueError):
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+# ---- round 4: nothing that reads or filters the working tree ---------------------------------------------
+
+
+@pytest.mark.parametrize("sub", ["status", "blame"])
+def test_status_and_blame_are_not_supported_and_the_message_says_why(env: Env, sub: str) -> None:
+    env.config(allow=[[_REAL_GIT, sub]])
+    r = env.digest(_REAL_GIT, "log")
+    assert r.returncode == 125 and b"working tree" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("opt", ["-m", "--modified", "-o", "--others", "-d", "--deleted", "-k", "--killed", "--eol"])
+def test_ls_files_options_that_read_the_work_tree_cannot_be_listed(env: Env, opt: str) -> None:
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{_REAL_GIT}", "ls-files"], options = ["{opt}"] }}]\n'
+    )
+    r = env.digest(_REAL_GIT, "ls-files")
+    assert r.returncode == 125 and b"allow" in r.stderr
+
+
+_DIFF_REFUSED = [
+    ["diff"],  # a plain diff reads the work tree
+    ["diff", "--stat"],
+    ["diff", "HEAD"],  # one revision against the work tree
+    ["diff", "HEAD~1", "HEAD", "HEAD"],
+    ["diff", "--cached", "HEAD", "HEAD"],
+    ["diff", "HEAD~1..HEAD", "HEAD"],
+    ["diff", "a..b..c"],
+    ["diff", "..HEAD"],
+    ["diff", "HEAD.."],
+    ["diff", "HEAD~1", "a b"],
+    ["diff", "HEAD~1", "-x"],
+    ["diff", "HEAD~1", "f:g"],
+    ["diff", "--cached", "a..b"],
+    ["diff", "HEAD~1", "HEAD;ls"],
+]
+
+
+@pytest.mark.parametrize("args", _DIFF_REFUSED)
+def test_a_diff_that_could_touch_the_work_tree_is_refused(env: Env, repo: Path, args: list[str]) -> None:
+    _git_cfg(env)
+    r = env.digest(_REAL_GIT, *args, cwd=repo)
+    assert r.returncode == 125 and env.saved() == [], (args, r.stdout)
+    assert b"refused" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["diff", "--cached"],
+        ["diff", "--staged"],
+        ["diff", "--cached", "HEAD~1"],
+        ["diff", "HEAD~1..HEAD"],
+        ["diff", "HEAD~1", "HEAD"],
+        ["diff", "HEAD~1", "HEAD@{0}"],
+    ],
+)
+def test_the_diff_forms_that_never_touch_the_work_tree_run(env: Env, repo: Path, args: list[str]) -> None:
+    _git_cfg(env)
+    r = env.digest(_REAL_GIT, *args, cwd=repo)
+    assert r.returncode == 0, (args, r.stderr, r.stdout)
+
+
+def test_the_attribute_source_is_the_empty_tree_when_git_is_new_enough() -> None:
+    mod = lib()
+    cfg = mod.Config(out_dir="/x", allow=())
+    assert (
+        mod.child_env(cfg, "/h", "/usr/bin/git", True)["GIT_ATTR_SOURCE"] == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    )
+    assert "GIT_ATTR_SOURCE" not in mod.child_env(cfg, "/h", "/usr/bin/git", False)
+    assert "GIT_ATTR_SOURCE" not in mod.child_env(cfg, "/h", "/usr/bin/other", True)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["log", "-p", "-n", "2"],
+        ["show"],
+        ["rev-parse", "HEAD"],
+        ["ls-files"],
+        ["diff", "--cached"],
+        ["diff", "HEAD~1..HEAD"],
+        ["diff", "HEAD~1", "HEAD"],
+    ],
+)
+def test_a_filter_added_after_the_config_check_runs_in_no_allowed_form(
+    env: Env, repo: Path, args: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prog = _program(env, "evil", 'cat "$1" 2>/dev/null\n')
+    _append_config(repo, f'[filter "x"]\n\tclean = {prog}\n\tsmudge = {prog}\n')
+    (repo / ".gitattributes").write_text("* filter=x\n")
+    _plain_git(repo, env, "status")
+    _plain_git(repo, env, "diff")
+    assert "MARK.evil" in _marks(env), _marks(env)  # the control: plain git runs the filter on the work tree
+    _clear_marks(env)
+    mod = lib()
+    entries = (
+        mod.AllowEntry(cmd=(_REAL_GIT, "diff"), options={"--cached": "flag"}, end_of_options=True),
+        mod.AllowEntry(cmd=(_REAL_GIT, "log"), options={"-p": "flag", "-n": "int"}, end_of_options=True),
+        mod.AllowEntry(cmd=(_REAL_GIT, "show"), end_of_options=True),
+        mod.AllowEntry(cmd=(_REAL_GIT, "rev-parse"), end_of_options=False),
+        mod.AllowEntry(cmd=(_REAL_GIT, "ls-files"), end_of_options=True),
+    )
+    cfg = mod.Config(out_dir=str(env.out), allow=entries)
+    # the config "changed" after the check: the check is skipped, as if the filter had been added just after it
+    monkeypatch.setattr(mod, "check_repo_config", lambda *_a, **_k: (2, 47))
+    seen: list[dict[str, str]] = []
+    real_launch = mod._launch
+
+    def launch(efd: int, argv: list[str], child_env: dict[str, str]) -> object:
+        seen.append(dict(child_env))
+        return real_launch(efd, argv, child_env)
+
+    monkeypatch.setattr(mod, "_launch", launch)
+    monkeypatch.chdir(repo)
+    try:
+        code, _data = mod.execute([_REAL_GIT, *args], cfg)
+    finally:
+        mod._libc_prctl()(36, 0, 0, 0, 0)  # leave the test process as it was found
+    assert code == 0, (args, code)
+    assert _marks(env) == [], (args, _marks(env))
+    assert seen and seen[0].get("GIT_ATTR_SOURCE") == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # the run got it

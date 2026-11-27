@@ -53,11 +53,11 @@ runs. A prefix allow-list still does not make a tool safe: it only narrows what 
 ```toml
 allow = [
   # a table: the fixed prefix, then exactly the options that may follow it
-  { cmd = ["/usr/bin/git", "diff"], options = ["--stat", "--name-only", "--no-color", "--cached"] },
+  { cmd = ["/usr/bin/git", "diff"], options = ["--stat", "--name-only", "--no-color", "--cached", "--staged"] },
   { cmd = ["/usr/bin/git", "log"],  options = { "-n" = "int", "--author" = "word", "--oneline" = "flag" } },
   { cmd = ["/usr/bin/gh", "pr", "checks"], options = ["--watch"] },
   # a bare list is a prefix with no options
-  ["/usr/bin/git", "status"],
+  ["/usr/bin/git", "rev-parse"],
 ]
 ```
 
@@ -75,9 +75,16 @@ allow = [
   character and the line and paragraph separators are refused in fixed arguments, option names and values, positionals
   and paths, before the output file exists.
 - The run order is fixed by `safo-digest`: prefix, your validated options (with values), then `--end-of-options`
-  (`end_of_options = true`, the default for `git` except `blame` and `rev-parse`, whose parsers lack it, and for no
+  (`end_of_options = true`, the default for `git` except `rev-parse`, whose parser lacks it, and for no
   other tool), then the positional arguments.
-- **git**: only these subcommands may be listed: `diff`, `log`, `show`, `status`, `rev-parse`, `ls-files`, `blame`.
+- **git**: only these subcommands may be listed: `log`, `show`, `rev-parse`, `ls-files` and `diff`, and `diff` only in
+  the forms that never touch the working tree. `status` and `blame` are not supported at all, and a plain `git diff`
+  is refused: they read the working tree, and git runs a repository's content filters there (a filter driver's name
+  and the attributes that select it are arbitrary and can be changed by a writer between our config check and the
+  run, so no fixed list of settings can cover them). The allowed `diff` forms are `--cached` or `--staged` (index
+  against HEAD, or against one revision) and two revisions (`A..B` or `A B`); a revision is one token matching
+  `[A-Za-z0-9._/~^@{}-]+`, with no leading dash and no `..` inside it. `ls-files` options that read the working tree
+  (`-m`, `-o`, `-d`, `-k`, `--eol` and their long forms) cannot be listed.
   Anything else, any alias and any external `git-*` command is refused (git aliases cannot be neutralised from
   outside, so an unknown subcommand is refused first; git ignores an alias that shadows a built-in). Two layers keep a
   repository from making git run a program:
@@ -101,7 +108,8 @@ allow = [
      `status.submoduleSummary=false`; plus `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`,
      `GIT_TERMINAL_PROMPT=0` and `GIT_NO_LAZY_FETCH=1`. The command line gets `--no-pager --no-optional-locks` before
      the subcommand, and after `diff`, `log` and `show` `--no-ext-diff --no-textconv --ignore-submodules=all` (`log`
-     and `show` also `--no-show-signature`; `status` gets `--ignore-submodules=all`; `blame` gets `--no-textconv`).
+     and `show` also `--no-show-signature`). With git 2.40 or newer `GIT_ATTR_SOURCE` is also set to the empty tree, so
+     the repository's `.gitattributes` is not consulted at all; an older git skips that variable and relies on the rest.
      This layer is what keeps the run safe if the config changes after the check.
   A user `-c`, `--textconv`, `--ext-diff`, `--open-files-in-pager`, `-O*`, `-x*`, `-u`, `--exec*`, `--extcmd*`,
   `--output*`, `--git-dir*`, `--work-tree*`, `--namespace*`, `--upload-pack*`, `--receive-pack*`, `--config-env*` and
