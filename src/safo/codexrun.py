@@ -93,6 +93,7 @@ import fcntl
 import hashlib
 import os
 import pwd
+import re
 import secrets
 import shutil
 import signal
@@ -368,11 +369,83 @@ WRAPPER_COMMAND_SETTINGS = frozenset(
     }
 )
 CONFIG_SCOPES = frozenset({"system", "global", "local", "worktree", "command", "submodule"})
-# Keys of the repository's own config that can start a program or redirect git in ways the options above do not cover
-# (a content filter named by an attributes file, a textconv, an include of another file, a URL rewrite, an alias).
-DANGEROUS_CONFIG_PREFIXES = ("filter.", "include.", "includeif.", "alias.", "url.", "credential.", "protocol.")
-DANGEROUS_CONFIG_SUFFIXES = (".textconv", ".clean", ".smudge", ".process", ".command", ".external")
-DANGEROUS_CONFIG_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.askpass", "core.gitproxy")
+# The repository's own config is checked against an ALLOWLIST: a key that is not known to be inert is refused (fail
+# closed), so a setting git adds later, or one nobody thought of, never passes. Keys are compared in lower case.
+INERT_CONFIG_KEYS = frozenset(
+    {
+        "core.repositoryformatversion",
+        "core.filemode",
+        "core.bare",
+        "core.logallrefupdates",
+        "core.ignorecase",
+        "core.precomposeunicode",
+        "core.symlinks",
+        "core.autocrlf",
+        "core.safecrlf",
+        "core.eol",
+        "extensions.worktreeconfig",
+        "extensions.objectformat",
+        "user.name",
+        "user.email",
+        "init.defaultbranch",
+        "pull.rebase",
+        "fetch.prune",
+        "submodule.active",
+    }
+)
+# Section -> names allowed under any subsection (remote.<name>.url). A subsection may hold dots.
+INERT_SUBSECTION_NAMES = {
+    "remote": frozenset({"url", "pushurl", "fetch", "tagopt", "prune"}),
+    "branch": frozenset({"remote", "merge", "rebase", "description", "pushremote", "vscode-merge-base"}),
+    "submodule": frozenset({"url", "active"}),
+}
+
+
+def config_key_is_inert(key: str) -> bool:
+    key = key.lower()
+    if key in INERT_CONFIG_KEYS:
+        return True
+    section, _, rest = key.partition(".")
+    subsection, dot, name = rest.rpartition(".")
+    return bool(dot and subsection and name in INERT_SUBSECTION_NAMES.get(section, ()))
+
+
+URL_FORMS = (
+    re.compile(r"^https://[\w.-]+(:\d+)?(/[\w.~%+@:/-]*)?$"),
+    re.compile(r"^ssh://([\w.-]+@)?[\w.-]+(:\d+)?/[\w.~%+/-]*$"),
+    re.compile(r"^[\w.-]+@[\w.-]+:(?!-)[\w.~/-]+$"),  # scp-like user@host:path
+)
+REFSPEC_FORM = re.compile(r"^\+?refs/[\w./*-]+:refs/[\w./*-]+$")
+REF_FORM = re.compile(r"^refs/[\w./-]+$")
+NAME_FORM = re.compile(r"^[\w./-]+$")
+
+
+def config_value_is_inert(key: str, value: str) -> bool:
+    """A value must not carry a control byte or newline, name a helper (`::`) or look like an option (leading `-`,
+    except the two tag options), and the subsection keys that move trust or traffic must have their exact shape.
+    Local paths and file:// are not accepted as URLs."""
+    key = key.lower()
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value) or "::" in value or ".." in value.split("/"):
+        return False
+    section, _, rest = key.partition(".")
+    name = rest.rpartition(".")[2] if "." in rest else rest
+    subsectioned = "." in rest
+    if section in INERT_SUBSECTION_NAMES and subsectioned:
+        if name in {"url", "pushurl"}:
+            return any(form.match(value) for form in URL_FORMS)
+        if name == "fetch":
+            return bool(REFSPEC_FORM.match(value))
+        if name == "tagopt":
+            return value in {"--tags", "--no-tags"}
+        if name in {"prune", "active"}:
+            return value in {"true", "false"}
+        if name == "rebase":
+            return value in {"true", "false", "merges", "interactive"}
+        if name == "merge":
+            return bool(REF_FORM.match(value))
+        if name in {"remote", "pushremote", "vscode-merge-base"}:
+            return bool(NAME_FORM.match(value)) and not value.startswith("-")
+    return not value.startswith("-")
 
 
 def _git(git: str, home: str, root: str, *args: str, errors: str = "replace") -> str:
@@ -448,10 +521,23 @@ def worktree_identity(worktree: str, home: str) -> tuple[tuple[int, int], ...]:
         raise CodexRunError("the worktree changed while it was being checked; nothing was run") from None
 
 
+MIN_GIT_VERSION = (2, 32)  # `config --list --show-scope -z` (2.26), GIT_CONFIG_COUNT (2.31), GIT_CONFIG_GLOBAL (2.32)
+
+
+def check_git_version(git: str, home: str) -> None:
+    """Fail closed unless git reports a version that has the config listing form and the environment config settings
+    this wrapper relies on."""
+    out = _git(git, home, home, "--version")
+    found = re.match(r"^git version (\d+)\.(\d+)", out)
+    if not found or (int(found.group(1)), int(found.group(2))) < MIN_GIT_VERSION:
+        needed = ".".join(str(n) for n in MIN_GIT_VERSION)
+        raise CodexRunError(f"git is missing or older than {needed}; nothing was run")
+
+
 MAX_SUBMODULE_DEPTH = 4
 
 
-def _check_config_keys(git: str, home: str, folder: str) -> None:
+def _check_config_keys(git: str, home: str, folder: str, submodule: bool = False) -> None:
     """Git prints `scope NUL key [NEWLINE value] NUL` per setting. Anything that does not fit that shape is refused, and
     only the wrapper's own command-scope settings are skipped."""
     listing = _git(git, home, folder, "config", "--list", "--show-scope", "-z")
@@ -467,13 +553,22 @@ def _check_config_keys(git: str, home: str, folder: str) -> None:
             raise CodexRunError("the repository config listing is not in the expected form; nothing was run")
         if scope == "command" and (key, value) in WRAPPER_COMMAND_SETTINGS:
             continue
-        if (
-            key.startswith(DANGEROUS_CONFIG_PREFIXES)
-            or key.endswith(DANGEROUS_CONFIG_SUFFIXES)
-            or key in DANGEROUS_CONFIG_KEYS
-        ):
+        if submodule and key == "core.worktree":
+            # git writes a relative path from the submodule's git directory to its working folder. Resolve it the way
+            # git does and require it to be exactly that folder; anything else moves the worktree somewhere unchecked.
+            gitdir = _git(git, home, folder, "rev-parse", "--absolute-git-dir").strip()
+            if value and os.path.realpath(os.path.join(gitdir, value)) == os.path.realpath(folder):
+                continue
+            raise CodexRunError("a submodule's core.worktree does not name the submodule's own folder; nothing was run")
+        if not config_key_is_inert(key):
             raise CodexRunError(
-                f"the repository config sets {output.line(key[:60])}, which can start a program; nothing was run"
+                f"the repository config sets {output.line(key[:60])}, which is not on the list of inert settings; "
+                "nothing was run"
+            )
+        if not config_value_is_inert(key, value):
+            raise CodexRunError(
+                f"the repository config sets {output.line(key[:60])} to a value that is not an accepted form; "
+                "nothing was run"
             )
 
 
@@ -492,7 +587,7 @@ def check_repo_config(git: str, home: str, root: str, depth: int = 0) -> None:
     """Refuse a repository whose own config can start a program through a setting the command-line options do not
     override (a content filter, a textconv, an include, an alias). The same check runs on every submodule, nested ones
     too, because a submodule keeps its own config. Listing config runs nothing."""
-    _check_config_keys(git, home, root)
+    _check_config_keys(git, home, root, submodule=depth > 0)
     if depth >= MAX_SUBMODULE_DEPTH:
         if _submodule_folders(git, home, root):
             raise CodexRunError("the repository nests submodules too deeply to check; nothing was run")
@@ -574,6 +669,7 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
     git = shutil.which("git", path=SAFE_PATH)
     if not git:
         raise CodexRunError("git was not found; nothing was run")
+    check_git_version(git, home)
     top = os.path.realpath(_git(git, home, real, "rev-parse", "--show-toplevel").strip())
     if top != real:
         raise CodexRunError("the folder named is not the top of its git worktree; nothing was run")
@@ -771,6 +867,10 @@ def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch:
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_PAGER": "cat",
+        "GIT_EDITOR": "/bin/false",
+        "GIT_SEQUENCE_EDITOR": "/bin/false",
+        "GIT_ASKPASS": "/bin/false",
     }
     forced = (
         ("core.fsmonitor", "false"),
@@ -778,6 +878,22 @@ def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch:
         ("protocol.allow", "never"),
         ("protocol.ext.allow", "never"),
         ("core.attributesFile", os.devnull),
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+        ("push.gpgsign", "false"),
+        ("gpg.program", "/bin/false"),
+        ("gpg.ssh.program", "/bin/false"),
+        ("gpg.x509.program", "/bin/false"),
+        ("gpg.openpgp.program", "/bin/false"),
+        ("core.alternateRefsCommand", "/bin/false"),
+        ("core.pager", "cat"),
+        ("core.sshCommand", "/bin/false"),
+        ("core.editor", "/bin/false"),
+        ("sequence.editor", "/bin/false"),
+        ("core.askPass", "/bin/false"),
+        ("core.gitProxy", "/bin/false"),
+        ("interactive.diffFilter", "/bin/false"),
+        ("credential.helper", ""),
     )
     env["GIT_CONFIG_COUNT"] = str(len(forced))
     for number, (key, value) in enumerate(forced):
