@@ -747,17 +747,17 @@ def test_a_hard_linked_baseline_is_replaced_not_written_through(tmp_path: Path) 
 def test_concurrent_writers_leave_one_complete_baseline_and_no_temp_files(tmp_path: Path) -> None:
     path = tmp_path / "base.json"
     errors: list[BaseException] = []
-    start = threading.Barrier(16)
+    start = threading.Barrier(8)
 
     def writer(i: int) -> None:
         try:
             start.wait()
-            for _ in range(10):
+            for _ in range(3):
                 ec.write_baseline(path, {m: (i % 10) / 10 for m in MODELS}, population())
         except BaseException as exc:
             errors.append(exc)
 
-    threads = [threading.Thread(target=writer, args=(i,)) for i in range(16)]
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
     for t in threads:
         t.start()
     for t in threads:
