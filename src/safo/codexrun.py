@@ -640,8 +640,8 @@ def child_path(codex: str, node: str | None) -> str:
 
 
 def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch: str) -> dict[str, str]:
-    """The whole environment of codex: this allow-list, built here, never a copy of the caller's. `codex_home` comes
-    from the owner's config (checked), never from the caller's CODEX_HOME."""
+    """The whole environment of codex: this allow-list, built here, never a copy of the caller's. `codex_home` is
+    read from the owner's config (checked), never from the caller's CODEX_HOME."""
     return {
         "PATH": child_path(codex, node),
         "HOME": home,
