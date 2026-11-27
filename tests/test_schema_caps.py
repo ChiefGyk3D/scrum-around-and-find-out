@@ -164,7 +164,7 @@ def test_a_duplicate_field_at_the_cap_edge_is_still_named() -> None:
 # -- shipped boards still load, under the caps ----------------------------------------------------------------
 
 # Measured on 2026-10-27 over boards/*.yaml, examples/*.yaml and tests/data/board.yaml (the file that has the maximum).
-MEASURED = {"repositories": 25, "fields": 12, "views": 5, "options": 15, "area_rules": 27, "ui_only": 4}
+MEASURED = {"repositories": 26, "fields": 12, "views": 5, "options": 15, "area_rules": 27, "ui_only": 4}
 
 
 def test_the_shipped_boards_are_far_under_every_cap() -> None:

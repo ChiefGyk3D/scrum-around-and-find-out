@@ -85,6 +85,9 @@ repositories:
   - owner: ChiefGyk3D
     name: netpulse
     default_area: "SIEM Stack"
+  - owner: ChiefGyk3D
+    name: chiefgyk3d
+    default_area: "Profile README"
 fields:
   - name: Status
     type: single_select
@@ -107,6 +110,7 @@ fields:
       - {name: "Git Your Ship Together", color: YELLOW, description: "Reusable workflows"}
       - {name: "Bots and socials", color: GRAY, description: "Stream, Star, Boon-Tube daemons, hypeman, Yo Mama"}
       - {name: "SIEM Stack", color: BLUE, description: "pfSense SIEM stack and the Docker stack"}
+      - {name: "Profile README", color: GREEN, description: "GitHub profile README"}
   - name: Priority
     type: single_select
     options:
