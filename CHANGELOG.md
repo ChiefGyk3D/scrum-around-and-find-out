@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-threads` (#587): `list` now shows unresolved outdated threads, marked `[outdated]`, and `apply` can reply to and resolve them; the merge watcher counts them as blocking. Docs: `docs/threads.md`. Tests: `tests/test_threads.py`.
 - `safo-cards` (#591, epic #518): sets Kind, Epic, Effort (and Area and Priority defaults) on project cards from a strict-JSON table, validated against board.yaml option names, REST only (add with POST, one PATCH, a `fields=` read-back that must match), `plan` writes nothing; separate entry point, no `TOP_LEVEL_COMMANDS` change. Docs: `docs/cards.md`. Tests: `tests/test_cards.py`.
 - `safo protection --all` (#541, epic #527): audits the default branch of every repository in the board file (less
   `rules.gate_exempt_repos`) against the standard: `CI green` and every security job the repository's pull-request
