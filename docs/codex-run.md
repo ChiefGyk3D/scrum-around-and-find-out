@@ -5,17 +5,17 @@ Before codex starts, the wrapper checks the worktree it is pointed at.
 What is checked and closed:
 
 - The worktree and its linked git directory must be ours, below the account home, and not writable by others.
-- The repository config, and the config of every submodule (nested ones too, to a fixed depth), must not set a key that
-  starts a program (a filter, a textconv, an alias, an include, an ssh command and the like) or changes the allowed
-  transports (any `protocol.*` key). A symlinked submodule path is refused.
+- The repository config, and the config of every submodule (nested ones too, to a fixed depth), may set only keys on an
+  allowlist of known-inert settings (core layout flags, user name and email, remote and branch bookkeeping). Any other
+  key is refused, so a setting nobody listed never passes. Values are checked too: no control byte, no `::` helper form, no leading `-`; URLs must use the https or ssh scheme, or the scp-style `user at host, colon, path` form (no local paths, no file scheme); refspecs and refs have a plain `refs/...` shape. A submodule's the `worktree` key of the `core` section must resolve to the submodule's own folder. git 2.32 or newer is required (checked at start; older or unreadable fails closed). A symlinked submodule path is refused.
 - For the implementer class the tree must be clean. The check runs `git status` against a private git directory that
   holds only a copy of the index, the object store and a fixed config, so nothing the repository can change after the
   config check is read by that call. An index that marks files assume-unchanged or skip-worktree is refused, because
   git never compares those files with the working tree.
 - Codex itself starts with a scrubbed git environment: no system or global config, and command-scope settings that
-  turn off fsmonitor and hooks and forbid network and `ext::` transports. These settings are a default, not an
-  absolute: a more specific repository key could override them, which is why the pre-run check refuses `protocol.*`
-  keys, and a key written after that check is the residual risk below.
+  turn off fsmonitor and hooks, forbid network and `ext::` transports, and force signing and program settings off.
+  These settings are a default, not an absolute: a more specific repository key could override them, which is why the
+  pre-run check allows only listed keys, and a key written after that check is the residual risk below.
 
 What is NOT closed (residual risk):
 
