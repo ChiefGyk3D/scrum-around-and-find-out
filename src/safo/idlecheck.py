@@ -44,7 +44,7 @@ HEAD_BYTES = 4096
 TAIL_BYTES = 8192
 LIST_CAP = 10
 LOG_CAP = 5_000_000
-PR_FIELDS = "number,title,headRefName,isDraft,mergeable,reviewDecision,statusCheckRollup"
+PR_FIELDS = "number,title,headRefName,isDraft,mergeable,reviewDecision,statusCheckRollup,author,isCrossRepository"
 DEFAULT_QUEUE = ".local/share/agent-box-dev/QUEUE.md"
 DEFAULT_LOG = ".local/share/safo-dev/idle-check.log"
 JOB = re.compile(r"(?:^|[\s/])codex(?:\.js)?\sexec\b|daybreak-run")
@@ -83,6 +83,10 @@ def load_config(env: Mapping[str, str]) -> dict[str, Any]:
         cfg["mode"] = env["SAFO_IDLE_MODE"]
     if "SAFO_IDLE_QUEUE" in env:
         cfg["queue_paths"] = [p for p in env["SAFO_IDLE_QUEUE"].split(":") if p]
+    if "SAFO_IDLE_TRUSTED" in env:
+        cfg["trusted_authors"] = [a.strip() for a in env["SAFO_IDLE_TRUSTED"].split(",") if a.strip()]
+    if "SAFO_IDLE_FORKS" in env:
+        cfg["allow_forks"] = env["SAFO_IDLE_FORKS"] == "1"
     if "SAFO_IDLE_REPOS" in env:
         cfg["repos"] = [r.strip() for r in env["SAFO_IDLE_REPOS"].split(",") if r.strip()]
     return cfg
@@ -190,14 +194,21 @@ def count_processes(root: Path, me: int | None = None) -> list[str]:
 
 
 def parse_queue(text: str) -> list[str]:
-    """Unstarted items: `READY:` lines (split on `;`) and dependency-table rows (| item | depends on | state |) whose
-    dependencies are met and that are not running, blocked, held or done. Prose lines are ignored."""
-    items: list[str] = []
+    """The names of the unstarted items (see queue_refs). The names are for tests; the block reason never shows them."""
+    return [name for _, _, name in queue_refs(text)]
+
+
+def queue_refs(text: str) -> list[tuple[int, int, str]]:
+    """Unstarted items as (line number, item number on that line, name): `READY:` lines (split on `;`) and
+    dependency-table rows (| item | depends on | state |) whose dependencies are met and that are not running,
+    blocked, held or done. Prose lines are ignored."""
+    items: list[tuple[int, int, str]] = []
     in_table = False
-    for raw in text.splitlines():
+    for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if line.upper().startswith("READY:"):
-            items.extend(p.strip() for p in line[6:].split(";") if p.strip())
+            names = [p.strip() for p in line[6:].split(";") if p.strip()]
+            items.extend((number, k, name) for k, name in enumerate(names, 1))
             continue
         if not line.startswith("|"):
             in_table = False
@@ -214,7 +225,7 @@ def parse_queue(text: str) -> list[str]:
         says_ready = re.search(r"\bready\b", state) is not None and NEGATED.search(state) is None
         deps_met = dep in ("", "none", "-")
         if says_ready or (deps_met and state in ("", "todo", "queued", "unstarted")):
-            items.append(name)
+            items.append((number, 1, name))
     return items
 
 
@@ -240,7 +251,12 @@ def read_queues(paths: list[str]) -> list[str]:
             raise Degraded("queue: a queue file is unreadable (missing, not a regular file or a link)") from err
         if len(raw) > QUEUE_CAP:
             raise Degraded(f"queue: a queue file is over {QUEUE_CAP} bytes, so its tail would be missed")
-        items.extend(parse_queue(raw.decode("utf-8", "replace")))
+        label = Path(name).name[:40]
+        # only where the item is, never its text: queue lines are free text and reach the model as instructions
+        items.extend(
+            f"queue file {label} line {n}" + (f", item {k}" if k > 1 else "")
+            for n, k, _ in queue_refs(raw.decode("utf-8", "replace"))
+        )
     return items
 
 
@@ -320,6 +336,9 @@ def cached_prs(
 def slim(pr: dict[str, Any]) -> dict[str, Any]:
     """Only the fields the ready rule reads; the check rollups of a busy PR run to hundreds of KB."""
     keep = {k: pr.get(k) for k in ("number", "title", "headRefName", "isDraft", "mergeable", "reviewDecision")}
+    author = pr.get("author")
+    keep["author"] = {"login": author.get("login")} if isinstance(author, dict) else None
+    keep["isCrossRepository"] = pr.get("isCrossRepository")
     rollup = pr.get("statusCheckRollup")
     keep["statusCheckRollup"] = (
         [{"conclusion": c.get("conclusion"), "state": c.get("state")} for c in rollup if is_bad_check(c)]
@@ -338,17 +357,45 @@ def store_prs(env: Mapping[str, str], repos: list[str], prs: list[tuple[str, dic
         tmp.replace(path)
 
 
+def login_key(login: Any) -> str:
+    """A login in comparison form: lower case. A GitHub App keeps its `app/` prefix, so `app/x` is never user `x`."""
+    return login.strip().lower() if isinstance(login, str) else ""
+
+
+def trusted_author(repo: str, pr: dict[str, Any], allow: set[str], forks: bool) -> bool:
+    """True only for the repo owner or an allowlisted login, and (unless forks are allowed) a PR from the same repo.
+    Fails closed: a missing or odd author or fork flag is not trusted. gh pr list has no authorAssociation field."""
+    author = pr.get("author")
+    login = login_key(author.get("login")) if isinstance(author, dict) else ""
+    if not login:
+        return False
+    fork = pr.get("isCrossRepository")
+    if not isinstance(fork, bool) or (fork and not forks):  # a malformed flag is untrusted even when forks are allowed
+        return False
+    return login == login_key(repo.split("/")[0]) or login in allow
+
+
 def ready_prs(
-    prs: list[tuple[str, dict[str, Any]]], busy: str, exempt: set[str], unreviewed: bool = False
-) -> list[str]:
+    prs: list[tuple[str, dict[str, Any]]],
+    busy: str,
+    exempt: set[str],
+    unreviewed: bool = False,
+    allow: set[str] | None = None,
+    forks: bool = False,
+) -> tuple[list[str], int]:
+    """(ready items, count of PRs skipped for an untrusted author). A skipped PR is only counted, never listed."""
     out: list[str] = []
+    skipped = 0
     for repo, pr in prs:
         ref = f"{repo}#{pr['number']}"
         why = pr_reasons(pr, unreviewed)
         if not why or ref in exempt or names_pr(busy, pr["number"], str(pr.get("headRefName") or "")):
             continue
-        out.append(f"{ref} {str(pr.get('title', ''))[:60]} ({', '.join(why)})")
-    return out
+        if not trusted_author(repo, pr, allow or set(), forks):
+            skipped += 1
+            continue
+        out.append(f"{ref} ({', '.join(why)})")  # no title, branch or author: they are third-party text
+    return out, skipped
 
 
 # -- the decision ---------------------------------------------------------------------------------
@@ -424,10 +471,16 @@ def decide(
         if ttl and not pr_notes:
             store_prs(env, repos, prs, now)  # only a complete scan is cached, so a failure is never served again
     exempt = {x for x in cfg.get("exempt", []) if isinstance(x, str)}
-    ready.extend(ready_prs(prs, "\n".join(busy), exempt, cfg.get("include_unreviewed") is True))
+    trusted = cfg.get("trusted_authors")
+    allow = {login_key(a) for a in trusted if isinstance(a, str)} if isinstance(trusted, list) else set()
+    found, skipped = ready_prs(
+        prs, "\n".join(busy), exempt, cfg.get("include_unreviewed") is True, allow, cfg.get("allow_forks") is True
+    )
+    ready.extend(found)
     unknown = any(n.startswith(("agents:", "processes:")) for n in notes)
     running = len(busy)
     fields: dict[str, Any] = {"running": None if unknown else running, "ready": len(ready), "floor": floor}
+    fields["skipped_untrusted"] = skipped
     fields["degraded"] = [n.split(":")[0] for n in notes]
     if not unknown and running < floor and ready:
         text = reason_text(running, floor, ready, notes)
@@ -446,7 +499,15 @@ def decide(
 def main_with(stdin: TextIO, stdout: TextIO, env: Mapping[str, str], runner: Runner = subprocess.run) -> int:
     now = time.time()
     stamp = dt.datetime.fromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%S")
-    row: dict[str, Any] = {"ts": stamp, "session": "", "running": None, "ready": None, "floor": None, "degraded": []}
+    row: dict[str, Any] = {
+        "ts": stamp,
+        "session": "",
+        "running": None,
+        "ready": None,
+        "floor": None,
+        "skipped_untrusted": 0,  # on every log path, including the stop_hook_active and error paths
+        "degraded": [],
+    }
     try:
         payload = loads(stdin.read(INPUT_CAP))
         if not isinstance(payload, dict):
