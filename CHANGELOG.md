@@ -4,13 +4,17 @@
 
 - `safo-digest` (#531, child of #518): runs one allow-listed command and prints a capped digest in a fixed untrusted-data
   frame, saving the full output to a private file. The executable is an absolute path, opened without following
-  symlinks, owner and parent-directory checked, and started from the verified file descriptor. The command gets a
-  minimal environment and an empty private home (recreated each run), and its arguments are validated against a
-  per-entry option allowlist with typed values (no free-form option passes); git and gh have extra refusals. A timeout,
-  a normal exit or a SIGTERM, SIGHUP or SIGINT kills the command and every descendant, including detached ones.
-  The output directory and every parent are checked and re-verified after the run. Digest lines are cleaned and
-  prefixed, header fields are cleaned, and user, host, home, callsign and grid text is replaced (best effort, the saved
-  file is raw). Exit 124 timeout, 125 refused. Docs: `docs/digest.md`. Tests: `tests/test_digest.py`.
+  symlinks, owner and parent-directory checked, started from the verified file descriptor, and pinned by sha256 unless
+  it is git or gh; scripts need a pin and a direct, verified interpreter. Only a short positive list of read-only git
+  subcommands and gh subcommand pairs may be listed, git runs with our own safe settings, and every argument is
+  validated against a per-entry option allowlist with typed values and no control characters. The command gets a
+  minimal environment, an empty private home (recreated each run) and only inert pass-through variables from a fixed
+  list. Process containment (child subreaper, `/proc`, pidfds) is mandatory: a timeout, a normal exit or a SIGTERM,
+  SIGHUP or SIGINT kills the command and every descendant, and without containment nothing starts. The output
+  directory and every parent are checked and re-verified before the path is printed; the path is labelled advisory.
+  Digest lines are cleaned and prefixed, header fields are cleaned, and user, host, home, callsign and grid text is
+  replaced (best effort, the saved file is raw). Exit 124 timeout, 125 refused. Docs: `docs/digest.md`. Tests:
+  `tests/test_digest.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
   frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
   stderr and kills and reaps the child on any exit, and a hung-child test proves the harness fails instead of hanging.

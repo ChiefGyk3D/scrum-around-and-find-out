@@ -7,7 +7,10 @@ writable parent, and /tmp is one.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import getpass
+import hashlib
 import importlib
 import itertools
 import os
@@ -32,13 +35,32 @@ REAL_PY = os.path.realpath(sys.executable)
 _COUNTER = itertools.count()
 
 
-def _toml_list(items: list[list[str]]) -> str:
-    def q(s: str) -> str:
-        s = s.replace("\\", "\\\\").replace('"', '\\"')
-        out = "".join(f"\\u{ord(c):04x}" if ord(c) < 32 or ord(c) in (0x2028, 0x202E) else c for c in s)
-        return '"' + out + '"'
+def enc(code: str) -> str:
+    """Arguments may not hold a newline, so multi-line test programs travel with a marker the test tool expands."""
+    return code.replace("\n", " ;;NL;; ")
 
-    return "[" + ", ".join("[" + ", ".join(q(s) for s in i) + "]" for i in items) + "]"
+
+def pin(path: Path | str) -> str:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return "0" * 64
+
+
+def _q(s: str) -> str:
+    s = s.replace("\\", "\\\\").replace('"', '\\"')
+    out = "".join(f"\\u{ord(c):04x}" if ord(c) < 32 or ord(c) in (0x2028, 0x202E) else c for c in s)
+    return '"' + out + '"'
+
+
+def _toml_list(items: list[list[str]], pinned: bool = True) -> str:
+    def entry(i: list[str]) -> str:
+        cmd = "[" + ", ".join(_q(s) for s in i) + "]"
+        if pinned and i and os.path.isabs(i[0]) and len(i) > 1:
+            return f'{{ cmd = {cmd}, sha256 = "{pin(i[0])}" }}'
+        return cmd
+
+    return "[" + ", ".join(entry(i) for i in items) + "]"
 
 
 def alive(pid: int) -> bool:
@@ -74,13 +96,18 @@ class Env:
         d = self.tmp / subdir if subdir else self.tmp
         d.mkdir(mode=0o700, exist_ok=True)
         p = d / name
-        p.write_text(f'#!{REAL_PY}\nimport sys, os, time\nexec(next(a for a in sys.argv[2:] if "(" in a))\n')
+        p.write_text(
+            f"#!{REAL_PY}\nimport sys, os, time\n"
+            'exec(next(a for a in sys.argv[2:] if "(" in a).replace(" ;;NL;; ", chr(10)))\n'
+        )
         p.chmod(0o755)
         return p
 
-    def config(self, allow: list[list[str]] | None = None, extra: str = "", out: Path | None = None) -> None:
+    def config(
+        self, allow: list[list[str]] | None = None, extra: str = "", out: Path | None = None, pinned: bool = True
+    ) -> None:
         allow = [[str(self.tool), "x"]] if allow is None else allow
-        self.cfg.write_text(f'out_dir = "{out or self.out}"\nallow = {_toml_list(allow)}\n{extra}\n')
+        self.cfg.write_text(f'out_dir = "{out or self.out}"\nallow = {_toml_list(allow, pinned)}\n{extra}\n')
 
     def digest(
         self,
@@ -104,7 +131,7 @@ class Env:
     def py(
         self, code: str, *extra: str, flags: tuple[str, ...] = (), env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[bytes]:
-        return self.digest(str(self.tool), "x", code, *extra, flags=flags, env=env)
+        return self.digest(str(self.tool), "x", enc(code), *extra, flags=flags, env=env)
 
     def saved(self) -> list[Path]:
         return sorted(self.out.glob("*.log")) if self.out.exists() else []
@@ -252,7 +279,7 @@ def test_missing_executable_is_127(env: Env) -> None:
     ],
 )
 def test_unsafe_allow_prefixes_are_refused_at_config_load(env: Env, prefix: list[str]) -> None:
-    env.config(allow=[prefix])
+    env.config(allow=[prefix], pinned=False)
     r = env.py("print(1)")
     assert r.returncode == 125 and b"allow" in r.stderr
     assert b"not on the allow list" not in r.stderr  # refused at config load, not merely unmatched
@@ -345,38 +372,34 @@ def test_child_gets_a_minimal_environment(env: Env) -> None:
 
 
 def test_pass_env_passes_only_the_named_variable(env: Env) -> None:
-    env.config(extra='pass_env = ["GH_TOKEN"]')
-    code = "print(os.environ.get('GH_TOKEN'), os.environ.get('OTHER_TOKEN'))"
-    r = env.py(code, env={"GH_TOKEN": "t1", "OTHER_TOKEN": "t2"})
-    assert b"t1 None" in r.stdout
+    env.config(extra='pass_env = ["TZ"]')
+    code = "print(os.environ.get('TZ'), os.environ.get('NO_COLOR'))"
+    r = env.py(code, env={"TZ": "UTC", "NO_COLOR": "1"})
+    assert b"UTC None" in r.stdout
 
 
 @pytest.mark.parametrize(
-    "name", ["LD_PRELOAD", "PATH", "HOME", "PYTHONPATH", "GIT_DIR", "PAGER", "lower", "XDG_DATA_HOME"]
+    "name",
+    ["LD_PRELOAD", "PATH", "HOME", "PYTHONPATH", "GIT_DIR", "PAGER", "tz", "XDG_DATA_HOME", "GH_TOKEN", "FOO", "TZ2"],
 )
-def test_pass_env_refuses_dangerous_names(env: Env, name: str) -> None:
+def test_pass_env_refuses_everything_outside_the_fixed_safe_list(env: Env, name: str) -> None:
     env.config(extra=f'pass_env = ["{name}"]')
     assert env.py("print(1)").returncode == 125
 
 
-@pytest.mark.parametrize(
-    ("exe", "args"),
-    [
-        ("git", ["log", "-c", "core.x=y"]),
-        ("git", ["log", "--upload-pack=x"]),
-        ("gh", ["pr", "api"]),
-        ("gh", ["pr", "alias"]),
-    ],
-)
-def test_tool_specific_unsafe_options_are_refused_and_not_run(env: Env, exe: str, args: list[str]) -> None:
+@pytest.mark.parametrize("name", ["GH_HOST", "GH_REPO", "NO_COLOR", "TERM", "TZ"])
+def test_pass_env_accepts_the_safe_names(env: Env, name: str) -> None:
+    env.config(extra=f'pass_env = ["{name}"]')
+    assert env.py("print(1)").returncode == 0
+
+
+@pytest.mark.parametrize("args", [["log", "-c", "core.x=y"], ["log", "--upload-pack=x"], ["diff", "--textconv"]])
+def test_git_unsafe_options_are_refused_and_not_run(env: Env, args: list[str]) -> None:
     marker = env.tmp / "ran"
-    tool = env.make_tool(exe, "bin")
+    tool = env.make_tool("git", "bin")
     env.config(allow=[[str(tool), args[0]]])
     r = env.digest(str(tool), *args)
     assert r.returncode == 125 and not marker.exists()
-    if exe == "gh":
-        ok = env.digest(str(tool), args[0], f"open({str(marker)!r}, 'w')")  # same prefix, harmless arguments
-        assert ok.returncode == 0 and marker.exists()
 
 
 _GIT_HOSTILE = [
@@ -409,7 +432,7 @@ def test_git_refuses_every_option_not_explicitly_allowed(env: Env, hostile: str)
     tool = env.make_tool("git", "bin")
     env.cfg.write_text(
         f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "diff"], options = ["--stat", "--name-only"],'
-        " end_of_options = false }]\n"
+        f' end_of_options = false, sha256 = "{pin(tool)}" }}]\n'
     )
     code = f"open({str(marker)!r}, 'w')"
     r = env.digest(str(tool), "diff", code, hostile)
@@ -423,7 +446,7 @@ def test_git_refuses_every_option_not_explicitly_allowed(env: Env, hostile: str)
 
 _FAKE_OPTS = (
     'allow = [{ cmd = ["%s", "log"], options = { "-n" = "int", "--author" = "word", "--oneline" = "flag" },'
-    " end_of_options = false }]\n"
+    ' end_of_options = false, sha256 = "%s" }]\n'
 )
 
 
@@ -446,7 +469,7 @@ _FAKE_OPTS = (
 def test_value_options_are_typed_and_double_dash_is_never_a_value(env: Env, args: list[str]) -> None:
     marker = env.tmp / "ran"
     tool = env.make_tool("tool2", "bin")
-    env.cfg.write_text(f'out_dir = "{env.out}"\n' + _FAKE_OPTS % tool)
+    env.cfg.write_text(f'out_dir = "{env.out}"\n' + _FAKE_OPTS % (tool, pin(tool)))
     code = f"open({str(marker)!r}, 'w')"
     r = env.digest(str(tool), "log", code, *args)
     assert r.returncode == 125 and not marker.exists(), args
@@ -458,7 +481,7 @@ def test_options_come_first_then_end_of_options_then_positionals(env: Env) -> No
     tool = env.make_tool("tool3", "bin")
     env.cfg.write_text(
         f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"], options = ["--oneline"],'
-        " end_of_options = true }]\n"
+        f' end_of_options = true, sha256 = "{pin(tool)}" }}]\n'
     )
     r = env.digest(str(tool), "log", "print(sys.argv[2:])", "--oneline")
     assert r.returncode == 0
@@ -468,7 +491,9 @@ def test_options_come_first_then_end_of_options_then_positionals(env: Env) -> No
 @pytest.mark.parametrize("opts", ['["--"]', '{ "--" = "flag" }', '{ "-n" = "number" }', '["plain"]'])
 def test_a_bare_double_dash_or_bad_type_cannot_be_listed(env: Env, opts: str) -> None:
     tool = env.make_tool("tool4", "bin")
-    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"], options = {opts} }}]\n')
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"], options = {opts}, sha256 = "{pin(tool)}" }}]\n'
+    )
     r = env.digest(str(tool), "log", "print(1)")
     assert r.returncode == 125 and b"allow" in r.stderr
 
@@ -576,16 +601,45 @@ def test_git_prefix_may_not_start_with_an_option(env: Env) -> None:
     assert env.digest(str(tool), "-C", "log").returncode == 125
 
 
-def test_any_tool_refuses_an_unlisted_option_and_gh_free_form_subcommands(env: Env) -> None:
+def test_any_tool_refuses_an_unlisted_option(env: Env) -> None:
     marker = env.tmp / "ran"
     code = f"open({str(marker)!r}, 'w')"
     assert env.digest(str(env.tool), "x", code, "--anything").returncode == 125 and not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["pr", "merge"],
+        ["pr"],
+        ["run", "rerun"],
+        ["api", "user"],
+        ["extension", "list"],
+        ["auth", "status"],
+        ["issue", "create"],
+        ["alias", "list"],
+        ["repo", "view"],
+    ],
+)
+def test_gh_is_limited_to_the_fixed_read_only_pairs(env: Env, cmd: list[str]) -> None:
+    env.config(allow=[["/usr/bin/gh", *cmd]], pinned=False)
+    r = env.py("print(1)")
+    assert r.returncode == 125 and b"gh" in r.stderr
+
+
+def test_gh_listed_pairs_run_with_typed_options_only(env: Env) -> None:
+    marker = env.tmp / "ran"
+    code = f"open({str(marker)!r}, 'w')"
     gh = env.make_tool("gh", "bin")
-    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{gh}", "pr"], options = ["--json"] }}]\n')
-    assert env.digest(str(gh), "pr", code, "--jq", ".x").returncode == 125
-    assert env.digest(str(gh), "pr", code, "api").returncode == 125
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{gh}", "pr", "view"], options = {{ "--json" = "word" }},'
+        f' end_of_options = false, sha256 = "{pin(gh)}" }}]\n'
+    )
+    assert env.digest(str(gh), "pr", "view", code, "--web").returncode == 125
+    assert env.digest(str(gh), "pr", "view", code, "api").returncode == 125
+    assert env.digest(str(gh), "pr", "view", code, "--json", "--").returncode == 125
     assert not marker.exists()
-    assert env.digest(str(gh), "pr", code, "--json", "x").returncode == 0 and marker.exists()
+    assert env.digest(str(gh), "pr", "view", code, "--json", "state").returncode == 0 and marker.exists()
 
 
 def test_private_home_is_recreated_empty_on_every_run(env: Env) -> None:
@@ -664,7 +718,7 @@ def test_normal_exit_does_not_leave_background_descendants(env: Env) -> None:
 def test_signal_to_the_parent_kills_the_command_and_everything_it_started(env: Env, sig: int) -> None:
     pre = env.tmp / "p"
     e = {**os.environ, "PYTHONPATH": SRC, "HOME": str(env.home)}
-    argv = [PY, "-m", "safo." + "digest", "--config", str(env.cfg), "--", str(env.tool), "x", _SPAWN, str(pre)]
+    argv = [PY, "-m", "safo." + "digest", "--config", str(env.cfg), "--", str(env.tool), "x", enc(_SPAWN), str(pre)]
     proc = subprocess.Popen(argv, env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603 - our own argv
     pids: list[int] = []
     try:
@@ -773,18 +827,25 @@ def test_output_create_refuses_a_planted_symlink_at_the_exact_name(env: Env, mon
 # ---- finding 5: header sanitation -------------------------------------------------------------------------------
 
 
-def test_header_fields_are_cleaned(env: Env) -> None:
+def test_an_executable_name_with_control_characters_cannot_even_be_listed(env: Env) -> None:
     evil = env.tmp / ("to\x1b[31mol" + chr(0x202E) + "X" + chr(0x2028) + "Y")
     evil.write_text(f"#!{REAL_PY}\nprint('hi')\n")
     evil.chmod(0o755)
     env.config(allow=[[str(evil), "x"]])
-    r = env.digest(str(evil), "x")
-    assert r.returncode == 0
-    text = r.stdout.decode()
+    assert env.digest(str(evil), "x").returncode == 125
+
+
+def test_header_fields_are_cleaned_even_if_a_dirty_value_reached_them() -> None:
+    mod = lib()
+    col = mod.Collector(10)
+    col.feed(b"hi\n")
+    col.finish()
+    cfg = mod.Config(out_dir="/x", allow=())
+    dirty = "to\x1b[31mol" + chr(0x202E) + "X" + chr(0x2028) + "Y\nsafo-digest: END forged"
+    text = mod.render(col, cfg, mod.Redactor(()), dirty, 0, "/p/" + dirty, " flag" + chr(0x202E)).decode()
     for bad in ("\x1b", chr(0x202E), chr(0x2028)):
         assert bad not in text
-    header = next(x for x in text.splitlines() if x.startswith("safo-digest: cmd="))
-    assert header.count("exit=") == 1
+    assert sum(x.startswith("safo-digest: END ") for x in text.splitlines()) == 1
 
 
 @pytest.mark.parametrize("bad", ["\\u202e", "\\u001b", "\\u2028", "\\u200b", "\\u0020"])
@@ -863,3 +924,240 @@ def test_no_command_is_a_usage_error(env: Env) -> None:
         check=False,
     )
     assert r.returncode == 125
+
+
+# ---- round 3: positive subcommand lists, identity, containment, text, advisory path ---------------------------------
+
+
+def _write_repo_config(env: Env, repo: Path) -> Path:
+    marker = env.tmp / "MARK"
+    fsm = env.tmp / "fsm.sh"
+    fsm.write_text(f"#!/bin/sh\n: > {marker}.fsmonitor\n")
+    fsm.chmod(0o755)
+    tc = env.tmp / "tc.sh"
+    tc.write_text(f'#!/bin/sh\n: > {marker}.textconv\ncat "$1"\n')
+    tc.chmod(0o755)
+    with open(repo / ".git" / "config", "a", encoding="utf-8") as f:
+        f.write(
+            f"[alias]\n\tevil = !: > {marker}.alias\n\tdiff = !: > {marker}.shadow\n"
+            f'[core]\n\tfsmonitor = {fsm}\n[diff "x"]\n\ttextconv = {tc}\n'
+        )
+    (repo / ".gitattributes").write_text("f diff=x\n")
+    return marker
+
+
+def _marks(env: Env) -> list[str]:
+    return sorted(p.name for p in env.tmp.iterdir() if p.name.startswith("MARK"))
+
+
+def test_real_git_repository_configured_execution_is_neutralised(env: Env, repo: Path) -> None:
+    marker = _write_repo_config(env, repo)
+    raw_env = {**os.environ, "HOME": str(env.home)}
+    subprocess.run([_REAL_GIT, "diff"], cwd=repo, env=raw_env, check=False, capture_output=True)  # noqa: S603
+    subprocess.run([_REAL_GIT, "status"], cwd=repo, env=raw_env, check=False, capture_output=True)  # noqa: S603
+    control = _marks(env)
+    assert "MARK.textconv" in control, control  # the control: plain git really runs the configured program
+    for name in control:
+        (env.tmp / name).unlink()
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "diff"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "log"], options = ["-p"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "show"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "status"], options = ["--porcelain"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "blame"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "ls-files"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "rev-parse"], end_of_options = false }},\n]\n'
+    )
+    runs = [
+        ["diff"],
+        ["log", "-p"],
+        ["show", "HEAD"],
+        ["status", "--porcelain"],
+        ["blame", "f"],
+        ["ls-files"],
+        ["rev-parse", "HEAD"],
+    ]
+    for args in runs:
+        r = env.digest(_REAL_GIT, *args, cwd=repo)
+        assert r.returncode == 0, (args, r.stdout)
+    assert _marks(env) == [], _marks(env)
+    assert marker.name == "MARK"
+
+
+@pytest.mark.parametrize("sub", ["evil", "git-evil", "diff-tree", "grep", "show-branch", "difftool", "config", ""])
+def test_git_only_the_reviewed_subcommands_can_be_listed(env: Env, sub: str) -> None:
+    env.config(allow=[[_REAL_GIT, sub or " "]], pinned=False)
+    r = env.py("print(1)")
+    assert r.returncode == 125 and b"subcommand" in r.stderr
+
+
+@pytest.mark.parametrize("sub", ["diff", "log", "show", "status", "rev-parse", "ls-files", "blame"])
+def test_git_reviewed_subcommands_are_accepted(env: Env, sub: str) -> None:
+    env.config(allow=[[_REAL_GIT, sub]], pinned=False)
+    r = env.py("print(1)")
+    assert b"subcommand" not in r.stderr  # refused as unmatched, not for the subcommand
+
+
+def _fake_inproc(env: Env) -> tuple[ModuleType, object, list[str]]:
+    mod = lib()
+    entry = mod.AllowEntry(cmd=(str(env.tool), "x"), sha256=pin(env.tool))
+    cfg = mod.Config(out_dir=str(env.out), allow=(entry,))
+    marker = env.tmp / "ran"
+    return mod, cfg, [str(env.tool), "x", f"open({str(marker)!r}, 'w')"]
+
+
+@pytest.mark.parametrize("how", ["prctl-fails", "no-effect", "no-proc", "no-pidfd"])
+def test_containment_is_mandatory_no_child_and_no_output_without_it(
+    env: Env, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    mod, cfg, argv = _fake_inproc(env)
+
+    def fake_prctl(op: int, a: int, _b: int, _c: int, _d: int) -> int:
+        if how == "prctl-fails":
+            ctypes.set_errno(errno.EPERM)
+            return -1
+        if op == 37 and how != "no-effect":
+            ctypes.c_int.from_address(a).value = 1
+        return 0
+
+    monkeypatch.setattr(mod, "_libc_prctl", lambda: fake_prctl)
+    real_listdir = os.listdir
+
+    def listdir(path: str = ".") -> list[str]:
+        if path == "/proc":
+            raise OSError(errno.EACCES, "denied")
+        return real_listdir(path)
+
+    if how == "no-proc":
+        monkeypatch.setattr(mod.os, "listdir", listdir)
+    if how == "no-pidfd":
+        monkeypatch.setattr(mod.os, "pidfd_open", lambda *_a, **_k: (_ for _ in ()).throw(OSError(errno.ENOSYS, "x")))
+    with pytest.raises(mod.DigestError, match=r"refusing|contain"):
+        mod.execute(argv, cfg)
+    assert not (env.tmp / "ran").exists() and not env.out.exists()
+
+
+def test_a_failing_process_sweep_is_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = lib()
+
+    def boom(_root: int) -> dict[int, int]:
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(mod, "_descendants", boom)
+    assert mod._sweep() is False
+    assert mod._cleanup(None) is False
+
+
+def test_a_kill_is_sent_only_to_the_process_that_was_enumerated(env: Env) -> None:
+    mod = lib()
+    child = subprocess.Popen([REAL_PY, "-c", "import time; time.sleep(60)"])  # noqa: S603 - fixed argv
+    try:
+        start = mod._starttime(child.pid)
+        mod._kill_verified(child.pid, start + 1)  # a recycled pid would carry a different start time
+        time.sleep(0.3)
+        assert child.poll() is None
+        mod._kill_verified(child.pid, start)
+        assert child.wait(timeout=10) == -signal.SIGKILL
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def _script(env: Env, name: str, first_line: str, body: str = "print('hi')\n") -> Path:
+    p = env.tmp / name
+    p.write_text(first_line + "\n" + body)
+    p.chmod(0o755)
+    return p
+
+
+def test_a_script_without_a_pin_is_refused_at_run_time(env: Env) -> None:
+    tool = env.make_tool("git", "bin")
+    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"] }}]\n')  # no sha256
+    r = env.digest(str(tool), "log", "print(1)")
+    assert r.returncode == 125 and b"script" in r.stderr and env.saved() == []
+
+
+def test_a_pin_that_does_not_match_is_refused(env: Env) -> None:
+    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{env.tool}", "x"], sha256 = "{"1" * 64}" }}]\n')
+    r = env.py("print(1)")
+    assert r.returncode == 125 and b"sha256" in r.stderr and env.saved() == []
+
+
+def test_a_non_git_gh_tool_must_carry_a_pin_to_be_listed(env: Env) -> None:
+    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{env.tool}", "x"] }}]\n')
+    r = env.py("print(1)")
+    assert r.returncode == 125 and b"sha256" in r.stderr
+
+
+@pytest.mark.parametrize("kind", ["env", "relative", "script-interpreter"])
+def test_script_interpreters_must_be_direct_verified_binaries(env: Env, kind: str) -> None:
+    marker = env.tmp / "ran"
+    body = f"open({str(marker)!r}, 'w')\n"
+    if kind == "env":
+        first = "#!/usr/bin/env python3"
+    elif kind == "relative":
+        first = "#!python3"
+    else:
+        inner = _script(env, "inner", f"#!{REAL_PY}", "pass\n")
+        first = f"#!{inner}"
+    t = _script(env, "tool5", first, body)
+    env.config(allow=[[str(t), "x"]])
+    r = env.digest(str(t), "x")
+    assert r.returncode == 125 and not marker.exists() and env.saved() == []
+
+
+@pytest.mark.parametrize("bad", ["a\nb", "a\rb", "a\x1bb", "a" + chr(0x202E) + "b", "a" + chr(0x2028) + "b", "a\x7fb"])
+def test_control_and_format_characters_in_arguments_are_refused_before_anything_is_created(env: Env, bad: str) -> None:
+    marker = env.tmp / "ran"
+    r = env.digest(str(env.tool), "x", f"open({str(marker)!r}, 'w')", bad)
+    assert r.returncode == 125 and not marker.exists() and not env.out.exists()
+
+
+def test_a_value_must_match_in_full_not_just_up_to_a_trailing_newline(env: Env) -> None:
+    tool = env.make_tool("tool6", "bin")
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"],'
+        ' options = { "-n" = "int", "--author" = "word" },'
+        f' end_of_options = false, sha256 = "{pin(tool)}" }}]\n'
+    )
+    marker = env.tmp / "ran"
+    code = f"open({str(marker)!r}, 'w')"
+    assert env.digest(str(tool), "log", code, "-n", "5\n").returncode == 125
+    assert env.digest(str(tool), "log", code, "--author", "bob\n").returncode == 125
+    assert env.digest(str(tool), "log", code, "-n", "5x").returncode == 125  # a prefix match is not a match
+    assert env.digest(str(tool), "log", code, "--author", "bob;touch").returncode == 125
+    assert not marker.exists()
+    assert env.digest(str(tool), "log", code, "-n", "5", "--author", "bob smith").returncode == 0
+
+
+def test_a_nul_in_the_config_is_refused(env: Env) -> None:
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{env.tool}", "x\\u0000y"], sha256 = "{pin(env.tool)}" }}]\n'
+    )
+    assert env.py("print(1)").returncode == 125
+
+
+def test_the_saved_path_is_labelled_advisory(env: Env) -> None:
+    r = env.py("print('hi')")
+    header = next(x for x in r.stdout.decode().splitlines() if x.startswith("safo-digest: cmd="))
+    assert "path-advisory=not-verified-after-printing" in header
+
+
+def test_out_dir_swapped_during_rendering_is_caught_before_printing(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod, cfg, argv = _fake_inproc(env)
+    real_render = mod.render
+    out = env.out
+
+    def swapping(*a: object, **k: object) -> bytes:
+        os.rename(out, str(out) + ".moved")
+        os.mkdir(out, 0o700)
+        return bytes(real_render(*a, **k))
+
+    monkeypatch.setattr(mod, "render", swapping)
+    try:
+        with pytest.raises(mod.DigestError, match="changed"):
+            mod.execute([argv[0], argv[1], "print(1)"], cfg)
+    finally:
+        mod._libc_prctl()(36, 0, 0, 0, 0)  # leave the test process as it was found

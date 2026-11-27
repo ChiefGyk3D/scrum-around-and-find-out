@@ -20,10 +20,13 @@ import dataclasses
 import errno
 import getpass
 import grp
+import hashlib
+import hmac
 import os
 import pwd
 import re
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -48,78 +51,63 @@ _STORE_LINE = 512  # bytes kept of one line for the digest; the file keeps all o
 _SHOW_LINE = 200  # characters shown of one line
 _CHILD_PATH = "/usr/bin:/bin"
 PRIVATE_HOME = ".home"
-_INTERPRETERS = re.compile(
-    r"^(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|doas|su|ssh|scp|nice|nohup|timeout|time|find"
-    r"|awk|gawk|mawk|nawk|sed|make|perl[0-9.]*|ruby[0-9.]*|node(js)?|python[0-9.]*|pypy[0-9.]*|php[0-9.]*|lua[0-9.]*)$"
-)
-_BAD_ENV = re.compile(
-    r"^(LD_.*|PYTHON.*|GIT_.*|PAGER|EDITOR|VISUAL|BASH_ENV|ENV|IFS|PATH|HOME|XDG_.*|PERL.*|RUBY.*|NODE_.*"
-    r"|LANG|LC_.*|SHELL)$"
-)
-_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# Environment variables a config may pass through: a short, positive list of inert names. Nothing else, ever.
+_SAFE_ENV = frozenset({"GH_HOST", "GH_REPO", "NO_COLOR", "TERM", "TZ"})
 # Options that make git (or what it calls) run another program or touch other places. Refused even if listed.
 _GIT_BAD = re.compile(
-    r"^(-c.*|-O.*|-x.*|-u|--exec.*|--extcmd.*|--exec-path.*|--ext-diff.*|--upload-pack.*|--receive-pack.*"
-    r"|--config-env.*|--paginate|--open-files-in-pager.*|--output.*|--git-dir.*|--work-tree.*|--namespace.*)$"
+    r"^(-c.*|-O.*|-x.*|-u|--exec.*|--extcmd.*|--exec-path.*|--ext-diff.*|--textconv.*|--upload-pack.*"
+    r"|--receive-pack.*|--config-env.*|--paginate|--open-files-in-pager.*|--output.*|--git-dir.*|--work-tree.*"
+    r"|--namespace.*)$"
 )
-# Subcommands that can run commands, fetch or push code, or change the repository.
-_GIT_SUBCOMMANDS_BAD = {
-    "difftool",
-    "mergetool",
-    "rebase",
-    "bisect",
-    "submodule",
-    "filter-branch",
-    "filter-repo",
-    "clone",
-    "fetch",
-    "push",
-    "pull",
-    "archive",
-    "am",
-    "apply",
-    "daemon",
-    "instaweb",
-    "svn",
-    "send-email",
-    "request-pull",
-    "gc",
-    "maintenance",
-    "hook",
-    "config",
-    "remote",
-    "worktree",
-    "stash",
-    "commit",
-    "merge",
-    "reset",
-    "checkout",
-    "switch",
-    "restore",
-    "cherry-pick",
-    "revert",
-    "tag",
-    "branch",
-    "clean",
-    "init",
-    "add",
-    "rm",
-    "mv",
-    "notes",
-    "replace",
-    "lfs",
-    "bundle",
-    "web--browse",
-    "help",
-    "shell",
-    "cvsserver",
-    "http-fetch",
-    "http-push",
-    "fast-import",
-    "update-ref",
+# The only git subcommands that may be listed: reviewed, read-only. Anything else (and every alias or external
+# git-* command) is refused, because git alias resolution cannot be neutralised from outside.
+_GIT_SUBCOMMANDS = frozenset({"diff", "log", "show", "status", "rev-parse", "ls-files", "blame"})
+# Global git settings put before the subcommand on every run; the caller can add none (-c stays refused).
+_GIT_PRE = (
+    "--no-pager",
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "credential.helper=",
+)
+_GIT_POST = {
+    "diff": ("--no-ext-diff", "--no-textconv"),
+    "log": ("--no-ext-diff", "--no-textconv"),
+    "show": ("--no-ext-diff", "--no-textconv"),
+    "blame": ("--no-textconv",),
 }
+_GIT_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ATTR_NOSYSTEM": "1",
+}
+# git subcommands whose parser does not know `--end-of-options` (their positionals are still never dash-led).
+_GIT_NO_END_OF_OPTIONS = frozenset({"blame", "rev-parse"})
+# The only gh subcommand pairs that may be listed.
+_GH_PAIRS = frozenset(
+    {
+        ("pr", "view"),
+        ("pr", "checks"),
+        ("pr", "list"),
+        ("run", "list"),
+        ("run", "view"),
+        ("issue", "view"),
+        ("issue", "list"),
+    }
+)
 _GH_BAD = {"api", "alias", "extension", "ext", "auth", "config", "secret", "codespace", "ssh-key", "gpg-key"}
 _BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"}
+_BAD_ARG_CATEGORIES = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}  # a plain space is fine inside an argument
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_MAX_HASHED = 256 * 1024 * 1024
 _FAIL = re.compile(rb"(?i)\b(fail(?:ed|ure|ures|s)?|error|errors|traceback|panic|fatal|exception|assert\w*)\b")
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x1b")
 _CALLSIGN = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z]{1,2}|[0-9][A-Z])[0-9][A-Z]{2,3}(?![A-Za-z0-9])")
@@ -127,6 +115,7 @@ _GRID = re.compile(r"(?<![A-Za-z0-9])[A-R]{2}[0-9]{2}[a-x]{2}(?![A-Za-z0-9])")
 _KEEP = {"N0CALL", "N0TST"}
 _HANDLED = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 _PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
 
 
 class DigestError(SafoError):
@@ -139,19 +128,27 @@ class _Interrupted(BaseException):  # a handled signal, not an error
 
 _VALUE_TYPES: dict[str, re.Pattern[str] | None] = {
     "flag": None,  # an option with no value
-    "int": re.compile(r"^[0-9]{1,9}$"),
-    "word": re.compile(r"^[A-Za-z0-9_@./:,+~^{}=][A-Za-z0-9_@./:,+~^{}= -]{0,199}$"),  # never starts with a dash
+    "int": re.compile(r"[0-9]{1,9}"),
+    "word": re.compile(r"[A-Za-z0-9_@./:,+~^{}=][A-Za-z0-9_@./:,+~^{}= -]{0,199}"),  # never starts with a dash
 }
+
+
+def _bad_text(text: str) -> bool:
+    """Control, format, surrogate, private-use, unassigned and line or paragraph separator characters (NUL, CR and LF
+    included) are never acceptable in an argument, an option or a path we are given."""
+    return any(unicodedata.category(c) in _BAD_ARG_CATEGORIES for c in text)
 
 
 @dataclass(frozen=True)
 class AllowEntry:
-    """A command prefix (absolute executable first), the only options that may follow it (name to value type:
-    flag, int or word) and whether `--end-of-options` is put before the positional arguments (git: yes by default)."""
+    """An executable identity (absolute path, plus the sha256 of the file where it is pinned), the fixed arguments that
+    follow it, the only options that may follow those (name to value type: flag, int or word) and whether
+    `--end-of-options` is put before the positional arguments (git: yes by default)."""
 
     cmd: tuple[str, ...]
     options: dict[str, str] = field(default_factory=dict)
     end_of_options: bool = False
+    sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -199,9 +196,10 @@ def plan_args(entry: AllowEntry, argv: list[str]) -> list[str]:
     """Validate EVERY argument after the prefix, wherever it is, and return the argument list to run.
 
     An argument that starts with `-` must be exactly one of the entry's options (a bare `--` is never one, and no
-    position is exempt). An option that takes a value consumes the next argument, which must match the value type and
-    so can never be `--` or start with a dash. The validated options come first, then `--end-of-options` when the
-    entry asks for it, then the positional arguments, so nothing the caller gave can be read as an option."""
+    position is exempt). An option that takes a value consumes the next argument, which must match the value type in
+    full and so can never be `--` or start with a dash. The validated options come first, then `--end-of-options` when
+    the entry asks for it, then the positional arguments, so nothing the caller gave can be read as an option. For git
+    our own global settings go before the subcommand and the no-ext-diff and no-textconv flags right after it."""
     base = os.path.basename(entry.cmd[0])
     opts: list[str] = []
     pos: list[str] = []
@@ -210,6 +208,8 @@ def plan_args(entry: AllowEntry, argv: list[str]) -> list[str]:
     while i < len(rest):
         a = rest[i]
         i += 1
+        if _bad_text(a):
+            raise DigestError("an argument contains a control, format or separator character")
         if base == "gh" and a in _GH_BAD:
             raise DigestError(f"gh subcommand {a!r} is free-form or changes configuration")
         if base == "git" and _GIT_BAD.match(a):
@@ -219,7 +219,7 @@ def plan_args(entry: AllowEntry, argv: list[str]) -> list[str]:
             kind = entry.options[a]
             if kind != "flag":
                 pattern = _VALUE_TYPES[kind]
-                if i >= len(rest) or pattern is None or not pattern.match(rest[i]):
+                if i >= len(rest) or pattern is None or _bad_text(rest[i]) or not pattern.fullmatch(rest[i]):
                     raise DigestError(f"option {a!r} needs a {kind} value")
                 opts.append(rest[i])
                 i += 1
@@ -228,29 +228,41 @@ def plan_args(entry: AllowEntry, argv: list[str]) -> list[str]:
         else:
             pos.append(a)
     tail = ["--end-of-options"] if entry.end_of_options and pos else []
-    return [*entry.cmd, *opts, *tail, *pos]
+    head = [entry.cmd[0]]
+    mid = list(entry.cmd[1:])
+    if base == "git":
+        head += _GIT_PRE
+        mid = [mid[0], *_GIT_POST.get(mid[0], ()), *mid[1:]]
+    return [*head, *mid, *opts, *tail, *pos]
 
 
-def _check_entry(cmd: list[str], options: dict[str, str]) -> None:
+def _check_entry(cmd: list[str], options: dict[str, str], sha256: str) -> None:
     if len(cmd) < 2:
         raise ConfigError("allow: a prefix needs the absolute executable path and at least one fixed argument")
     exe = cmd[0]
-    if not os.path.isabs(exe) or os.path.normpath(exe) != exe or "\x00" in exe:
+    if not os.path.isabs(exe) or os.path.normpath(exe) != exe or _bad_text(exe):
         raise ConfigError("allow: the first element must be an absolute, normalised executable path (no PATH search)")
+    if any(_bad_text(t) for t in [*cmd, *options]) or any(_bad_text(t) for t in options.values()):
+        raise ConfigError("allow: control, format and separator characters are not allowed in an entry")
     base = os.path.basename(exe)
-    if _INTERPRETERS.match(base):
-        raise ConfigError(f"allow: {base!r} is a shell, interpreter or launcher; a prefix cannot make it safe")
+    if sha256 and not _SHA256.fullmatch(sha256):
+        raise ConfigError("allow: sha256 must be 64 lower-case hex digits")
     if any(not o.startswith("-") or o == "--" for o in options) or any(t not in _VALUE_TYPES for t in options.values()):
         raise ConfigError("allow: options must each start with '-' (never a bare '--'); types are flag, int or word")
     if base == "git":
-        if cmd[1].startswith("-") or cmd[1] in _GIT_SUBCOMMANDS_BAD:
-            raise ConfigError("allow: git needs a first-position read-only subcommand that cannot run other programs")
-        if any(_GIT_BAD.match(t) for t in [*cmd[1:], *options]):
+        if cmd[1] not in _GIT_SUBCOMMANDS:
+            raise ConfigError(f"allow: git subcommand must be one of {sorted(_GIT_SUBCOMMANDS)}")
+        if any(_GIT_BAD.match(t) for t in [*cmd[2:], *options]):
             raise ConfigError(
                 "allow: that git option can run other programs or reach other places; it is never allowed"
             )
-    if base == "gh" and any(t in _GH_BAD for t in cmd[1:]):
-        raise ConfigError("allow: that gh subcommand is free-form or changes configuration")
+    elif base == "gh":
+        if tuple(cmd[1:3]) not in _GH_PAIRS:
+            raise ConfigError("allow: gh is limited to a fixed list of read-only subcommand pairs; see docs/digest.md")
+        if any(t in _GH_BAD for t in cmd[1:]):
+            raise ConfigError("allow: that gh subcommand is free-form or changes configuration")
+    elif not sha256:
+        raise ConfigError("allow: any tool other than git and gh needs `sha256` (the hash of the executable file)")
 
 
 def load_config(path: str | None) -> Config:
@@ -269,9 +281,10 @@ def load_config(path: str | None) -> Config:
     for item in allow:
         opts: dict[str, str] = {}
         eoo: bool | None = None
+        sha = ""
         if isinstance(item, dict):
-            if set(item) - {"cmd", "options", "end_of_options"}:
-                raise ConfigError("allow: a table entry takes only cmd, options and end_of_options")
+            if set(item) - {"cmd", "options", "end_of_options", "sha256"}:
+                raise ConfigError("allow: a table entry takes only cmd, options, end_of_options and sha256")
             raw = item.get("options", [])
             if isinstance(raw, list) and all(isinstance(o, str) and o for o in raw):
                 opts = dict.fromkeys(raw, "flag")
@@ -282,23 +295,24 @@ def load_config(path: str | None) -> Config:
             eoo = item.get("end_of_options")
             if eoo is not None and not isinstance(eoo, bool):
                 raise ConfigError("allow: end_of_options must be true or false")
+            sha = item.get("sha256", "")
+            if not isinstance(sha, str):
+                raise ConfigError("allow: sha256 must be a string")
             item = item.get("cmd")
         if not isinstance(item, list) or not all(isinstance(s, str) and s for s in item):
             raise ConfigError("allow: each prefix must be a list of non-empty strings")
-        _check_entry(item, opts)
+        _check_entry(item, opts, sha)
         if eoo is None:
-            eoo = os.path.basename(item[0]) == "git"
-        prefixes.append(AllowEntry(tuple(item), opts, eoo))
+            eoo = os.path.basename(item[0]) == "git" and item[1] not in _GIT_NO_END_OF_OPTIONS
+        prefixes.append(AllowEntry(tuple(item), opts, eoo, sha))
     out_dir = d.get("out_dir", os.path.join(_home(), ".local", "state", "safo-digest"))
     if not isinstance(out_dir, str) or not os.path.isabs(out_dir) or os.path.normpath(out_dir) != out_dir.rstrip("/"):
         raise ConfigError("out_dir must be an absolute, normalised path")
     if any(unicodedata.category(c) in _BAD_CATEGORIES for c in out_dir):
         raise ConfigError("out_dir must not contain control, format, space or invisible characters")
     pass_env = d.get("pass_env", [])
-    if not isinstance(pass_env, list) or not all(isinstance(n, str) and _ENV_NAME.match(n) for n in pass_env):
-        raise ConfigError("pass_env must be a list of upper-case variable names")
-    if any(_BAD_ENV.match(n) for n in pass_env):
-        raise ConfigError("pass_env may not name a loader, interpreter, git, path, home or locale variable")
+    if not isinstance(pass_env, list) or not all(isinstance(n, str) and n in _SAFE_ENV for n in pass_env):
+        raise ConfigError(f"pass_env may only name variables from this fixed list: {sorted(_SAFE_ENV)}")
     timeout = d.get("timeout", 300)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400:
         raise ConfigError("timeout must be a number of seconds above 0 and up to 86400")
@@ -433,8 +447,10 @@ def private_home(dirfd: int) -> None:
         os.close(hfd)
 
 
-def child_env(cfg: Config, home: str) -> dict[str, str]:
+def child_env(cfg: Config, home: str, exe: str = "") -> dict[str, str]:
     env = {"PATH": _CHILD_PATH, "LANG": "C", "HOME": home, "XDG_CONFIG_HOME": home}
+    if os.path.basename(exe) == "git":
+        env.update(_GIT_ENV)
     for name in cfg.pass_env:
         if name in os.environ:
             env[name] = os.environ[name]
@@ -623,59 +639,113 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view) :]
 
 
-def _become_subreaper() -> None:
-    """Orphaned descendants of the command are then re-parented to us, so the sweep can find and kill them."""
-    with contextlib.suppress(Exception):
-        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+def _libc_prctl() -> ctypes._NamedFuncPointer:
+    libc = ctypes.CDLL(None, use_errno=True)
+    fn = libc.prctl
+    fn.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    fn.restype = ctypes.c_int
+    return fn
 
 
-def _descendants(root: int) -> list[int]:
-    ppid: dict[int, int] = {}
+def require_containment() -> None:
+    """Containment is mandatory: become a child subreaper (checked, errno reported), read back that it took, and prove
+    /proc enumeration and pidfds work. If any of it is unavailable nothing is started (exit 125)."""
+    try:
+        prctl = _libc_prctl()
+        if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+            raise DigestError(f"cannot become a child subreaper ({os.strerror(ctypes.get_errno())}); refusing to run")
+        got = ctypes.c_int(0)
+        if prctl(_PR_GET_CHILD_SUBREAPER, ctypes.addressof(got), 0, 0, 0) != 0 or got.value != 1:
+            raise DigestError("the child-subreaper setting did not take effect; refusing to run")
+        if not any(n.isdigit() for n in os.listdir("/proc")):
+            raise DigestError("/proc is not usable; refusing to run")
+        _starttime(os.getpid())
+        os.close(os.pidfd_open(os.getpid()))
+    except DigestError:
+        raise
+    except (OSError, AttributeError, TypeError, ValueError, IndexError) as e:
+        raise DigestError(f"process containment is not available here ({type(e).__name__}); refusing to run") from e
+
+
+def _stat_fields(pid: int) -> list[str]:
+    with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+        data = f.read()
+    return data[data.rindex(")") + 2 :].split()
+
+
+def _starttime(pid: int) -> int:
+    return int(_stat_fields(pid)[19])
+
+
+def _descendants(root: int) -> dict[int, int]:
+    """Every descendant of root with its start time; raises OSError when /proc cannot be listed."""
+    table: dict[int, tuple[int, int]] = {}
     for n in os.listdir("/proc"):
         if not n.isdigit():
             continue
         try:
-            with open(f"/proc/{n}/stat", encoding="utf-8", errors="replace") as f:
-                data = f.read()
-            ppid[int(n)] = int(data[data.rindex(")") + 2 :].split()[1])
+            fields = _stat_fields(int(n))
+            table[int(n)] = (int(fields[1]), int(fields[19]))
         except (OSError, ValueError, IndexError):
             continue
-    found: list[int] = []
+    found: dict[int, int] = {}
     todo = [root]
     while todo:
         cur = todo.pop()
-        for pid, pp in ppid.items():
+        for pid, (pp, start) in table.items():
             if pp == cur and pid not in found:
-                found.append(pid)
+                found[pid] = start
                 todo.append(pid)
     return found
 
 
-def _sweep() -> None:
-    """Kill every descendant of this process, however it detached (setsid, double fork), and reap what is ours."""
+def _kill_verified(pid: int, start: int) -> None:
+    """SIGKILL pid only if it is still the process we enumerated: open a pidfd, re-check the start time, and signal
+    through the pidfd, so a recycled pid is never hit."""
+    try:
+        pfd = os.pidfd_open(pid)
+    except OSError:
+        return
+    try:
+        if _starttime(pid) == start:
+            with contextlib.suppress(OSError):
+                signal.pidfd_send_signal(pfd, signal.SIGKILL)
+    except (OSError, ValueError, IndexError):
+        pass
+    finally:
+        os.close(pfd)
+
+
+def _sweep() -> bool:
+    """Kill every descendant of this process, however it detached (setsid, double fork), and reap what is ours.
+    False when /proc could not be read, so the caller can say the run was not cleanly contained."""
     for _ in range(200):
-        pids = _descendants(os.getpid())
-        for pid in pids:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
+        try:
+            found = _descendants(os.getpid())
+        except OSError:
+            return False
+        for pid, start in found.items():
+            _kill_verified(pid, start)
         while True:
             try:
                 if os.waitpid(-1, os.WNOHANG) == (0, 0):
                     break
             except ChildProcessError:
                 break
-        if not pids:
-            return
+        if not found:
+            return True
         time.sleep(0.02)
+    return True
 
 
-def _cleanup(proc: subprocess.Popen[bytes] | None) -> None:
-    """The single cleanup path: kill the group, reap the command, sweep what detached from it."""
+def _cleanup(proc: subprocess.Popen[bytes] | None) -> bool:
+    """The single cleanup path: kill the group (the leader is not yet reaped, so its group id cannot be reused), reap
+    the command, sweep what detached from it."""
     if proc is not None:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
-    _sweep()
+    return _sweep()
 
 
 def _launch(efd: int, argv: list[str], env: dict[str, str]) -> subprocess.Popen[bytes]:
@@ -694,6 +764,46 @@ def _launch(efd: int, argv: list[str], env: dict[str, str]) -> subprocess.Popen[
     )
 
 
+def _sha256_fd(fd: int) -> str:
+    h = hashlib.sha256()
+    off = 0
+    while True:
+        chunk = os.pread(fd, 1 << 20, off)
+        if not chunk:
+            return h.hexdigest()
+        off += len(chunk)
+        if off > _MAX_HASHED:
+            raise DigestError("the executable is too large to hash")
+        h.update(chunk)
+
+
+def check_identity(efd: int, entry: AllowEntry) -> None:
+    """The opened file is the one the config names: a script needs a pinned sha256 and a verified, direct interpreter;
+    a pinned file must hash to the pin. An allow entry names an executable identity, not a name pattern."""
+    head = os.pread(efd, 512, 0)
+    if head.startswith(b"#!"):
+        if not entry.sha256:
+            raise DigestError("the executable is a script (starts with #!) and the entry has no sha256 pin")
+        line = head.split(b"\n", 1)[0][2:].decode("utf-8", "replace").strip()
+        parts = line.split(None, 1)
+        interp = parts[0] if parts else ""
+        if (
+            not os.path.isabs(interp)
+            or os.path.normpath(interp) != interp
+            or _bad_text(line)
+            or os.path.basename(interp) == "env"
+        ):
+            raise DigestError("the script's interpreter must be a direct absolute path (not env, not relative)")
+        ifd = open_verified_exe(interp)
+        try:
+            if os.pread(ifd, 2, 0) == b"#!":
+                raise DigestError("the script's interpreter is itself a script")
+        finally:
+            os.close(ifd)
+    if entry.sha256 and not hmac.compare_digest(_sha256_fd(efd), entry.sha256):
+        raise DigestError("the executable does not match the sha256 in the config")
+
+
 def execute(argv: list[str], cfg: Config) -> tuple[int, bytes]:
     if not argv:
         raise DigestError("no command given; usage: safo-digest [options] -- /ABS/PATH ARG...")
@@ -701,91 +811,121 @@ def execute(argv: list[str], cfg: Config) -> tuple[int, bytes]:
     if entry is None:
         raise DigestError(f"{os.path.basename(argv[0])!r} with these arguments is not on the allow list in the config")
     argv = plan_args(entry, argv)
+    require_containment()
     try:
         efd = open_verified_exe(argv[0])
-    except FileNotFoundError:
-        return EXIT_NOT_FOUND, f"safo-digest: cmd={_field(os.path.basename(argv[0]))} not found\n".encode()
-    except NotADirectoryError:
+    except (FileNotFoundError, NotADirectoryError):
         return EXIT_NOT_FOUND, f"safo-digest: cmd={_field(os.path.basename(argv[0]))} not found\n".encode()
     try:
+        check_identity(efd, entry)
         dirfd = open_private_dir(cfg.out_dir)
         try:
             dir_id = os.fstat(dirfd)
             private_home(dirfd)
             ofd, fname = create_output(dirfd, argv[0])
+        except BaseException:
+            os.close(dirfd)
+            raise
+        try:
+            return _run(argv, cfg, efd, ofd, fname, dirfd, dir_id)
         finally:
             os.close(dirfd)
-        home = os.path.join(cfg.out_dir, PRIVATE_HOME)
-        env = child_env(cfg, home)
-        col = Collector(cfg.max_lines)
-        state: dict[str, bool] = {"truncated": False}
-        lock = threading.Lock()
-        timed_out = False
-        interrupted: int | None = None
-        proc: subprocess.Popen[bytes] | None = None
-        thread: threading.Thread | None = None
+    finally:
+        os.close(efd)
 
-        def on_signal(signum: int, _frame: object) -> None:
-            raise _Interrupted(signum)
 
-        old = {s: signal.signal(s, on_signal) for s in _HANDLED}
-        _become_subreaper()
+def _run(
+    argv: list[str], cfg: Config, efd: int, ofd: int, fname: str, dirfd: int, dir_id: os.stat_result
+) -> tuple[int, bytes]:
+    home = os.path.join(cfg.out_dir, PRIVATE_HOME)
+    env = child_env(cfg, home, argv[0])
+    col = Collector(cfg.max_lines)
+    state: dict[str, bool] = {"truncated": False}
+    lock = threading.Lock()
+    timed_out = False
+    interrupted: int | None = None
+    proc: subprocess.Popen[bytes] | None = None
+    thread: threading.Thread | None = None
+    swept = True
+
+    def on_signal(signum: int, _frame: object) -> None:
+        raise _Interrupted(signum)
+
+    old = {s: signal.signal(s, on_signal) for s in _HANDLED}
+    try:
         try:
             try:
                 proc = _launch(efd, argv, env)
-                stdout = proc.stdout
-                if stdout is None:  # pragma: no cover - PIPE always gives a stream
-                    raise DigestError("no output pipe")
-                thread = threading.Thread(
-                    target=_pump, args=(stdout.fileno(), ofd, col, cfg.max_file_bytes, state, lock), daemon=True
-                )
-                thread.start()
-                try:
-                    proc.wait(timeout=cfg.timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-            except _Interrupted as e:
-                interrupted = int(e.args[0])
+            except ValueError as e:
+                raise DigestError("the command could not be started: an argument is not acceptable") from e
+            stdout = proc.stdout
+            if stdout is None:  # pragma: no cover - PIPE always gives a stream
+                raise DigestError("no output pipe")
+            thread = threading.Thread(
+                target=_pump, args=(stdout.fileno(), ofd, col, cfg.max_file_bytes, state, lock), daemon=True
+            )
+            thread.start()
+            pfd = os.pidfd_open(proc.pid)  # readable when the command exits; waiting on it does not reap it
+            try:
+                poller = select.poll()
+                poller.register(pfd, select.POLLIN)
+                timed_out = not poller.poll(cfg.timeout * 1000)
             finally:
-                for s in _HANDLED:
-                    signal.signal(s, signal.SIG_IGN)  # a second signal must not cut the cleanup short
-                try:
-                    _cleanup(proc)
-                finally:
-                    if thread is not None:
-                        thread.join(5)
-                    if proc is not None and proc.stdout is not None and (thread is None or not thread.is_alive()):
-                        proc.stdout.close()
-                    os.close(ofd)
+                os.close(pfd)
+        except _Interrupted as e:
+            interrupted = int(e.args[0])
         finally:
-            for s, h in old.items():
-                signal.signal(s, h)
-        if interrupted is not None:
-            signal.signal(interrupted, signal.SIG_DFL)
-            os.kill(os.getpid(), interrupted)
-            return 128 + interrupted, b""
+            for s in _HANDLED:
+                signal.signal(s, signal.SIG_IGN)  # a second signal must not cut the cleanup short
+            try:
+                swept = _cleanup(proc)
+            finally:
+                if thread is not None:
+                    thread.join(5)
+                if proc is not None and proc.stdout is not None and (thread is None or not thread.is_alive()):
+                    proc.stdout.close()
+                os.close(ofd)
     finally:
-        os.close(efd)
+        for s, h in old.items():
+            signal.signal(s, h)
+    if interrupted is not None:
+        signal.signal(interrupted, signal.SIG_DFL)
+        os.kill(os.getpid(), interrupted)
+        return 128 + interrupted, b""
     with lock:
         col.finish()
     if proc is None:  # pragma: no cover - a launch failure raised above
         return EXIT_NOT_FOUND, b""
     rc = proc.returncode
     code = EXIT_TIMEOUT if timed_out else (128 - rc if rc < 0 else rc)
-    extra = (f" timeout={cfg.timeout:g}s" if timed_out else "") + (" file-truncated" if state["truncated"] else "")
-    _verify_out_dir(cfg.out_dir, dir_id)
+    if not swept:
+        sys.stderr.write("safo-digest: the process sweep could not read /proc; the run is not known to be contained\n")
+        return EXIT_REFUSED, b""
+    extra = (
+        (f" timeout={cfg.timeout:g}s" if timed_out else "")
+        + (" file-truncated" if state["truncated"] else "")
+        + " path-advisory=not-verified-after-printing"
+    )
+    _verify_out_dir(cfg.out_dir, dirfd, dir_id)
     shown = os.path.join(cfg.out_dir, fname)
-    return code, render(col, cfg, Redactor(cfg.redact_words), os.path.basename(argv[0]), code, shown, extra)
+    data = render(col, cfg, Redactor(cfg.redact_words), os.path.basename(argv[0]), code, shown, extra)
+    _verify_out_dir(cfg.out_dir, dirfd, dir_id)  # once more, right before the caller prints
+    return code, data
 
 
-def _verify_out_dir(path: str, before: os.stat_result) -> None:
-    """The directory we wrote to must still be the one at that path, or the printed path would point elsewhere."""
+def _verify_out_dir(path: str, dirfd: int, before: os.stat_result) -> None:
+    """The directory we hold open, and wrote to, must still be the one at that path, or the printed path would point
+    elsewhere."""
     fd = open_private_dir(path)
     try:
         now = os.fstat(fd)
     finally:
         os.close(fd)
-    if (now.st_dev, now.st_ino) != (before.st_dev, before.st_ino):
+    held = os.fstat(dirfd)
+    if (now.st_dev, now.st_ino) != (before.st_dev, before.st_ino) or (held.st_dev, held.st_ino) != (
+        before.st_dev,
+        before.st_ino,
+    ):
         raise DigestError("out_dir changed while the command ran; the saved path is not trustworthy")
 
 

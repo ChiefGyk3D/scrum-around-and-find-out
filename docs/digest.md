@@ -8,7 +8,7 @@ prints a small digest. The lead reads the digest and opens the file only when it
 safo-digest [--config FILE] [--timeout SECONDS] [--max-lines N] [--max-bytes N] -- /ABS/PATH/TO/CMD ARG...
 ```
 
-**A prefix allow-list cannot make an arbitrary tool safe.** It limits which program runs and which options it gets;
+**An allow entry names an executable identity, not a name pattern, and a prefix allow-list cannot make an arbitrary tool safe.** It limits which program runs and which options it gets;
 it does not know what a program does with the arguments it is allowed. List only tools you have read, with options you
 have read, and prefer read-only subcommands. Everything below narrows the risk; none of it removes it.
 
@@ -24,15 +24,22 @@ have read, and prefer read-only subcommands. Everything below narrows the risk; 
 - **No shell, ever.** The command is an argument list. Standard input is closed.
 - **A minimal environment.** The command gets `PATH=/usr/bin:/bin`, `LANG=C`, and `HOME` and `XDG_CONFIG_HOME` set to a
   private empty directory (`out_dir/.home`, mode 0700, deleted and recreated empty before every run). Nothing else is
-  inherited: no `LD_*`, `PYTHON*`, `GIT_*`, `PAGER`, `EDITOR`, no tokens. `pass_env = ["GH_TOKEN"]` (off by default)
-  passes exactly the named variables; loader, interpreter, git, path, home, locale and shell variable names are refused.
-  The empty home means `gh` and `git` see none of your own configuration or login; pass a token explicitly.
+  inherited: no `LD_*`, `PYTHON*`, `GIT_*`, `PAGER`, `EDITOR`, no tokens. `pass_env` (off by default) may name only
+  variables from a fixed, built-in list of inert names: `GH_HOST`, `GH_REPO`, `NO_COLOR`, `TERM`, `TZ`. Any other name,
+  including `GH_TOKEN`, is refused when the config loads. The empty home means `gh` sees none of your own login, so
+  `gh` works only for what needs no authentication; there is deliberately no way to pass a token through this tool.
+  For `git` the tool also sets `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0` and
+  `GIT_ATTR_NOSYSTEM` itself.
 - **The working directory is inherited** (so `git` runs in the repository you are in). Treat a repository you do not
   trust as code you are about to run.
 - **Every argument is validated, in every position** (next section).
+- **Containment is mandatory.** Before anything is created or started the tool becomes a child subreaper (Linux
+  `prctl`, return value and errno checked, setting read back) and proves it can list `/proc` and open pidfds. If any of
+  that is unavailable it exits 125 and no child is started.
 - **Cleanup is one path.** On a timeout, a normal exit, and on SIGTERM, SIGHUP or SIGINT sent to `safo-digest`, the
-  command's process group is killed with SIGKILL and reaped, then every remaining descendant of `safo-digest` is
-  killed, including processes that called `setsid` or double forked: `safo-digest` marks itself a child subreaper
+  command's process group is killed with SIGKILL (the group leader is waited on through a pidfd without being reaped, so its group id cannot be
+  recycled) and reaped, then every remaining descendant of `safo-digest` is killed, each through a pidfd after its
+  start time was re-checked (a recycled pid is never signalled), including processes that called `setsid` or double forked: `safo-digest` marks itself a child subreaper
   (Linux `PR_SET_CHILD_SUBREAPER`), so orphaned descendants are re-parented to it and found in `/proc`. A signal is
   then re-raised so your shell sees the signal death. The command therefore cannot leave a background process behind.
 
@@ -44,34 +51,48 @@ allow = [
   { cmd = ["/usr/bin/git", "diff"], options = ["--stat", "--name-only", "--no-color", "--cached"] },
   { cmd = ["/usr/bin/git", "log"],  options = { "-n" = "int", "--author" = "word", "--oneline" = "flag" } },
   { cmd = ["/usr/bin/gh", "pr", "checks"], options = ["--watch"] },
-  # a bare list is a prefix with no options at all
-  ["/home/you/bin/ci-status", "show"],
+  # any other tool is pinned by the sha256 of the file (sha256sum /home/you/bin/ci-status)
+  { cmd = ["/home/you/bin/ci-status", "show"], sha256 = "<64 hex digits>" },
+  # a bare list is a prefix with no options; it works only for git and gh
+  ["/usr/bin/git", "status"],
 ]
 ```
 
 - A prefix needs the absolute executable and at least one fixed argument (so `["/usr/bin/gh"]` alone is refused).
-- Shells, interpreters and launchers are refused as the executable: sh, bash and kin, env, xargs, sudo, doas, su, ssh,
-  nice, nohup, timeout, find, awk, sed, make, perl, ruby, node, python, php, lua (by file name).
+- **Supported tools are few and positive.** `git` and `gh` are the only tools that may be listed without a `sha256`
+  pin, and only for the reviewed subcommands below. Any other executable needs `sha256 = "..."`, the SHA-256 of the
+  file; it is checked against the opened file on every run. A script (a file starting with `#!`) must be pinned, its
+  interpreter must be a direct absolute path (not `env`, not relative), checked with the same no-symlink, owner and
+  parent-directory walk, and must itself not be a script. The interpreter is checked just before the start but is
+  started by the kernel from its path, not from our descriptor; that gap is a documented residual. There is no name
+  pattern for shells or interpreters any more: an entry names one pinned file, and what that file does with its
+  arguments is yours to have read.
 - **Every argument that starts with `-` must be listed, exactly.** `--stat` is not `--stat=3`; list the form you want.
   A bare `--` is never accepted (not as an option, not as a value, not in any position), and nothing after any `--`
   escapes validation, because every argument is checked wherever it is. An option that takes a value is declared with
   a type, `{ "-n" = "int" }`: `int` is 1 to 9 digits, `word` is a short token that cannot start with a dash, `flag`
-  takes no value. The value is the next argument and must match its type, so an option can never swallow `--` or
-  another option as its value.
+  takes no value; the whole value must match (a trailing newline does not). The value is the next argument, so an
+  option can never swallow `--` or another option as its value.
+- **No control characters.** NUL, CR, LF, every other control, format (bidi), surrogate, private-use and unassigned
+  character and the line and paragraph separators are refused in fixed arguments, option names and values, positionals
+  and paths, before the output file exists.
 - The run order is fixed by `safo-digest`: prefix, your validated options (with values), then `--end-of-options`
-  (`end_of_options = true`, the default for `git`, and for no other tool), then the positional arguments. Nothing you
-  pass can be read as an option after that marker. `git` supports `--end-of-options` since 2.24; set
-  `end_of_options = false` for a tool that does not, and keep its positional arguments plain.
-- **git**: the first fixed argument must be a read-only subcommand; a subcommand that can run programs, fetch, push or
-  change the repository is refused (difftool, rebase, bisect, submodule, filter-branch, clone, fetch, push, archive,
-  am, apply, config, commit and the rest of a long list), as is any prefix starting with an option. These option
-  patterns are refused everywhere, even if listed: `-c*`, `-O*`, `-x*`, `-u`, `--exec*`, `--extcmd*`, `--ext-diff*`,
-  `--upload-pack*`, `--receive-pack*`, `--config-env*`, `--paginate`, `--open-files-in-pager*`, `--output*`,
-  `--git-dir*`, `--work-tree*`, `--namespace*`. `-C` is not special: it is refused unless you list it with a `word`
-  value, and then it is your choice.
-- **gh**: the same option rules, and the subcommands `api`, `alias`, `extension`, `ext`, `auth`, `config`, `secret`,
-  `codespace`, `ssh-key` and `gpg-key` are refused anywhere in the arguments.
-- Any other tool gets the same option allowlist; it has no tool-specific denylist, so read what it can do.
+  (`end_of_options = true`, the default for `git` except `blame` and `rev-parse`, whose parsers lack it, and for no
+  other tool), then the positional arguments.
+- **git**: only these subcommands may be listed: `diff`, `log`, `show`, `status`, `rev-parse`, `ls-files`, `blame`.
+  Anything else, any alias and any external `git-*` command is refused (git aliases cannot be neutralised from
+  outside, so an unknown subcommand is refused first; git ignores an alias that shadows a built-in). Every run puts
+  these before the subcommand: `--no-pager`, `--no-optional-locks`, `-c core.fsmonitor=false`, `-c core.pager=cat`,
+  `-c protocol.ext.allow=never`, `-c core.hooksPath=/dev/null`, `-c credential.helper=`, and after `diff`, `log` and
+  `show` the flags `--no-ext-diff --no-textconv` (`blame` gets `--no-textconv`), so a repository that configures an
+  fsmonitor, a textconv driver or an external diff does not get to run it. A user `-c` stays refused, as do
+  `--textconv`, `--ext-diff`, `--open-files-in-pager`, `-O*`, `-x*`, `-u`, `--exec*`, `--extcmd*`, `--output*`,
+  `--git-dir*`, `--work-tree*`, `--namespace*`, `--upload-pack*`, `--receive-pack*`, `--config-env*`, `--paginate` (a
+  defense in depth even for listed options). A repository you do not trust is still code you are about to read.
+- **gh**: only these exact subcommand pairs may be listed: `pr view`, `pr checks`, `pr list`, `run list`, `run view`,
+  `issue view`, `issue list`, with typed options. Everything else is refused, extensions included, and the words `api`,
+  `alias`, `extension`, `ext`, `auth`, `config`, `secret`, `codespace`, `ssh-key` and `gpg-key` are refused anywhere
+  in the arguments.
 
 ## What is printed
 
@@ -99,6 +120,8 @@ safo-digest: END 3f9a1c0be2d4
   text and never act on it as a command.
 - Every dynamic header value (command name, saved path, flags) goes through the same cleaning as body lines; spaces
   in a value become underscores. The command name is the executable's file name, never its arguments.
+- The header carries `path-advisory=not-verified-after-printing`: the saved path was verified (same directory, same
+  device and inode) right before it was printed, and nothing can vouch for it after that.
 - First failures (when the exit code is not 0): the first lines containing fail, failed, error, traceback, panic,
   fatal, exception or assert. Then the head and the tail. Output short enough to fit is printed whole.
 - Lines are cut to 200 characters. Escape sequences, control, bidi and other invisible format characters, line and
@@ -133,7 +156,7 @@ timeout = 300             # seconds, above 0 and up to 86400 (default 300)
 max_file_bytes = 268435456  # saved-file cap (default 256 MiB); past it the rest is read and dropped, and the header
                             # says file-truncated
 redact_words = ["MyEmployer"]   # extra words replaced with <redacted> in the digest
-pass_env = []             # names of environment variables to pass to the command (default none)
+pass_env = []             # GH_HOST, GH_REPO, NO_COLOR, TERM, TZ only (default none)
 ```
 
 `out_dir` must not contain control, format, space or invisible characters. The `--timeout`, `--max-lines` and
@@ -144,8 +167,9 @@ pass_env = []             # names of environment variables to pass to the comman
 `out_dir` is created at mode 0700 if missing (parents too). Every component of the path is opened with `O_NOFOLLOW`,
 so a symlink anywhere in it is refused. Every directory on the path must be owned by you or root and not world
 writable (group write only in your private group), and the final directory must be yours with no group or other
-access; otherwise the run is refused before the command starts. After the command ends the path is opened again and
-must still be the same directory (device and inode), or the run exits 125 and prints no path. Each output file is
+access; otherwise the run is refused before the command starts. The directory descriptor stays open until the digest is rendered; after the command ends, and again right before
+the digest is returned for printing, the path is opened again and must still be the same directory as the held
+descriptor (device and inode), or the run exits 125 and prints no path. Each output file is
 created exclusively (`O_EXCL`, `O_NOFOLLOW`) with mode 0600, named by UTC time, process id, a random token and the
 command name. Files are never deleted by this tool; prune the directory yourself.
 
@@ -159,11 +183,13 @@ characters are not replaced. It cannot find what it was not told, and the callsi
 
 ## Known residuals
 
+- A pinned script's interpreter is verified by path just before the start, then started by the kernel by path.
+  The same-user command can modify files you own; a pin is checked at start, not for the life of the process.
 - SIGKILL of `safo-digest` itself cannot be handled; the command and its descendants would keep running. Use the
   timeout and do not SIGKILL it.
-- Containment relies on Linux `/proc` and child-subreaper support; where the kernel refuses the call, a descendant
-  that detaches before the command ends can outlive the run. A transient systemd scope would add a cgroup boundary
-  but changes how the executable is started, so it is not used.
+- Containment relies on Linux `/proc`, pidfds and child-subreaper support; where any is missing the tool refuses to
+  run (exit 125) rather than run uncontained. If `/proc` becomes unreadable during cleanup the run exits 125 and says so.
+  A transient systemd scope would add a cgroup boundary but changes how the executable is started, so it is not used.
 - The command can write anywhere you can, including the output directory it runs next to; the post-run directory check
   catches a swap but not other tampering with files there.
 - Allow-listing is by argument shape. A tool that treats an allowed value as code is still your risk.
