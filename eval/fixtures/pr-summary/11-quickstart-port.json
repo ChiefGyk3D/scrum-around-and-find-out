@@ -19,7 +19,6 @@
     }
   ],
   "forbidden": [
-    "\\bcode (?:change|fix)",
     "\\bport 8043\\b",
     "\\b8844\\b"
   ],

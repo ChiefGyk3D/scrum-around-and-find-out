@@ -13,7 +13,7 @@
     "tests/test_push.py"
   ],
   "forbidden": [
-    "\\bretry\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|includ(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bretry\\b|\\bretry\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
     "\\bcode 1\\b",
     "\\bupload(?:s|ed)? (?:the )?files\\b.{0,20}\\bdry"
   ],
@@ -25,6 +25,7 @@
   ],
   "correct_alts": [
     "Preview mode for pushes.\n- syncctl push accepts a new --dry-run flag that uploads nothing and prints what would happen.\n- A conflict makes it exit with code 2.\n- tests/test_push.py exercises the clean and the conflicting run.",
-    "Users can now rehearse a push with --dry-run.\n- The plan is printed and no data leaves the machine.\n- On a conflict the command finishes with status 2.\n- New cases in tests/test_push.py check this for syncctl push."
+    "Users can now rehearse a push with --dry-run.\n- The plan is printed and no data leaves the machine.\n- On a conflict the command finishes with status 2.\n- New cases in tests/test_push.py check this for syncctl push.",
+    "Add a dry run to syncctl push\n- --dry-run uploads nothing and prints the plan.\n- It exits with code 2 when a conflict is found.\n- tests/test_push.py covers both paths.\n- The retry rewrite is not part of this PR; it is a follow-up."
   ]
 }

@@ -199,7 +199,11 @@ Add one JSON file under `eval/fixtures/<task>/`. The task type is the directory 
   regexes that also count.
 - `wrong`: at least two outputs that are plausible but wrong; none may pass.
 - `forbidden`: regexes that must not appear. Use them as hallucination traps: a number or name that is not in the input,
-  or a near miss of a number the model must copy exactly.
+  or a near miss of a number the model must copy exactly. When the input names an item as out of scope (deferred,
+  untouched, not part of the change), a summary that repeats that is correct: write the pattern so it matches
+  ADOPTING the item (a verb such as add, implement, include or fix near the item, with no negation or scope word in
+  between), not merely naming it, keep a `correct_alts` entry that mentions it as out of scope, and a `wrong` entry
+  that adopts it. Patterns stay linear (bounded windows, no nested unbounded quantifier; a test checks this).
 - `required_format`: `any`, `json`, `json-object`, or `regex:<pattern>` (searched over the whole output, DOTALL).
 - Everything is synthetic. Use example domains and placeholder names. No real hostnames, addresses, serials,
   callsigns or grids, employer names or session links; a test scans the shipped fixtures for these.

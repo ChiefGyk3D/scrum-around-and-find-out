@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -1014,6 +1015,58 @@ def test_config_file_swapped_between_check_and_open_is_refused(
         assert "ra-remote" not in out
     finally:
         os.umask(previous)
+
+
+@pytest.mark.parametrize("field", ["st_size", "st_mtime_ns", "st_ctime_ns"])
+def test_config_file_reporting_same_inode_but_changed_state_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    # A swapped file that reuses the inode number, device and mode (what ext4 does after unlink and create) must
+    # still be refused when its size, mtime or ctime differs. fstat is patched so that this is deterministic on any
+    # filesystem: only the one field under test differs from the earlier lstat.
+    cfg = _owners_cfg(tmp_path / "xdgc")
+    (tmp_path / "xdgc").chmod(stat.S_IRWXU)
+    target = cfg / "public-owners"
+    real_fstat = os.fstat
+    seen: list[str] = []
+
+    def shifted_fstat(fd: int) -> Any:
+        real = real_fstat(fd)
+        if stat.S_ISREG(real.st_mode) and real.st_ino == os.lstat(target).st_ino:
+            seen.append(field)
+            values = {
+                name: getattr(real, name)
+                for name in ("st_ino", "st_dev", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns")
+            }
+            values[field] += 1
+            return types.SimpleNamespace(**values)
+        return real
+
+    repo = clean_repo(tmp_path)
+    monkeypatch.setattr(os, "fstat", shifted_fstat)
+    out = _no_env_owners(tmp_path, tmp_path / "xdgc", repo)
+    assert seen, "the shifted fstat never ran"
+    assert "not owner-only" in out
+    assert "ra-remote" not in out
+
+
+@pytest.mark.parametrize("field", ["st_size", "st_mtime_ns", "st_ctime_ns", None])
+def test_raw_read_refuses_a_file_whose_state_changed_since_the_lstat(tmp_path: Path, field: str | None) -> None:
+    (tmp_path / "f").write_bytes(b"abc")
+    root = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        real = os.stat("f", dir_fd=root, follow_symlinks=False)
+        values = {
+            name: getattr(real, name)
+            for name in ("st_ino", "st_dev", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        }
+        if field is not None:
+            values[field] += 1
+        before: Any = types.SimpleNamespace(**values)
+        result = rc._read_exact(b"f", root, before)
+    finally:
+        os.close(root)
+    assert (result is None) == (field is not None)  # the None case proves the guard accepts an unchanged file
 
 
 # ---- F6: repository name normalization ----------------------------------------------------------------------------

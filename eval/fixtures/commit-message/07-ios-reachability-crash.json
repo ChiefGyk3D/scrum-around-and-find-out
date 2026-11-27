@@ -15,17 +15,19 @@
   "forbidden": [
     "\\bfeat:",
     "\\bchore:",
-    "\\bAndroid\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|fix(?:es|ed)?|updat(?:e|es|ed)|chang(?:e|es|ed)|touch(?:es|ed)?|modif(?:y|ies|ied)|includ(?:e|es|ed)|port(?:s|ed)?|handl(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bAndroid\\b|\\bAndroid\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
     "#2014"
   ],
   "max_chars": 600,
   "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
   "wrong": [
     "feat: handle network change on iOS 16.7\n\nAdds handleNetworkChange to Reachability.swift, fixes #2041.",
-    "fix: dispatch handleNetworkChange to main queue\n\nCrash on iOS 16.1 in Reachability.swift, closes #2014."
+    "fix: dispatch handleNetworkChange to main queue\n\nCrash on iOS 16.1 in Reachability.swift, closes #2014.",
+    "fix: dispatch handleNetworkChange to the main queue\n\nAlso updates the Android reachability code for iOS 16.7 in Reachability.swift. Fixes #2041."
   ],
   "correct_alts": [
     "fix: run handleNetworkChange on the main queue\n\nThe callback in Reachability.swift could fire from a background thread and crash iOS 16.7. Hop to the main queue first. Fixes #2041.",
-    "fix: stop the iOS 16.7 crash in network callbacks\n\nhandleNetworkChange now dispatches to the main thread, which avoids the background-thread crash in Reachability.swift (#2041)."
+    "fix: stop the iOS 16.7 crash in network callbacks\n\nhandleNetworkChange now dispatches to the main thread, which avoids the background-thread crash in Reachability.swift (#2041).",
+    "fix: run handleNetworkChange on the main queue\n\nThe callback in Reachability.swift crashed iOS 16.7 when it fired from a background thread. Fixes #2041. The Android code is not included in this change."
   ]
 }

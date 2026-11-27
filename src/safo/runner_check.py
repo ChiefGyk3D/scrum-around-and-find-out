@@ -515,6 +515,26 @@ def _owner_only(info: os.stat_result, *, directory: bool) -> bool:
     return kind and info.st_uid == os.geteuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
 
 
+def _same_file(first: os.stat_result, second: os.stat_result) -> bool:
+    """True when two stat results describe the same file in the same state. The inode number alone is not enough:
+    a filesystem may reuse a freed inode at once, so size, mtime and ctime are compared as well."""
+    return (
+        first.st_ino,
+        first.st_dev,
+        first.st_mode,
+        first.st_size,
+        first.st_mtime_ns,
+        first.st_ctime_ns,
+    ) == (
+        second.st_ino,
+        second.st_dev,
+        second.st_mode,
+        second.st_size,
+        second.st_mtime_ns,
+        second.st_ctime_ns,
+    )
+
+
 def _ancestry(path: Path, home: str) -> bool | None:
     """Walk every component from the root with lstat. False: a symlink, `..`, or a bad ancestor below home.
     None: a component is missing (nothing to read). True: clean."""
@@ -558,8 +578,7 @@ def _config_lines(env: Mapping[str, str], name: str) -> tuple[str, list[str]]:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, encoding="utf-8") as handle:
             now = os.fstat(handle.fileno())
-            same = (now.st_ino, now.st_dev, now.st_mode) == (info.st_ino, info.st_dev, info.st_mode)
-            if not (same and _owner_only(now, directory=False)):
+            if not (_same_file(now, info) and _owner_only(now, directory=False)):
                 return "bad", []
             text = handle.read()
     except FileNotFoundError:
@@ -1163,11 +1182,7 @@ def _read_exact(name: bytes, fd: int, info: os.stat_result) -> list[bytes] | Non
         return None
     try:
         now = os.fstat(handle)
-        if not stat.S_ISREG(now.st_mode) or (now.st_ino, now.st_dev, now.st_size) != (
-            info.st_ino,
-            info.st_dev,
-            info.st_size,
-        ):
+        if not stat.S_ISREG(now.st_mode) or not _same_file(now, info):
             return None
         chunks: list[bytes] = []
         total = 0
