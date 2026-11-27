@@ -1009,7 +1009,18 @@ def chosen(ctx: LocalContext, given: str, default: Path, what: str) -> tuple[Pat
     return path, bool(given)
 
 
-def run(ctx: LocalContext, args: argparse.Namespace) -> int:
+@dataclass
+class Gathered:
+    """One run's numbers, before anything is printed or written."""
+
+    report: dict[str, Any]
+    now: dict[str, float]
+    base: dict[str, float] | None
+    json_path: Path | None
+    baseline_path: Path | None
+
+
+def gather(ctx: LocalContext, args: argparse.Namespace) -> Gathered:
     week = valid_week(args.week or week_key(ctx.now.astimezone(dt.UTC).date()))
     home = ctx.home
     clock = Clock()
@@ -1056,23 +1067,34 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             raise ConfigError(f"{what} was not found")
         logs[key] = log
     report = build(week, claude, codex, logs, merges, skips)
-    now = metrics_of(report)
-    lines = text(report)
-    if base is not None:
-        lines += ["", "## Change since the baseline", "", *change_lines(now, base)]
+    return Gathered(report, metrics_of(report), base, json_path, baseline_path)
+
+
+def write_baseline(g: Gathered) -> bool:
+    """Write the first baseline when a path was given and none existed; True when it did."""
+    if g.baseline_path is None or g.base is not None:
+        return False
+    document = {"version": BASELINE_VERSION, "week": g.report["week"], "metrics": g.now}
+    write_new(g.baseline_path, json.dumps(document, indent=1, sort_keys=True) + "\n", "the baseline file")
+    return True
+
+
+def run(ctx: LocalContext, args: argparse.Namespace) -> int:
+    g = gather(ctx, args)
+    lines = text(g.report)
+    if g.base is not None:
+        lines += ["", "## Change since the baseline", "", *change_lines(g.now, g.base)]
     for line in lines:
         ctx.say(line)
-    if json_path is not None:
-        write_new(json_path, json.dumps(report, indent=1, sort_keys=True) + "\n", "the JSON output file")
-    if baseline_path is not None and base is None:
-        document = {"version": BASELINE_VERSION, "week": week, "metrics": now}
-        write_new(baseline_path, json.dumps(document, indent=1, sort_keys=True) + "\n", "the baseline file")
+    if g.json_path is not None:
+        write_new(g.json_path, json.dumps(g.report, indent=1, sort_keys=True) + "\n", "the JSON output file")
+    if write_baseline(g):
         ctx.say("")
         ctx.say("Baseline written; later runs with the same --baseline print the change per line.")
     return EXIT_OK
 
 
-def add_arguments(parser: argparse.ArgumentParser) -> None:
+def add_input_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--week", default="", help="an ISO week such as 2026-W48, or all (default: this week)")
     parser.add_argument("--claude", default="", help="the Claude transcripts folder (default: ~/.claude/projects)")
     parser.add_argument("--codex", default="", help="the Codex sessions folder (default: ~/.codex/sessions)")
@@ -1089,6 +1111,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--baseline", default="", help="write the first report here; later runs print the change against it"
     )
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    add_input_arguments(parser)
     parser.add_argument("--json", default="", help="also write the numbers to this new file (mode 0600)")
 
 

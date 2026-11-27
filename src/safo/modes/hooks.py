@@ -936,6 +936,7 @@ TOP_LEVEL_COMMANDS = (
     "reconcile",
     "route",
     "spend",
+    "spend-post",
     "status",
     "sync",
     "usage",

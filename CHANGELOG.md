@@ -8,6 +8,7 @@
   conversation resolution are reported. One line per repository and a final count; exit 0 clean, 1 drift, 2 when a
   repository could not be read. GET only (REST), one repository at a time. `--all` and `--repo` are mutually exclusive;
   the single-repository mode is unchanged. Docs: `docs/protection-audit.md`. Tests: `tests/test_protection_all.py`.
+- Add CLAUDE.md and AGENTS.md stating the sister-project rule (#565)
 - `scripts/impacted-tests.py` (#535): prints the test files to run for changed files (arguments or `--base BASE`), by naming convention and by the reverse import closure parsed with `ast`, plus five always-run guard tests; exits 3 with `ALL` when a file maps to no test or is config, a workflow or `pyproject.toml`. Never runs repo code. CI stays the judge; agents use it only for targeted runs. Docs: `docs/impacted-tests.md`. Tests: `tests/test_impacted_tests.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
   frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
@@ -16,6 +17,12 @@
 - `ghw` conditional reads (#532): a plain `gh api ENDPOINT` read keeps its ETag and body in `etags.json` beside the ledger (mode 0600, 64 entries, 128 KiB per body, 4 MiB, 24 hours, keyed by host, account and request) and sends `If-None-Match` next time; a 304 serves the kept body, costs no rate budget and is counted as a cache hit in the ledger and in `safo-ratebudget --by-caller`. Any cache error is a normal request. Docs: `docs/ratebudget.md`. Tests: `tests/test_ratebudget_etag.py`.
 - Docs sweep (#543): `docs/local-llm.md` now describes the `llm-local` wrapper (attribution fields, caps, exit codes 3, 4 and 75, outcome logging); `docs/local-draft.md`, `docs/local-eval.md`, `docs/board-kind.md` (`reconcile --closed-only`), `docs/usage.md` (`safo spend`) and `docs/hooks.md` (the `TOP_LEVEL_COMMANDS` rule) match merged behavior.
 - `safo lead-curve` (#556, phase 1, read-only): per lead session the turn count, context tokens per turn and weighted spend by turn bucket (1-100, 101-200, 201-300, 301+), the share of turns and spend past turn 200 and 400, three labeled lines on where cost climbs (the first turn where marginal spend passes 1.5x the median of turns 1-20, the turn at which 50 and 80 percent of a session's spend is reached as a median across sessions, and the weak old first-100-turn definition), and the cost of each handoff (successor's first three turns measured, the note estimated). Reuses the `safo spend` reader and weights; counts only, writes nothing. Docs: `docs/spend-report.md`. Tests: `tests/test_leadcurve.py`.
+- `safo spend-post` (#538, epic #428): runs the weekly spend report and posts a short summary (counts, weighted totals,
+  change since the stored baseline; measured numbers apart from labeled estimates) as one comment on an issue of a
+  private repo. It asks `gh api repos/OWNER/REPO --jq .private` first and refuses unless the answer is `true`; the body
+  carries no path, user or host name or transcript text and is refused if it would; the comment is never retried. No
+  scheduler, setting or secret is added; a systemd timer and a cron line are shown in the docs. `safo spend` is split
+  into `gather` and `run` with no change in output. Docs: `docs/spend-report.md`. Tests: `tests/test_spend_post.py`.
 - `safo spend` (#510, epic #428): a read-only weekly token-spend report from the Claude transcripts, the Codex sessions
   (counted apart, never added), the `llm-local` calls log, the hook log and the `safo-draft` local-share log. Weighted
   spend by pool (lead, agents by type), cache-read and output shares, weighted tokens per lead turn and the share past
