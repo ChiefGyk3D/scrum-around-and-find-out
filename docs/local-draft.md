@@ -37,9 +37,9 @@ safo audit | safo-draft digest board-drift -
 
 ## What it does
 
-- **Models.** `qwen3.5:4b` for short input, `gemma4:12b` when the prompt and facts exceed 600 characters; `--model`
-  overrides. The short-input default is `qwen3.5:4b` today. Open pull request #515 proposes a different default; this
-  page says qwen until that merges. `llm-local` is always called with stdin from /dev/null, because it hangs on an open stdin.
+- **Models.** `issue`, `pr` and `comment` always use `gemma4:12b`, whatever the input length (run4 scored it 0.78 on
+  issue drafts and 0.89 on PR summaries against 0.51 and 0.27 for `qwen3.5:4b`); `--model` overrides. The `digest`
+  subcommands still use `qwen3.5:4b`, since they send only short grouped lines and run4 did not measure them. `llm-local` is always called with stdin from /dev/null, because it hangs on an open stdin.
 - **Checks before filing** (a failing draft is printed with the reasons and never filed, even with `--yes`). The
   same checks run on the body and on `--title` (a title failure is named `title: ...`): no em dash (U+2014 and the
   look-alike dashes; the horizontal bar U+2015 is not blocked), no IPv4 or IPv6 address, no
