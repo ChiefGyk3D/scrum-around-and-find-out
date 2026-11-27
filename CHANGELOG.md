@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-remerge` (#588): merges `origin/main` into a clean feature worktree and settles only both-sides-added list and table lines in the changelog's Unreleased section, `docs/home.md` and `README.md`; any other conflict aborts, restores the tree and exits 11 with the paths; runs a caller-supplied argv test command before committing; never pushes. Docs: `docs/remerge.md`. Tests: `tests/test_remerge.py`.
 - `safo-eval-canary` follow-ups (#575): caps on `--busy-retries` (10), `--wait` (600) and `--repeats` (20) with a 300 s per-sleep cap and a 1800 s total busy-sleep deadline; a busy record now wins over an unreachable or malformed one within an attempt; non-boolean `passed` and non-proportion scores are refused; new folders are fsynced in their parent; temp files get unique names so a crash leftover cannot block an update; tests for hard links, concurrent writers, a parent swap, invalid UTF-8 and the exact threshold. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
 - `safo-cards` (#591, epic #518): sets Kind, Epic, Effort (and Area and Priority defaults) on project cards from a strict-JSON table, validated against board.yaml option names, REST only (add with POST, one PATCH, a `fields=` read-back that must match), `plan` writes nothing; separate entry point, no `TOP_LEVEL_COMMANDS` change. Docs: `docs/cards.md`. Tests: `tests/test_cards.py`.
 - `safo protection --all` (#541, epic #527): audits the default branch of every repository in the board file (less
