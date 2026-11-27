@@ -94,3 +94,52 @@ per turn rises with context, so the first-100-turn median is already high and th
 project folder. Its cost has two numbers: the successor's first three turns, MEASURED, and the cost of writing the
 note, an ESTIMATE (the largest single reply in the predecessor's last five turns, output tokens x5). Counts only:
 no text, title, path, project name or hostname is printed.
+## Posting the weekly summary to a private issue
+
+`safo spend-post` runs the same report and posts a short summary as one comment on an issue of a PRIVATE repo. It takes
+every input flag `safo spend` takes (`--week`, `--claude`, `--codex`, `--llm-local`, `--hook-log`, `--share-log`,
+`--merges`, `--baseline`) and adds `--repo OWNER/REPO`, `--issue N` and `--dry-run`.
+
+```sh
+safo spend-post --repo OWNER/PRIVATE-REPO --issue 123 --baseline ~/spend-baseline.json --merges ~/merges.txt
+safo spend-post --repo OWNER/PRIVATE-REPO --issue 123 --dry-run    # print the body, post nothing
+```
+
+- Before anything else it asks `gh api repos/OWNER/REPO --jq .private`. Only the answer `true` goes on; `false`, an
+  empty or odd answer, or a failed lookup refuses the run with exit 2 and posts nothing. A public repo is never a target.
+- The body is counts, weighted totals by pool and the change since the stored baseline, from fixed labels and numbers.
+  Measured numbers (token and file counts) are separated from the weighted ones, whose price ratios are inferred, and
+  the first-turn instruction share is labeled an estimate. It holds no path, user name, host name, title or transcript
+  text; as a last check the run refuses when the body contains the home directory, the user name or the host name.
+- The comment is posted once and never retried. A failed post exits 2; the next run starts clean.
+- With `--baseline`, a missing file is written after a successful post (never on `--dry-run`); an existing one is
+  only read, as for `safo spend`.
+- Nothing here schedules itself and no setting or secret is added. `gh` must already be signed in for the account.
+
+### Running it weekly
+
+A systemd user timer: save the service unit and the timer unit below under the name `safo-spend-post` in
+`~/.config/systemd/user/` (the suffix of each is its kind), then enable the timer unit with
+`systemctl --user enable --now` and its full unit name.
+
+```ini
+# the service unit
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/safo spend-post --repo OWNER/PRIVATE-REPO --issue 123 --baseline %h/spend-baseline.json
+```
+
+With `--week` left off the run reports the current ISO week (UTC), so the timer fires late on Sunday:
+
+```ini
+# the timer unit
+[Timer]
+OnCalendar=Sun 23:30 UTC
+Persistent=true
+```
+
+The timer unit also needs the usual `[Install]` section that makes it wanted by the timers target. The cron equivalent:
+
+```cron
+30 23 * * 0  $HOME/.local/bin/safo spend-post --repo OWNER/PRIVATE-REPO --issue 123 --baseline $HOME/spend-baseline.json
+```
