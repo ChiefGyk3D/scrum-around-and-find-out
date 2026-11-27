@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import re
 import signal
@@ -507,6 +508,7 @@ def test_no_descriptor_is_leaked_by_a_scan_a_check_a_write_or_a_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script, out = scratch(tmp_path, monkeypatch)
+    gc.collect()  # a descriptor an earlier test left to the collector must not close in the middle of this one
     before = open_fds()
     assert script.main(["--write"]) == 0
     assert script.main(["--check"]) == 0
