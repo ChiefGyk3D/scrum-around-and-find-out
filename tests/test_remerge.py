@@ -370,3 +370,139 @@ def test_test_command_output_cannot_write_workflow_commands(tmp_path: Path) -> N
     assert done.returncode == 0
     assert "::" not in done.stdout + done.stderr  # the helper breaks every workflow-command marker
     assert "boom" in done.stdout
+
+
+PYPROJECT = """[project]
+name = "x"
+dependencies = ["PyYAML==6.0.3"]
+
+[project.scripts]
+safo = "safo.cli:run"
+safo-card = "safo.card_cli:entry"
+
+[tool.setuptools.dynamic]
+version = { attr = "safo.__version__" }
+"""
+LAST = 'safo-card = "safo.card_cli:entry"\n'
+
+
+def with_script(*lines: str, text: str = PYPROJECT) -> dict[str, str]:
+    return {"pyproject.toml": text.replace(LAST, LAST + "".join(lines))}
+
+
+def test_pyproject_both_sides_add_a_script_line_merges(tmp_path: Path) -> None:
+    ours = with_script('safo-ours = "safo.ours:entry"\n')
+    theirs = with_script('safo-theirs = "safo.theirs_2:run"\n')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    done = run(work)
+    assert done.returncode == 0, done.stdout
+    text = (work / "pyproject.toml").read_text()
+    assert LAST + 'safo-ours = "safo.ours:entry"\nsafo-theirs = "safo.theirs_2:run"\n\n[tool' in text
+    assert clean(work)
+
+
+def test_pyproject_same_key_with_different_values_is_refused(tmp_path: Path) -> None:
+    ours = with_script('safo-x = "safo.one:entry"\n')
+    theirs = with_script('safo-x = "safo.two:entry"\n')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    done = run(work)
+    assert done.returncode == remerge.EXIT_NEEDS_AGENT and "pyproject.toml" in done.stdout
+    assert clean(work)
+
+
+def test_pyproject_same_key_added_with_an_existing_key_is_refused(tmp_path: Path) -> None:
+    ours = with_script('safo-card = "safo.other:entry"\n')
+    theirs = with_script('safo-theirs = "safo.theirs:entry"\n')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+def test_pyproject_edit_of_an_existing_script_line_is_refused(tmp_path: Path) -> None:
+    ours = {"pyproject.toml": PYPROJECT.replace("safo.card_cli:entry", "safo.card2:entry")}
+    theirs = with_script('safo-theirs = "safo.theirs:entry"\n')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+def test_pyproject_dependency_conflict_is_refused(tmp_path: Path) -> None:
+    ours = {"pyproject.toml": PYPROJECT.replace("PyYAML==6.0.3", "PyYAML==7.0.0")}
+    theirs = {"pyproject.toml": PYPROJECT.replace("PyYAML==6.0.3", "PyYAML==6.1.0")}
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+def test_pyproject_additions_outside_the_scripts_table_are_refused(tmp_path: Path) -> None:
+    dyn = 'version = { attr = "safo.__version__" }\n'
+    ours = {"pyproject.toml": PYPROJECT.replace(dyn, dyn + 'a = "safo.a:entry"\n')}
+    theirs = {"pyproject.toml": PYPROJECT.replace(dyn, dyn + 'b = "safo.b:entry"\n')}
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+def test_pyproject_a_hunk_straddling_the_table_boundary_is_refused(tmp_path: Path) -> None:
+    # both sides add a script line and also a line after the blank line, just before the next table
+    ours = with_script('safo-ours = "safo.ours:entry"\n')
+    theirs = with_script('safo-theirs = "safo.theirs:entry"\n')
+    ours["pyproject.toml"] = ours["pyproject.toml"].replace("\n[tool", '\nsafo-late = "safo.late:entry"\n[tool')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+@pytest.mark.parametrize(
+    "line", ['safo-x = "pkg.x:entry"\n', 'safo-x = "safo.x:Entry"\n', "safo-x = 1\n", 'safo-x = "safo.x:entry"  # c\n']
+)
+def test_pyproject_a_value_outside_the_pattern_is_refused(tmp_path: Path, line: str) -> None:
+    ours = with_script(line)
+    theirs = with_script('safo-theirs = "safo.theirs:entry"\n')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+def test_pyproject_resolver_is_registered() -> None:
+    assert remerge.RESOLVERS["pyproject.toml"] is remerge.resolve_pyproject
+
+
+def test_pyproject_an_indented_existing_key_still_counts_as_a_duplicate(tmp_path: Path) -> None:
+    base = PYPROJECT.replace(LAST, ' safo-card = "safo.card_cli:entry"\n')
+    ours = {
+        "pyproject.toml": base.replace(
+            ' safo-card = "safo.card_cli:entry"\n',
+            ' safo-card = "safo.card_cli:entry"\n' + 'safo-card = "safo.dup:entry"\n',
+        )
+    }
+    theirs = {
+        "pyproject.toml": base.replace(
+            ' safo-card = "safo.card_cli:entry"\n',
+            ' safo-card = "safo.card_cli:entry"\n' + 'safo-theirs = "safo.theirs:entry"\n',
+        )
+    }
+    _, work = scene(tmp_path, {"pyproject.toml": base}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+@pytest.mark.parametrize("existing", ['"safo-card" = "safo.card_cli:entry"\n', 'safo.card = "safo.card_cli:entry"\n'])
+def test_pyproject_a_quoted_or_dotted_key_in_the_table_refuses_the_file(tmp_path: Path, existing: str) -> None:
+    base = PYPROJECT.replace(LAST, existing)
+    ours = {"pyproject.toml": base.replace(existing, existing + 'safo-ours = "safo.ours:entry"\n')}
+    theirs = {"pyproject.toml": base.replace(existing, existing + 'safo-theirs = "safo.theirs:entry"\n')}
+    _, work = scene(tmp_path, {"pyproject.toml": base}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+@pytest.mark.parametrize(
+    "line", [' safo-x = "safo.x:entry"\n', 'safo-x\t= "safo.x:entry"\n', '"safo-x" = "safo.x:entry"\n']
+)
+def test_pyproject_an_added_line_that_is_not_the_strict_shape_is_refused(tmp_path: Path, line: str) -> None:
+    ours = with_script(line)
+    theirs = with_script('safo-theirs = "safo.theirs:entry"\n')
+    _, work = scene(tmp_path, {"pyproject.toml": PYPROJECT}, ours, theirs)
+    assert run(work).returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
