@@ -24,6 +24,15 @@ directory (an editor, a shell, an agent) makes it refuse.
 3. For each conflicted path, only these are settled by code:
    - `CHANGELOG.md`, inside its `## Unreleased` section only.
    - `docs/home.md` and `README.md`.
+   - `pyproject.toml`, inside its console-scripts table only: both sides may add lines of the exact shape
+     `key = "MODULE:FUNCTION"` (the value must be a module of this package, lower case with digits and underscores,
+     a colon and a lower-case function name; no trailing comment). The lines
+     are kept, ours first then `main`'s, because the table is unsorted. A key that would appear twice (including the
+     same key with two different values, or a key already in the table), an edited or removed line, an addition outside
+     the table or any other pyproject conflict (dependencies, tool settings, version) goes to an agent. An added line
+     with leading space, odd spacing around the `=`, quotes or a comment is refused. Keys already in the table are
+     compared after stripping leading space; a table that holds a quoted key, a dotted key or a value continued over
+     several lines is refused as a whole, because the rule cannot reason about it.
 
    Both sides must have only added lines, and every added block must start with a list item (`-`, `*`, `+` or `1.`) or a table row
    (`|`); indented continuation lines are accepted only after such a row inside the same block. The added lines are kept, this branch's first, then the lines from `main`.
