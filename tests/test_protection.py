@@ -1948,7 +1948,7 @@ def test_a_tree_entry_without_a_mode_is_cannot_tell() -> None:
 def mode_args(url: str) -> Any:
     import argparse
 
-    return argparse.Namespace(repo="o/r", agent_login="", require_app_id="", api_url=url)
+    return argparse.Namespace(repo="o/r", all=False, board="", agent_login="", require_app_id="", api_url=url)
 
 
 def make_context(say: Callable[[str], None] | None = None) -> Any:
