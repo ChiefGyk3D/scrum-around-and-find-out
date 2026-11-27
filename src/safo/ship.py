@@ -326,22 +326,47 @@ def contents_args(repo: str, path: str, ref: str) -> list[str]:
     return ["api", "-X", "GET", f"repos/{repo}/contents/{quoted}", "-f", f"ref={ref}"]
 
 
-def _run_steps(steps: list[Any], workdir: str, shell: Any) -> tuple[list[tuple[str, str]], str]:
-    """The `run:` texts (with their working directories) of a list of steps, or why a step cannot be read."""
-    out: list[tuple[str, str]] = []
+UNIX_LABEL = re.compile(r"(ubuntu|macos)-[A-Za-z0-9._-]+")
+
+
+def _run_steps(steps: list[Any], defaults: Mapping[str, Any], unix: bool) -> tuple[list[str], str]:
+    """The `run:` texts of a list of steps, or why a step cannot be read. A step runs from the repository root in bash
+    or sh: its shell is its own or the default, and an unset shell counts as bash only on a literal ubuntu or macos
+    runner label (on Windows it would be pwsh, on anything else it is unknown). Another working directory, shell or
+    shape is a problem, not a guess."""
+    out: list[str] = []
     for step in steps:
         if "run" not in step:
             continue
-        text, wd, sh = step["run"], step.get("working-directory", workdir), step.get("shell", shell)
-        if not isinstance(text, str) or not isinstance(wd, str) or sh not in (None, "bash", "sh"):
-            return [], "a run step with a shell or working directory it cannot read"
-        if "$" in wd:
-            return [], "a run step whose working directory is built at run time"
-        out.append((text, wd.strip("/") if wd not in ("", ".") else ""))
+        text = step["run"]
+        shell = step["shell"] if "shell" in step else defaults.get("shell")
+        wd = step["working-directory"] if "working-directory" in step else defaults.get("working-directory")
+        if not isinstance(text, str):
+            return [], "a run step that is not text"
+        if shell is None and not unix:
+            return [], "a run step whose shell is not known (no shell set and no ubuntu or macos runner label)"
+        if shell not in (None, "bash", "sh"):
+            return [], "a run step with a shell other than bash or sh"
+        if wd not in (None, "", "."):
+            return [], "a run step with a working directory other than the repository root"
+        out.append(text)
     return out, ""
 
 
-def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[tuple[str, str]], str]:
+def _run_defaults(section: Mapping[str, Any]) -> dict[str, Any] | None:
+    """`defaults.run` of a workflow or job as a dict (empty when absent); None for an odd shape."""
+    holder = section.get("defaults")
+    if holder is None:
+        return {}
+    if not isinstance(holder, dict):
+        return None
+    run = holder.get("run")
+    if run is None:
+        return {}
+    return dict(run) if isinstance(run, dict) else None
+
+
+def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[str], str]:
     """(the `uses:` references, the `run:` texts, "") of a workflow (jobs.*) or a composite action (runs.steps), or
     ([], [], why the file cannot be trusted).
 
@@ -362,34 +387,42 @@ def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[tupl
     if not isinstance(data, dict):
         return [], [], bad
     units: list[dict[str, Any]] = []  # jobs, or the one composite action
-    defaults: list[tuple[str, Any]] = []
+    defaults: list[dict[str, Any]] = []
+    unix: list[bool] = []
     if action:
         section = data.get("runs")
         if section is not None and not isinstance(section, dict):
             return [], [], bad
         if isinstance(section, dict) and section.get("using") == "composite":
             units.append(section)
-            defaults.append(("", None))
+            defaults.append({})
+            unix.append(False)  # a composite step names its shell
         elif isinstance(section, dict) and isinstance(section.get("image"), str):
             units.append({"uses": section["image"]} if section["image"].startswith("docker://") else {})
-            defaults.append(("", None))
+            defaults.append({})
+            unix.append(False)
     else:
         jobs = data.get("jobs")
         if jobs is None:
             jobs = {}
         if not isinstance(jobs, dict):
             return [], [], bad
+        top = _run_defaults(data)
+        if top is None:
+            return [], [], bad
         for job in jobs.values():
             if not isinstance(job, dict):
                 return [], [], bad
-            run_defaults = (job.get("defaults") or {}).get("run") or {} if isinstance(job.get("defaults"), dict) else {}
-            if not isinstance(run_defaults, dict):
+            own = _run_defaults(job)
+            if own is None:
                 return [], [], bad
             units.append(job)
-            defaults.append((str(run_defaults.get("working-directory") or ""), run_defaults.get("shell")))
+            defaults.append({**top, **own})  # a job's own default wins, key by key
+            label = job.get("runs-on")
+            unix.append(isinstance(label, str) and UNIX_LABEL.fullmatch(label) is not None)
     refs: list[str] = []
-    runs: list[tuple[str, str]] = []
-    for unit, (workdir, shell) in zip(units, defaults, strict=True):
+    runs: list[str] = []
+    for unit, default, is_unix in zip(units, defaults, unix, strict=True):
         found: list[Any] = [unit["uses"]] if "uses" in unit else []
         steps = unit.get("steps")
         if steps is not None and not isinstance(steps, list):
@@ -402,7 +435,7 @@ def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[tupl
         if not all(isinstance(ref, str) and ref.strip() for ref in found):
             return [], [], bad
         refs += [ref.strip() for ref in found]
-        texts, problem = _run_steps(steps or [], workdir, shell)
+        texts, problem = _run_steps(steps or [], default, is_unix)
         if problem:
             return [], [], problem
         runs += texts
@@ -438,7 +471,9 @@ class Watcher:
         gate_workflow: str = "",
         protect_paths: Sequence[str] = (),
         best_effort_threads: bool = False,
+        gate_commands: Sequence[str] = (),
     ):
+        self.gate_commands = tuple(gate_commands)
         self.protect_paths = tuple(protect_paths)
         self.best_effort_threads = best_effort_threads
         self.tip0 = ""  # the base tip every check of this attempt was read against
@@ -666,14 +701,33 @@ class Watcher:
             raise ShipError(EXIT_ERROR, f"the contents answer is not about {clean(path, 200)[0]}")
         return out.strip()
 
+    def read_text(self, repo: str, path: str, ref: str) -> str | None:
+        """The raw text of a file at `ref`; None only for a clear HTTP 404 (read from the status line, never from text);
+        any other failure is an error."""
+        code, out, err = self.gh.gh_call(
+            "api", "-i", *contents_args(repo, path, ref)[1:], "-H", "Accept: application/vnd.github.raw"
+        )
+        head, _sep, body = out.replace("\r\n", "\n").partition("\n\n")
+        found = re.match(r"HTTP/\S+ (\d{3})", head)
+        status = int(found.group(1)) if found else 0
+        if status == 404:
+            return None
+        if code != 0 or not 200 <= status < 300:
+            raise ShipError(
+                EXIT_ERROR,
+                f"cannot read {clean(path, 200)[0]} at {ref[:12]}: HTTP status {status or 'unknown'}"
+                f" {err.strip()[:100]}",
+            )
+        return body
+
     def gate_refs(self, repo: str, gate: str, base: str, pin: str) -> Result | None:
         """NEEDS-HUMAN unless everything the gate workflow executes is the same on `base` and `pin`, or pinned:
         - every `uses:` (of the workflow, of each local workflow and of each local composite action, followed) is a
           remote reference pinned by a 40-hex commit (a docker one by digest) or a local path identical on both;
-        - every repository file that a `run:` step executes or sources (found by shipscan, shell scripts read in turn)
-          is identical on both, and a `run:` text that cannot be analyzed is itself a stop.
-        It is a derivation, not a proof: Makefile targets, configuration, installed dependencies and what a program
-        imports stay outside it; --protect-path and rulesets with required workflows are the other controls."""
+        - every `run:` text (of those files) is in the strict grammar of safo.shipscan, and every repository file it
+          executes is identical on both. A line outside the grammar is itself a stop.
+        Files that a script reads, Makefile targets, configuration, installed dependencies and what a program imports
+        stay outside it; --protect-path and rulesets with required workflows are the other controls."""
         seen: set[tuple[str, str]] = set()
         compared: set[str] = set()
         queue: list[tuple[str, int, str]] = [(gate, 0, "workflow")]
@@ -686,36 +740,25 @@ class Watcher:
             seen.add((kind, path))
             where = clean(path, 200)[0]
             if kind == "action":
-                text = None
-                for name in ("action.yml", "action.yaml"):
-                    code, got, _err = self.gh.gh_call(
-                        *contents_args(repo, f"{path}/{name}", pin), "-H", "Accept: application/vnd.github.raw"
-                    )
-                    if code == 0:
-                        text = got
-                        break
+                text = self.read_text(repo, f"{path}/action.yml", pin)
                 if text is None:
-                    continue  # a directory without an action file: it was compared as a whole already
+                    text = self.read_text(repo, f"{path}/action.yaml", pin)
+                if text is None:
+                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: a local action without action.yml")
             else:
-                code, text, err = self.gh.gh_call(
-                    *contents_args(repo, path, pin), "-H", "Accept: application/vnd.github.raw"
-                )
-                if code != 0:
-                    raise ShipError(EXIT_ERROR, f"cannot read {where}: {err.strip()[:200]}")
-            if kind == "script":
-                refs: list[str] = []
-                runs = [(text, "")]
-            else:
-                refs, runs, problem = workflow_refs(text, action=kind == "action")
-                if problem:
-                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: {problem}")
-            for run_text, workdir in runs:
-                facts = shipscan.analyze(run_text, action_dir=path if kind == "action" else "", workdir=workdir)
+                text = self.read_text(repo, path, pin)
+                if text is None:
+                    raise ShipError(EXIT_ERROR, f"cannot read {where}: not found at the pinned head")
+            refs, runs, problem = workflow_refs(text, action=kind == "action")
+            if problem:
+                return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: {problem}")
+            for run_text in runs:
+                facts = shipscan.analyze(run_text, commands=self.gate_commands)
                 if facts.problem:
                     return Result(
                         EXIT_NEEDS_HUMAN,
                         "NEEDS-HUMAN",
-                        f"{where}: a run step cannot be analyzed ({clean(facts.problem, 160)[0]})",
+                        f"{where}: a run step is not in the allowed grammar: {clean(facts.problem, 200)[0]}",
                     )
                 for file in facts.files:
                     if file in compared:
@@ -732,10 +775,6 @@ class Watcher:
                             "NEEDS-HUMAN",
                             f"{clean(file, 200)[0]} (run by {where}) differs between {base} and the pin",
                         )
-                for script in facts.scripts:
-                    if depth >= MAX_DEPTH:
-                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-                    queue.append((script, depth + 1, "script"))
             for ref in refs:
                 if ref.startswith("./"):
                     local = ref[2:].rstrip("/")
@@ -1353,6 +1392,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--gate-app-id", type=int, default=GATE_APP_ID, help="GitHub App id that must own `CI green`")
     p.add_argument(
+        "--gate-command",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="repeatable: an exact command name (such as make or pytest) the gate's run steps may use; it is NOT "
+        "followed to any file, so protect its inputs with --protect-path",
+    )
+    p.add_argument(
         "--best-effort-threads",
         action="store_true",
         help="merge even when branch protection does not require conversation resolution (a thread opened between "
@@ -1399,6 +1446,9 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error(f"--total-timeout must be 1 to {MAX_TOTAL_TIMEOUT}")
     if args.gate_workflow and not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", args.gate_workflow):
         parser.error("--gate-workflow is a path like .github/workflows/ci.yml")
+    for name in args.gate_command:
+        if not shipscan.valid_command_name(name):
+            parser.error("--gate-command is one plain command name (no path, no option, no interpreter)")
     for path in args.protect_path:
         parts = path.rstrip("/").split("/")
         if not path or path.startswith("/") or "\\" in path or ".." in parts or "" in parts or len(path) > 300:
@@ -1467,6 +1517,7 @@ def main(
         gate_workflow=args.gate_workflow,
         protect_paths=args.protect_path,
         best_effort_threads=args.best_effort_threads,
+        gate_commands=args.gate_command,
         timeout=args.timeout,
         interval=args.interval,
         max_polls=args.max_polls,

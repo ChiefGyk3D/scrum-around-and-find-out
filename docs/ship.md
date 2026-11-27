@@ -104,33 +104,49 @@ that does not parse or has an odd shape, or a word `uses` outside comments that 
 scalar, a flow mapping, a duplicate key), is `NEEDS-HUMAN` ("too many references or nesting too deep to verify" when a cap
 is hit); a comment that says "uses" is ignored, a name or string that says it stops the tool and a human reads the file.
 
-The `run:` steps are read too (`safo.shipscan`), as a best-effort derivation of the repository files they execute or
-source: the command word when it is a path (`./ci/gate.sh`), the script after an interpreter (`bash ci/x.sh`,
-`python ci/x.py`, `node x.mjs`, `source x`), a repository module after `python -m` (well-known tools such as pytest, pip,
-mypy and ruff are skipped), the Makefile after `make`, and each shell script's own text in turn (three levels, 40 files).
-`${{ github.workspace }}`, `$GITHUB_WORKSPACE`, `github.action_path`, a step's `working-directory` and a plain `cd` are
-followed. The steps of local composite actions are read the same way. Each file found is compared between the base and
-the pinned head (by content sha); a difference is `NEEDS-HUMAN` naming the first file. A file missing at both refs is a
-generated one and is left alone. Anything it cannot name is `NEEDS-HUMAN` too: command substitution, `eval`, heredocs,
-`xargs`, `find -exec`, a path built from a variable or a `${{ }}` expression, a pipe into an interpreter (`curl | bash`),
-`python -c`, `bash -c`, a `cd` it cannot follow, a path outside the repository, a shell other than bash or sh. Files that
-are only arguments (a test directory handed to pytest) are not listed.
+The `run:` steps are read too, with a strict allowlist grammar (the shipscan module), not a best-effort reading of shell:
+deriving the executed files from arbitrary shell is an open-ended class, so anything outside the grammar is a human stop.
+A `run:` text is accepted only when every line is one of these, and the offending line is named in the result:
 
-What this does not prove, stated plainly: this is a best-effort derivation, not a proof. Makefile targets, configuration
-files, test inventories, installed dependencies and whatever a Python or Node program imports stay outside it, as does
-anything a script reaches through a path it builds. `--protect-path` adds paths by hand, and `path` equality of the
-workflow run is a name match, not a signature. The real controls are rulesets with required workflows and CODEOWNERS on
-the files the gate relies on; this tool narrows the gap and does not replace them.
+- blank, or a comment line (first character `#`);
+- `cd DIR` on its own, DIR a repository-relative literal path (it moves the lines after it, within that text only);
+- an interpreter (bash, sh, python, python3, node, ruby, perl, pwsh), then options from a short per-interpreter list of
+  flags that take no value (for example `-e`, `-u`, `-B`, `--no-warnings`), then exactly one repository-relative script
+  path, then plain literal arguments;
+- a repository-relative executable path that contains a slash, then plain literal arguments;
+- an exact command name listed with `--gate-command NAME` (repeatable, for example `make` or `pytest`), then plain
+  literal arguments. No file is derived from such a command: list it only together with `--protect-path` for its inputs.
+
+A line may use only letters, digits, `.`, `_`, `/`, `=`, `:`, `@`, `,`, `+`, `-` and spaces. So there are no quotes,
+variables, `${{ }}` expressions, pipes, lists (`;`, `&&`, `||`), background jobs, redirections, subshells, command
+substitution, backticks, heredocs, continuations, tabs, globs or `~`. A path has no empty, `.` (except a leading `./`) or
+`..` part and does not start with `/`. Refused outright: any wrapper (`sudo`, `env`, `timeout`, `nice`, `xvfb-run`,
+`strace`, `uv run`, `npx`...), `VAR=value` prefixes, an interpreter option that takes a value, `-c`, `-m`, `-e`,
+`source`, `eval`, and every command that is not listed. Each script found is compared between the base and the pinned head
+(by content sha); a difference is `NEEDS-HUMAN` naming the file. A file missing at both refs is a generated one and is left
+alone. The same grammar applies to the steps of local composite actions (which must name `shell: bash` or `sh`).
+
+Each step also runs from the repository root in bash or sh: a `working-directory`, and a shell other than bash or sh, in
+the step, the `run` defaults of the job or of the workflow (the job's own value wins, key by key), is
+`NEEDS-HUMAN`; an unset shell counts as bash only on a literal `ubuntu-` or `macos-` runner label (on Windows it would be
+pwsh, on any other label it is unknown). An unreadable workflow or action file is exit 7 (only a clear HTTP 404 status line
+counts as missing); a local action directory that does not exist is exit 7, and one without an `action.yml` or
+`action.yaml` is `NEEDS-HUMAN`.
+
+What this does not see, stated plainly: the text of the scripts themselves (what a script sources or runs is not read; list
+those paths with `--protect-path`), Makefile targets and the files a listed command uses, configuration, test
+inventories, installed dependencies, and what a Python or Node program imports. The price of closing the gap by
+construction is more human stops, which is the right trade for an unattended merge gate. The real controls remain
+rulesets with required workflows and CODEOWNERS on the files the gate relies on; this tool narrows the gap and does not
+replace them. The workflow run's `path` match is a name match, not a signature. A protected context with no `app_id` is
+accepted from any source: pin it. Other pinned contexts are checked by app and name only, not by workflow.
 
 The base is pinned too. Its tip is read before any check and compared again right before the merge; when it moved, or
 the merge call answers "Base branch was modified", nothing is merged on the old checks: the whole chain (required
 checks, gate path, workflow and file comparisons, run binding, threads, protection) runs again against the new base, once,
 on the same head, and a second movement is `MERGE-REFUSED`. The gate's check runs are read once more right before the
 merge, and branch protection is read again for every pull request, never remembered from the one before. One merge call
-is made per pass. The real control is branch
-protection with required workflows (rulesets) and CODEOWNERS on `.github/`; this tool narrows the gap and does not
-replace them. A protected context with no `app_id` is accepted from any source; pin it. Other pinned contexts are checked
-by app and name only, not by workflow.
+is made per pass.
 
 ## Queue mode
 

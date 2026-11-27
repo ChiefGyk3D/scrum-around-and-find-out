@@ -99,18 +99,23 @@ STUB = textwrap.dedent(
     url = next((a for a in rest if a.startswith("repos/")), "")
     fref = next((a[4:] for a in rest if a.startswith("ref=")), "")
     if rest[0] == "api" and "/contents/" in url:
-        assert "?" not in url and list(rest[1:3]) == ["-X", "GET"], rest  # the ref is a field, never part of the URL
+        assert "?" not in url and "-X" in rest and rest[rest.index("-X") + 1] == "GET", rest  # the ref is a field
         cpath = unquote(url.split("/contents/")[1])
         shown = state.get("path_override", {{}}).get(cpath, cpath)  # a test can make an answer be about another path
         jq = rest[rest.index("--jq") + 1] if "--jq" in rest else ""
         gone = cpath in state.get("missing", []) or cpath + "@" + fref in state.get("missing_at", [])
         if gone and "-H" not in rest and cpath != ".github/workflows":
             reply({{"rc": 1, "err": "Not Found"}})  # the file does not exist at either ref
-        if "-H" in rest:  # the raw text of a file
-            default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: x\\n")
+        if "-H" in rest:  # the raw text of a file, with the HTTP status line of `gh api -i`
+            assert "-i" in rest, rest
+            if cpath in state.get("missing_files", []):
+                reply({{"rc": 1, "out": "HTTP/2.0 404 Not Found\\r\\n\\r\\nnot found"}})
+            if cpath in state.get("error_files", []):
+                reply({{"rc": 1, "out": "HTTP/2.0 500 Server Error\\r\\n\\r\\nboom", "err": "Not Found 404"}})
+            default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: ubuntu-latest\\n")
             if not cpath.endswith((".yml", ".yaml")):
                 default = "echo ok\\n"
-            reply({{"out": state.get("texts", {{}}).get(cpath, default)}})
+            reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + state.get("texts", {{}}).get(cpath, default)}})
         if cpath == ".github/workflows":
             reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
         if "join" in jq:  # the content sha of the gate file
