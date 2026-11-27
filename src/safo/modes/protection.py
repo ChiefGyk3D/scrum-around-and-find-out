@@ -16,6 +16,7 @@ from safo.context import LocalContext
 from safo.errors import EXIT_DRIFT, EXIT_INTERRUPTED, EXIT_OK, EXIT_UNKNOWN, ConfigError, SafoError
 from safo.modes import LocalMode, register_local
 from safo.protection import API_URL, CannotTell, Rest, check
+from safo.protection_all import audit
 
 LIMIT = (
     "Exit 0 means every condition held in what GitHub answered over two full reads, not that they held at one instant: "
@@ -26,7 +27,12 @@ LIMIT = (
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.description = LIMIT
-    parser.add_argument("--repo", required=True, help="owner/name of the repository to read")
+    parser.add_argument("--repo", default="", help="owner/name of the repository to read (or use --all)")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="audit every repository in the board file against the standard (one line each; exit 0, 1 or 2)",
+    )
     parser.add_argument("--agent-login", default="", help="the agent account; named if it may bypass the rule")
     parser.add_argument(
         "--require-app-id",
@@ -68,6 +74,8 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
 
 
 def _run(ctx: LocalContext, args: argparse.Namespace) -> int:
+    if args.all == bool(args.repo):
+        raise ConfigError("give exactly one of --repo OWNER/NAME or --all")
     if args.agent_login and not credentials.LOGIN.fullmatch(args.agent_login):
         raise ConfigError("agent-login is not a GitHub login")
     if args.require_app_id and not re.fullmatch(r"[1-9][0-9]{0,15}", args.require_app_id):
@@ -79,6 +87,14 @@ def _run(ctx: LocalContext, args: argparse.Namespace) -> int:
         )
     if creds.kind == credentials.GH and args.api_url != API_URL:
         raise ConfigError(f"a gh token is only sent to {API_URL}; --api-url cannot redirect it")
+    if args.all:
+        from safo.cli import resolve_board  # deferred: the command line imports the modes
+
+        board = resolve_board(args.board, ctx.env)
+        lines, code = audit(
+            Rest(creds.token, args.api_url), board, int(args.require_app_id) if args.require_app_id else None
+        )
+        return emit(ctx, lines, code)
     try:
         branch, found, conditions = check(
             Rest(creds.token, args.api_url),

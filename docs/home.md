@@ -14,6 +14,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Port ledger](port-ledger.md): one row per SAFO item with its port decision for the portable edition: ported, port as configurable, proposed, or not ported and why.
 - [Impacted tests](impacted-tests.md): `scripts/impacted-tests.py`, which changed files map to which tests for a targeted run, and when it says run the full suite. CI stays the judge.
 - [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit.
+- [safo-threads](threads.md): list the open review threads of a pull request and reply to and resolve them from a strict dispositions file.
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
 - [SAFO threat model](safo-threat-model.md): the threat model of SAFO as a whole: assets, actors, trust boundaries, 25 ranked risks, a mitigation and a verification for each, and what SAFO does not guarantee.
@@ -29,6 +30,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [safo-idle-check](idle-check.md): the Stop hook that blocks the end of a turn while workers are under the floor and ready work exists.
 - [safo-codex-run repository checks](codex-run.md): what the wrapper checks in a worktree before codex starts, and the residual risk it does not close.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
+- [Protection audit](protection-audit.md): `safo protection --all` audits every board repository's default branch against the standard.
 - [Look before instructing](look-before-instructing.md): prior art, then the vendor's docs page, then the live system; never a click path from memory.
 - [Done means verified](done-means-verified.md): "done" needs an observation this turn through the user's path, plus the destructive-step checklist.
 - [Access planning](access-planning.md): plan the whole job, ask once for the union of scopes, no broader fallback, drop write scopes at the end.
