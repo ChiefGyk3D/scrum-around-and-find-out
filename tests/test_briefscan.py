@@ -222,3 +222,45 @@ def test_a_hook_key_with_control_characters_cannot_forge_a_diagnostic_line() -> 
     assert len(lines) == 1 and "credential" in lines[0]
     assert not any(ln.startswith("INJECTED") for ln in err.splitlines())
     assert chr(27) not in err and chr(13) not in err
+
+
+def test_the_allow_marker_is_ignored_in_hook_mode() -> None:
+    code, err = hook(
+        {"tool_input": {"prompt": f"{AWS} safo-scan-allow: documented example key\n{NAS} safo-scan-allow: x"}}
+    )
+    assert code == 2
+    assert "tool_input.prompt:1: credential" in err and "tool_input.prompt:2: hostname" in err
+    assert "allowed" not in err and "without-reason" not in err
+    assert AWS not in err
+
+
+def test_a_private_hostname_in_the_allow_reason_is_found() -> None:
+    code, _, err = scan(f"fine text safo-scan-allow: see {NAS} for details\n")
+    assert code == 1 and "hostname" in err and NAS not in err
+
+
+def test_a_deny_term_and_an_address_in_the_allow_reason_are_found(tmp_path: Path) -> None:
+    deny = tmp_path / "deny.txt"
+    deny.write_text("plum" + "berry-shed\n")
+    deny.chmod(0o600)
+    env = {"SAFO_DRAFT_DENY_FILE": str(deny)}
+    code, _, err = scan("ok safo-scan-allow: the plum" + "berry shed is at " + IP + "\n", env, tmp_path)
+    assert code == 1 and "deny-list #1" in err and "ip-address" in err
+
+
+def test_a_credential_in_a_json_key_is_found_and_the_key_is_not_printed() -> None:
+    code, err = hook({"tool_input": {GH: "harmless", "n": {AWS: ["x"]}}})
+    assert code == 2
+    assert err.count("credential") >= 2
+    assert GH not in err and AWS not in err and "<key#" in err
+
+
+def test_a_private_hostname_as_a_json_key_is_found_and_not_used_as_a_label() -> None:
+    code, err = hook({"tool_input": {NAS: "value " + GH}})
+    assert code == 2 and "hostname" in err and NAS not in err
+    assert "tool_input.<key#0>:1: credential" in err
+
+
+def test_a_plain_clean_key_still_labels_its_value() -> None:
+    code, err = hook({"tool_input": {"prompt": GH}})
+    assert code == 2 and "tool_input.prompt:1: credential" in err
