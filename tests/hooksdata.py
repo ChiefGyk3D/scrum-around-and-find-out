@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import io
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,32 @@ from meterdata import NOW
 from safo.agentsfile import load_agents, parse_agents
 from safo.cli import main
 from safo.hooks import attempt_path, state_path
+from safo.modes import hooks as hooks_mode
+
+GUARD_KEY = "GUARD_TIMEOUT_SECONDS"  # by name: the module imports it, so it is not an exported attribute
+REAL_STATE_IO_CAP = hooks_mode.NOTICE_IO_CAP_SECONDS
+REAL_GUARD_TIMEOUT = vars(hooks_mode)[GUARD_KEY]
+HERMETIC_STATE_IO_CAP = 30.0
+HERMETIC_GUARD_TIMEOUT = 300  # the host budget is measured from the call, so a stalled runner would eat the real 10 s
+
+
+@contextlib.contextmanager
+def state_io_cap(seconds: float | None = None) -> Iterator[None]:
+    """Give the guard roomy time budgets (the state-folder read and the whole hook) so a stalled CI runner cannot trip
+    the correct slow-state or out-of-time fail-closed paths in a test about something else. `seconds` sets an explicit
+    state cap and keeps the real hook budget (a slow-state test); None applies the roomy defaults, never over a value
+    the test set itself. Always restored."""
+    saved = hooks_mode.NOTICE_IO_CAP_SECONDS, vars(hooks_mode)[GUARD_KEY]
+    if seconds is not None:
+        hooks_mode.NOTICE_IO_CAP_SECONDS = seconds
+    elif saved == (REAL_STATE_IO_CAP, REAL_GUARD_TIMEOUT):
+        hooks_mode.NOTICE_IO_CAP_SECONDS = HERMETIC_STATE_IO_CAP
+        vars(hooks_mode)[GUARD_KEY] = HERMETIC_GUARD_TIMEOUT
+    try:
+        yield
+    finally:
+        hooks_mode.NOTICE_IO_CAP_SECONDS = saved[0]
+        vars(hooks_mode)[GUARD_KEY] = saved[1]
 
 
 def hooks(
@@ -25,19 +53,21 @@ def hooks(
     now: dt.datetime = NOW,
     env: dict[str, str] | None = None,
     dry_run: bool = False,
+    io_cap: float | None = None,
 ) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     environment = {"HOME": str(home), "PATH": "", **(env or {})}
     if argv and argv[0] == "probe" and not stdin:
         stdin = json.dumps({"hook_event_name": "SessionStart", "session_id": "session-a"})
-    code = main(
-        [*(["--dry-run"] if dry_run else []), "hooks", *argv],
-        env=environment,
-        out=out,
-        err=err,
-        now=now,
-        stdin=io.StringIO(stdin),
-    )
+    with state_io_cap(io_cap):
+        code = main(
+            [*(["--dry-run"] if dry_run else []), "hooks", *argv],
+            env=environment,
+            out=out,
+            err=err,
+            now=now,
+            stdin=io.StringIO(stdin),
+        )
     return code, out.getvalue(), err.getvalue()
 
 

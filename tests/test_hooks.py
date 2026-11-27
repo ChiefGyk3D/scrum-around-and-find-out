@@ -26,6 +26,7 @@ import yaml
 from agentsdata import A_MODELS, B_MODELS, agents_dict
 from fakeollama import FakeOllama
 from hooksdata import (
+    REAL_STATE_IO_CAP,
     agents_file,
     block_reprobe,
     dispatch,
@@ -35,6 +36,7 @@ from hooksdata import (
     set_mode,
     set_probe,
     state_folder,
+    state_io_cap,
 )
 from meterdata import NOW
 from safo import hooks as safo_hooks
@@ -570,6 +572,45 @@ def test_a_brief_with_a_local_step_or_a_reason_for_none_passes_while_the_local_l
     set_probe(_private_home)
     assert guard(_private_home, agents, dispatch(prompt=brief))[1] == ""
     assert read_log(_private_home)[0]["local_reachable"] is True
+
+
+def _stall_state_reads(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    from safo.modes import hooks as mode
+
+    real = vars(mode)["read_state"]
+
+    def slow(path: Path | None) -> Any:
+        time.sleep(seconds)
+        return real(path)
+
+    monkeypatch.setattr(mode, "read_state", slow)
+
+
+def test_the_hermetic_state_budget_does_not_hide_a_real_slow_state_path(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared helper widens the state-read budget so a stalled runner cannot fake slowness; a test that sets its own
+    cap still gets the slow notice from the same helper, and the cap is restored after every call."""
+    set_probe(_private_home)
+    _stall_state_reads(monkeypatch, 0.5)
+    assert guard(_private_home, agents, dispatch(prompt="local-llm: n/a - a rename."))[1] == ""
+    code, out, _ = guard(_private_home, agents, dispatch(prompt="local-llm: n/a - a rename."), io_cap=0.01)
+    assert code == 0 and "state folder slow" in out
+    from safo.modes import hooks as mode
+
+    assert mode.NOTICE_IO_CAP_SECONDS == REAL_STATE_IO_CAP
+
+
+def test_a_cap_the_test_set_itself_is_left_alone_by_the_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    from safo.modes import hooks as mode
+
+    monkeypatch.setattr(mode, "NOTICE_IO_CAP_SECONDS", 0.25)
+    with state_io_cap():
+        assert mode.NOTICE_IO_CAP_SECONDS == 0.25
+    monkeypatch.setattr(mode, "NOTICE_IO_CAP_SECONDS", REAL_STATE_IO_CAP)
+    with state_io_cap():
+        assert mode.NOTICE_IO_CAP_SECONDS > REAL_STATE_IO_CAP
+    assert mode.NOTICE_IO_CAP_SECONDS == REAL_STATE_IO_CAP
 
 
 def test_a_brief_with_neither_is_flagged_while_the_local_llm_is_reachable(_private_home: Path, agents: Path) -> None:
