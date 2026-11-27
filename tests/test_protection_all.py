@@ -142,6 +142,35 @@ def test_a_security_job_that_never_runs_on_pull_requests_is_not_demanded(tmp_pat
     assert code == 0, out
 
 
+def test_an_absent_workflow_directory_is_proved_by_a_readable_contents_root(tmp_path: Path) -> None:
+    root = f"{REPO}/contents"
+    routes = {**with_classic(without_security), f"{root}/.github/workflows": j(NOT_PROTECTED, 404), root: j([])}
+    code, out, _, _ = run_all(tmp_path, routes)
+    assert code == 0, out
+
+
+def test_a_workflow_directory_404_with_an_unreadable_contents_root_is_unknown(tmp_path: Path) -> None:
+    root = f"{REPO}/contents"
+    routes = {**clean(), f"{root}/.github/workflows": j(NOT_PROTECTED, 404), root: j(NOT_PROTECTED, 404)}
+    code, out, _, _ = run_all(tmp_path, routes)
+    assert code == 2, out
+    assert "OK o/r" not in out
+
+
+def test_a_malformed_thread_resolution_value_in_a_ruleset_is_unknown(tmp_path: Path) -> None:
+    rule = ruleset()
+    rule["rules"][2]["parameters"]["required_review_thread_resolution"] = "true"
+    rule["rules"][3]["parameters"]["required_status_checks"].append({"context": "sec / security"})
+    routes = {
+        **clean(),
+        f"{REPO}/branches/main/protection": j(NOT_PROTECTED, 404),
+        f"{REPO}/rulesets": j([{"id": 7, "target": "branch", "enforcement": "active"}]),
+        f"{REPO}/rulesets/7": j(rule),
+    }
+    code, out, _, _ = run_all(tmp_path, routes)
+    assert code == 2, out
+
+
 def test_admin_bypass_and_conversation_state_are_reported_without_failing(tmp_path: Path) -> None:
     body = classic()
     body["required_status_checks"]["checks"].append({"context": "sec / security", "app_id": 15368})

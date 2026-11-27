@@ -317,7 +317,8 @@ def parse_ruleset(detail: Any, listed: dict[str, Any], branch: str) -> Source | 
             params = _obj(entry.get("parameters"), "the pull_request rule's parameters")
             owner = owner or _bool(params, "require_code_owner_review", "the pull_request rule")
             pull = True
-            talk = talk or params.get("required_review_thread_resolution") is True
+            if "required_review_thread_resolution" in params:  # omitted means off; a present value must be true/false
+                talk = _bool(params, "required_review_thread_resolution", "the pull_request rule") or talk
         elif kind == "required_status_checks":
             params = _obj(entry.get("parameters"), "the required_status_checks rule's parameters")
             strict = strict or _bool(params, "strict_required_status_checks_policy", "the required_status_checks rule")

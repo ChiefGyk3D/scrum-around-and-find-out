@@ -76,7 +76,11 @@ def declared_security(rest: Rest, base: str, branch: str) -> list[str]:
     ref = urllib.parse.quote(branch, safe="/")
     status, listing, _ = rest.get(f"{base}/contents/.github/workflows?ref={ref}", "the workflow directory")
     if status == 404:
-        return []
+        # A 404 also answers a token that cannot read contents; only a readable root proves the directory is absent.
+        root_status, root, _ = rest.get(f"{base}/contents?ref={ref}", "the repository contents")
+        if root_status == 200 and isinstance(root, list):
+            return []
+        raise CannotTell("cannot tell: the workflow directory is absent or the contents are not readable")
     if not isinstance(listing, list) or len(listing) > MAX_WORKFLOWS:
         raise CannotTell("cannot tell: the workflow directory is not a list this check will read")
     names: list[str] = []
