@@ -33,6 +33,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 
 ROOT_ENV = "SAFO_SHARED_VENV_ROOT"
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
@@ -42,6 +43,11 @@ BUILD_NAME = re.compile(r"\.build-[A-Za-z0-9_]{8}")
 KEY = re.compile(r"[0-9a-f]{64}")
 MAX_LOCKFILE = 4 * 1024 * 1024
 LOCK_TIMEOUT = 900.0
+VENV_TIMEOUT = 600.0
+PIP_TIMEOUT = 1800.0
+IDENTITY_TIMEOUT = 60.0
+STAGE_PREFIX = ".stage-"
+STAGE_NAME = re.compile(r"\.stage-[A-Za-z0-9_]{8}")
 MAX_AGE_DAYS = 36500.0
 MAX_TIMEOUT = 7 * 86400.0
 IDENTITY_CODE = (
@@ -374,6 +380,29 @@ def _exe_signature(resolved: str) -> tuple[str, int, int, int]:
 Signature = tuple[str, int, int, int]
 
 
+def _run_child(
+    cmd: Sequence[str], *, env: dict[str, str], timeout: float, pass_fds: tuple[int, ...] = ()
+) -> tuple[int | None, bytes, bytes]:
+    """Run a child with its output captured. Returns (status, stdout, stderr); the status is None on a timeout.
+
+    A timeout exception carries the partial output and the command line, so it is never allowed to escape: it is
+    caught, emptied, and the caller raises its own fixed error outside the handler (no cause, no context).
+    """
+    timed_out = False
+    done: subprocess.CompletedProcess[bytes] | None = None
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
+            list(cmd), env=env, timeout=timeout, capture_output=True, pass_fds=pass_fds, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        exc.stdout = exc.stderr = exc.output = None
+        exc.cmd = ""
+        timed_out = True
+    if timed_out or done is None:
+        return None, b"", b""
+    return done.returncode, done.stdout, done.stderr
+
+
 def identity(python: str) -> tuple[str, Signature, list[object]]:
     """Resolve the interpreter once to its final real path, record its signature and run ONLY that path."""
     found = shutil.which(python)
@@ -381,18 +410,18 @@ def identity(python: str) -> tuple[str, Signature, list[object]]:
         raise Refused(f"the interpreter does not exist or is not executable: {python}")
     resolved = os.path.realpath(found)
     signature = _exe_signature(resolved)
+    report: list[object] | None = None
     try:
-        done = subprocess.run(  # noqa: S603 - the resolved interpreter and a fixed argument list, no shell
-            [resolved, "-I", "-c", IDENTITY_CODE],
-            capture_output=True,
-            text=True,
-            env=_clean_env(Path("/nonexistent")),
-            timeout=60,
-            check=True,
+        code, out, _ = _run_child(
+            [resolved, "-I", "-c", IDENTITY_CODE], env=_clean_env(Path("/nonexistent")), timeout=IDENTITY_TIMEOUT
         )
-        report = json.loads(done.stdout.strip().splitlines()[-1])
-    except (subprocess.SubprocessError, OSError, ValueError, IndexError) as exc:
-        raise Refused(f"the interpreter did not report its identity: {python}") from exc
+        if code == 0:
+            lines = out.decode(errors="replace").strip().splitlines()
+            report = json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        report = None
+    if not isinstance(report, list):
+        raise Refused(f"the interpreter did not report its identity: {python}")
     return resolved, signature, report
 
 
@@ -446,7 +475,7 @@ def _trusted(path: Path, what: str, *, kind: str = "file") -> os.stat_result:
     return info
 
 
-def manifest(venv: Path) -> str:
+def manifest(venv: Path, skip: frozenset[str] = frozenset({MARKER})) -> str:
     """sha256 over the sorted (relative path, size, mode) list of the venv, refusing foreign or writable members.
 
     Detects accidental or cross-account damage; a same-user attacker can rewrite the marker as well.
@@ -456,7 +485,7 @@ def manifest(venv: Path) -> str:
         for name in [*dirs, *files]:
             path = Path(here) / name
             rel = str(path.relative_to(venv))
-            if rel == MARKER:
+            if rel in skip:
                 continue
             info = path.lstat()
             if info.st_uid != os.geteuid():
@@ -541,63 +570,84 @@ def build(
 ) -> None:
     """Build from the checked bytes `data`: pip reads a private copy through an open descriptor, not the caller's file.
 
-    The copy lives in a fresh random-named 0700 directory; its bytes are re-hashed from the descriptor pip read.
+    The venv is staged as a sibling of its final name (`root/.stage-RANDOM`), fully sealed including its top directory,
+    and only then renamed into place, so an interruption leaves an unpublished stage or an already sealed entry, never
+    a writable published one. Child output is never relayed and never chained into an exception.
     """
     expected = expected_sha or hashlib.sha256(data).hexdigest()
     final = root / key
     if handle:
         handle.check()
     work = Path(tempfile.mkdtemp(prefix=".build-", dir=root))  # mode 0700, random name
+    stage = root / (STAGE_PREFIX + work.name[len(".build-") :])
     fd = -1
     published = False
+    failure: str | None = None
     try:
-        marker = os.open(work / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        os.close(marker)
-        home, venv = work / "home", work / "venv"
-        home.mkdir(mode=0o700)
-        fd = os.open(work / "req.txt", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        os.write(fd, data)
-        if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
-            raise Refused("the private lockfile copy does not match the checked hash")
-        req = f"/proc/self/fd/{fd}" if Path("/proc/self/fd").is_dir() else str(work / "req.txt")
-        env = _clean_env(home)
-        subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
-            [python, "-m", "venv", "--clear", str(venv)], check=True, env=env, timeout=600, capture_output=True
-        )  # the output of a child is never relayed
-        install = [
-            str(interpreter(venv)), "-I", "-m", "pip", "--isolated", "install", "--no-input",
-            "--disable-pip-version-check", "--require-hashes", "--no-deps",
-            "--only-binary=:all:", *pip_args, "-r", req,
-        ]  # fmt: skip
-        done = subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
-            install, env=env, timeout=1800, capture_output=True, pass_fds=(fd,), check=False
-        )
-        if done.returncode != 0:
-            # pip's raw output is never relayed: it can carry credentials in any shape. Only its status is reported.
-            raise Failed(_pip_failure(root, key, done.returncode, done.stdout + done.stderr, keep_pip_log))
-        if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
-            raise Refused("the private lockfile copy changed during the install")
-        if re.search(r"(?im)^include-system-site-packages\s*=\s*true", (venv / "pyvenv.cfg").read_text()):
-            raise Refused("the new venv includes system site-packages")
-        _seal(venv)
-        marker_path = venv / MARKER
-        marker_path.write_text(f"{key}\n{manifest(venv)}\n")
-        marker_path.chmod(0o444)
-        if handle:
-            handle.check()
-            os.rename(f"{work.name}/venv", key, src_dir_fd=handle.fd, dst_dir_fd=handle.fd)
-        else:
-            os.rename(venv, final)
-        published = True
-        final.chmod(final.stat().st_mode & ~0o222)
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise Failed(f"the build failed: {_describe(exc)}") from exc
+        try:
+            mark_fd = os.open(
+                work / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+            )
+            os.close(mark_fd)
+            home = work / "home"
+            home.mkdir(mode=0o700)
+            fd = os.open(work / "req.txt", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            os.write(fd, data)
+            if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
+                raise Refused("the private lockfile copy does not match the checked hash")
+            req = f"/proc/self/fd/{fd}" if Path("/proc/self/fd").is_dir() else str(work / "req.txt")
+            env = _clean_env(home)
+            code, _, _ = _run_child([python, "-m", "venv", "--clear", str(stage)], env=env, timeout=VENV_TIMEOUT)
+            if code is None:
+                raise Failed("the venv step timed out")
+            if code != 0:
+                raise Failed(f"the venv step failed: the interpreter exited with status {code}")
+            stage_mark = os.open(
+                stage / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+            )
+            os.close(stage_mark)
+            install = [
+                str(interpreter(stage)), "-I", "-m", "pip", "--isolated", "install", "--no-input",
+                "--disable-pip-version-check", "--require-hashes", "--no-deps",
+                "--only-binary=:all:", *pip_args, "-r", req,
+            ]  # fmt: skip
+            code, out, err = _run_child(install, env=env, timeout=PIP_TIMEOUT, pass_fds=(fd,))
+            if code is None:
+                raise Failed("the install step failed: pip timed out (its output was discarded)")
+            if code != 0:
+                # pip's raw output is never relayed: it can carry credentials in any shape. Only its status is reported.
+                raise Failed(_pip_failure(root, key, code, out + err, keep_pip_log))
+            if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
+                raise Refused("the private lockfile copy changed during the install")
+            if re.search(r"(?im)^include-system-site-packages\s*=\s*true", (stage / "pyvenv.cfg").read_text()):
+                raise Refused("the new venv includes system site-packages")
+            _seal(stage)
+            marker_path = stage / MARKER
+            marker_path.write_text(f"{key}\n{manifest(stage, frozenset({MARKER, BUILD_MARK}))}\n")
+            marker_path.chmod(0o444)
+            (stage / BUILD_MARK).unlink()
+            stage.chmod(stage.stat().st_mode & ~0o222)  # the top is sealed BEFORE it is published
+            if handle:
+                handle.check()
+                os.rename(stage.name, key, src_dir_fd=handle.fd, dst_dir_fd=handle.fd)
+            else:
+                os.rename(stage, final)
+            published = True
+        except OSError as exc:
+            failure = f"the build failed: {_describe(exc)}"
     finally:
         if fd >= 0:
-            os.close(fd)
-        _remove_tree(work)
-        if published and not _sealed(final):  # a failure after publication must not leave a writable entry behind
-            _remove_tree(final)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        for leftover in (work, stage):  # each cleanup is independent: one failing never skips the next
+            with contextlib.suppress(OSError):
+                if leftover.exists() or leftover.is_symlink():
+                    _remove_tree(leftover)
+        if published and not _sealed(final):  # defense in depth: never leave a writable published entry
+            with contextlib.suppress(OSError):
+                _remove_tree(final)
+    if failure is not None:
+        raise Failed(failure)
 
 
 def _sealed(entry: Path) -> bool:
@@ -608,15 +658,36 @@ def _sealed(entry: Path) -> bool:
 
 
 def _own_stale_builds(root: Path) -> None:
-    """Remove only leftovers that match this tool's random build-name pattern and carry its build marker."""
+    """Remove only leftovers matching this tool's random build or stage name and carrying its marker, owned by us."""
     for entry in sorted(root.iterdir()):
-        if not BUILD_NAME.fullmatch(entry.name):
+        stage = bool(STAGE_NAME.fullmatch(entry.name))
+        if not stage and not BUILD_NAME.fullmatch(entry.name):
             continue
         info = entry.lstat()
-        mark = entry / BUILD_MARK
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or mark.is_symlink() or not mark.is_file():
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            continue
+        names = (BUILD_MARK, MARKER) if stage else (BUILD_MARK,)
+        if not any((entry / n).is_file() and not (entry / n).is_symlink() for n in names):
             continue
         _remove_tree(entry)
+
+
+def _poisoned(entry: Path, key: str) -> bool:
+    """An unsealed top directory (owner write bit only) with this tool's complete marker for this key, owned by us."""
+    try:
+        info = entry.lstat()
+        marker = entry / MARKER
+        minfo = marker.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            return False
+        if stat.S_ISLNK(minfo.st_mode) or not stat.S_ISREG(minfo.st_mode) or minfo.st_uid != os.geteuid():
+            return False
+        lines = marker.read_text().split("\n")
+        manifest_line = lines[1] if len(lines) > 1 else ""
+        # only the owner write bit (an unsealed entry of ours); group or world write is tampering, never rebuilt over
+        return info.st_mode & 0o222 == 0o200 and lines[0] == key and bool(KEY.fullmatch(manifest_line))
+    except OSError:
+        return False
 
 
 def _touch_stamp(root: Path, key: str) -> None:
@@ -653,9 +724,16 @@ def ensure(
             handle.check()
             _own_stale_builds(root)
             final = root / key
-            if final.exists() or final.is_symlink():
-                valid(final, key)
-            else:
+            present = final.exists() or final.is_symlink()
+            if present:
+                try:
+                    valid(final, key)
+                except Refused:
+                    if not _poisoned(final, key):
+                        raise
+                    _remove_tree(final)  # an unsealed entry of ours (an interrupted older publish): rebuild over it
+                    present = False
+            if not present:
                 verify_interpreter(resolved, signature)  # the file we are about to run is the one we identified
                 build(root, key, data, resolved, pip_args, handle=handle, keep_pip_log=keep_pip_log)
                 try:
@@ -743,8 +821,15 @@ def _timeout(text: str) -> float:
     return _number(text, 0, MAX_TIMEOUT, "the lock timeout")
 
 
+class _QuietParser(argparse.ArgumentParser):
+    """argparse echoes the offending arguments in its errors; those can be credential-shaped, so none is shown."""
+
+    def error(self, message: str) -> NoReturn:
+        self.exit(EXIT_REFUSED, "safo-shared-venv: invalid arguments (none of them is shown); see --help\n")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="safo-shared-venv", description=(__doc__ or "").split("\n\n")[0])
+    parser = _QuietParser(prog="safo-shared-venv", description=(__doc__ or "").split("\n\n")[0], allow_abbrev=False)
     parser.add_argument("lockfile", nargs="?", type=Path, help="hash-locked requirements file")
     parser.add_argument(
         "--root", type=Path, default=None, help=f"venv root (default ${ROOT_ENV} or ~/.local/share/safo-venvs)"

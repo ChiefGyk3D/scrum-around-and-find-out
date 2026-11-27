@@ -624,37 +624,12 @@ def test_lock_timeout_must_be_finite(tmp_path: Path, wheels: Path, lock: Path) -
     assert cli(*build_args(lock, tmp_path / "root", wheels), "--lock-timeout", "nan").returncode == 2
 
 
-def test_writable_entry_fails_reuse_validation(tmp_path: Path, wheels: Path, lock: Path) -> None:
+def test_writable_member_or_marker_fails_reuse_validation(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root, venv = build_in(tmp_path, wheels, lock)
-    venv.chmod(0o755)
-    done = cli(*build_args(lock, root, wheels))
-    assert done.returncode == 2 and "writable" in done.stderr
-    venv.chmod(0o555)
     marker = venv / sharedvenv.MARKER
     marker.chmod(0o644)
-    assert cli(*build_args(lock, root, wheels)).returncode == 2
-
-
-def test_failure_after_publication_removes_the_entry(
-    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "root"
-    root.mkdir(mode=0o700)
-    data = lock.read_bytes()
-    key = "d" * 64
-    real = os.chmod
-    calls: list[int] = []
-
-    def failing(path: object, mode: int, *a: object, **k: object) -> None:
-        if str(path) == str(root / key) and not calls:
-            calls.append(1)
-            raise OSError("boom")
-        real(path, mode, *a, **k)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(os, "chmod", failing)
-    with pytest.raises(sharedvenv.Failed):
-        sharedvenv.build(root, key, data, sys.executable, ["--no-index", "--find-links", str(wheels)])
-    assert not (root / key).exists()
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 2 and "writable" in done.stderr
 
 
 # ---- round 4: structural fixes ----
@@ -967,7 +942,14 @@ sys.stdout.write("Location: user:" + a + "REDIRECT-pw@example.invalid/simple/pkg
 sys.stderr.write("WARNING: retry via " + a + "SCP-user@example.invalid:wheels/pkg\\n")
 sys.stderr.write("Authorization: Basic\\n  " + a + "MULTILINE-cred\\n")
 sys.stderr.write("ERROR: bad token " + a + "BARE-token done\\n")
-sys.exit(int(open(__file__ + ".status").read()))
+st = int(open(__file__ + ".status").read())
+sys.stdout.flush()
+sys.stderr.flush()
+if st < 0:
+    import time
+
+    time.sleep(60)
+sys.exit(st)
 """
 
 
@@ -1050,3 +1032,202 @@ def test_output_of_the_venv_step_is_not_relayed_either(tmp_path: Path, wheels: P
     assert done.returncode == 0, done.stderr
     no_planted(done.stdout, done.stderr)
     assert len(done.stdout.split()) == 1
+
+
+# ---- round 8: no output-bearing exception chains, fixed argparse errors, seal before publish ----
+
+
+def walk_chain(exc: BaseException) -> list[BaseException]:
+    seen: list[BaseException] = []
+    todo: list[BaseException | None] = [exc]
+    while todo:
+        item = todo.pop()
+        if item is None or item in seen:
+            continue
+        seen.append(item)
+        todo += [item.__cause__, item.__context__]
+    return seen
+
+
+def assert_no_output_in_chain(exc: BaseException) -> None:
+    assert exc.__cause__ is None and exc.__context__ is None, (exc.__cause__, exc.__context__)
+    for item in walk_chain(exc):
+        no_planted(str(item), repr(item), repr(getattr(item, "args", "")))
+        for attribute in ("stdout", "stderr", "output", "cmd"):
+            assert not getattr(item, attribute, None), attribute
+
+
+NOISY_FAIL = (
+    'if [ "$VENV_STEP" = 1 ]; then echo "Location: user:PLANTED-REDIRECT-pw@h/p"; '
+    'echo "PLANTED-BARE-token" >&2; {tail}; fi'
+)
+
+
+def test_a_failing_venv_step_raises_an_error_with_no_chain_and_no_output(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    bad = shim(tmp_path / "bad.sh", NOISY_FAIL.format(tail="exit 1"))
+    with pytest.raises(sharedvenv.Failed) as caught:
+        sharedvenv.build(root, "a" * 64, lock.read_bytes(), str(bad), ["--no-index", "--find-links", str(wheels)])
+    assert_no_output_in_chain(caught.value)
+
+
+def test_a_timed_out_venv_step_raises_an_error_with_no_chain_and_no_output(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    slow = shim(tmp_path / "slow.sh", NOISY_FAIL.format(tail="exec sleep 30"))
+    monkeypatch.setattr(sharedvenv, "VENV_TIMEOUT", 1)
+    with pytest.raises(sharedvenv.Failed) as caught:
+        sharedvenv.build(root, "a" * 64, lock.read_bytes(), str(slow), ["--no-index", "--find-links", str(wheels)])
+    assert_no_output_in_chain(caught.value)
+
+
+def test_a_timed_out_pip_raises_an_error_with_no_chain_and_no_output(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(sharedvenv, "PIP_TIMEOUT", 2)
+    hang = fake_pip_shim(tmp_path, -1)
+    with pytest.raises(sharedvenv.Failed) as caught:
+        sharedvenv.build(root, "a" * 64, lock.read_bytes(), str(hang), ["--no-index", "--find-links", str(wheels)])
+    assert_no_output_in_chain(caught.value)
+
+
+def test_an_interpreter_that_fails_its_identity_query_raises_an_error_with_no_chain(tmp_path: Path) -> None:
+    bad = shim(
+        tmp_path / "idbad.sh",
+        'if [ "$VENV_STEP" = 0 ]; then echo "PLANTED-BARE-token"; echo PLANTED-BARE-token >&2; exit 1; fi',
+    )
+    with pytest.raises(sharedvenv.Refused) as caught:
+        sharedvenv.identity(str(bad))
+    assert_no_output_in_chain(caught.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--trusted-host", "https://user:PLANTED-REDIRECT-pw@example.invalid/p"],
+        ["--bogus", "PLANTED-SCP-user@example.invalid:wheels/pkg"],
+        ["--bogus=PLANTED-BARE-token"],
+        ["PLANTED-MULTILINE-cred\nsecond PLANTED-MULTILINE-cred"],
+        ["--max-age-days", "PLANTED-BARE-token"],
+        ["--lock-timeout", "user:PLANTED-REDIRECT-pw@h"],
+        ["--index-url"],
+        ["--no-ind"],
+        ["-x", "PLANTED-BARE-token", "--find-links", "PLANTED-SCP-user@h:p"],
+    ],
+)
+def test_argparse_errors_never_echo_the_offending_arguments(tmp_path: Path, lock: Path, extra: list[str]) -> None:
+    done = cli(lock, "--root", tmp_path / "root", *extra)
+    assert done.returncode == 2
+    no_planted(done.stdout, done.stderr)
+    assert "invalid arguments" in done.stderr
+
+
+def test_help_still_works() -> None:
+    done = cli("--help")
+    assert done.returncode == 0 and "safo-shared-venv" in done.stdout
+
+
+def test_the_venv_top_is_sealed_before_the_publish_rename(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    modes: list[int] = []
+    real = os.rename
+
+    def watching(src: str, dst: str, *args: object, **kwargs: object) -> None:
+        modes.append(os.stat(src, dir_fd=kwargs.get("src_dir_fd")).st_mode)  # type: ignore[arg-type]
+        real(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "rename", watching)
+    handle = sharedvenv.open_root(root)
+    sharedvenv.build(
+        root, "b" * 64, lock.read_bytes(), sys.executable, ["--no-index", "--find-links", str(wheels)], handle=handle
+    )
+    handle.close()
+    assert len(modes) == 1 and modes[0] & 0o222 == 0
+
+
+def test_a_kill_right_before_publication_leaves_nothing_published_and_the_next_run_recovers(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    root = tmp_path / "root"
+    code = "\n".join(
+        [
+            "import os,sys",
+            "sys.path.insert(0, sys.argv[1])",
+            "from pathlib import Path",
+            "from safo import sharedvenv",
+            "sharedvenv.os.rename = lambda *a, **k: os._exit(9)",
+            "args = ['--no-index', '--find-links', sys.argv[4]]",
+            "sharedvenv.ensure(Path(sys.argv[2]), Path(sys.argv[3]), sys.executable, args, 60)",
+        ]
+    )
+    src = str(Path(sharedvenv.__file__).resolve().parent.parent)
+    killed = subprocess.run([sys.executable, "-c", code, src, str(root), str(lock), str(wheels)], capture_output=True)  # noqa: S603 - fixed argv in a test helper, no shell
+    assert killed.returncode == 9
+    assert not [p for p in root.iterdir() if re.fullmatch("[0-9a-f]{64}", p.name)]
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 0, done.stderr
+    assert not [p for p in root.iterdir() if p.name.startswith((".build-", ".stage-"))]
+
+
+def test_a_writable_entry_with_our_marker_is_rebuilt_but_a_foreign_one_is_refused(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    inode = venv.stat().st_ino
+    venv.chmod(0o755)  # what an interruption after an unsealed publish used to leave behind
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 0, done.stderr
+    assert venv_of(done) == venv and not venv.stat().st_mode & 0o222
+    assert venv.stat().st_ino != inode  # rebuilt, not reused
+    marker = venv / sharedvenv.MARKER
+    venv.chmod(0o755)
+    marker.chmod(0o644)
+    marker.write_text("not-our-marker\n")
+    assert cli(*build_args(lock, root, wheels)).returncode == 2  # no marker of ours: refused, never deleted
+    assert venv.exists()
+
+
+def test_a_failure_in_work_directory_cleanup_does_not_mask_the_real_error(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    real = sharedvenv._remove_tree
+
+    def flaky(path: Path) -> None:
+        if path.name.startswith(".build-"):
+            raise OSError("cleanup boom")
+        real(path)
+
+    monkeypatch.setattr(sharedvenv, "_remove_tree", flaky)
+    with pytest.raises(sharedvenv.Failed, match="pip exited with status 1"):
+        sharedvenv.build(
+            root,
+            "c" * 64,
+            lock.read_bytes(),
+            str(fake_pip_shim(tmp_path, 1)),
+            ["--no-index", "--find-links", str(wheels)],
+        )
+
+
+def test_stale_stage_directories_are_removed_only_with_our_markers(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    ours = root / ".stage-Aa1Bb2Cc"
+    ours.mkdir(mode=0o700)
+    (ours / sharedvenv.BUILD_MARK).write_text("x")
+    bare = root / ".stage-Zz9yXw8v"
+    bare.mkdir()
+    (bare / "f").write_text("keep")
+    assert cli(*build_args(lock, root, wheels)).returncode == 0
+    assert not ours.exists() and (bare / "f").exists()

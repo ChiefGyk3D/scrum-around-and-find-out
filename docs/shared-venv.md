@@ -44,7 +44,8 @@ safo-shared-venv --gc --max-age-days 30 --delete
   install. The children run with an allowlisted environment (PATH, LANG, LC_ALL, a private HOME, `PIP_CONFIG_FILE` set
   to the null device) and pip runs isolated, so no pip configuration file is read. The index is `--index-url`,
   `--find-links` and `--no-index` only; nothing else is fetched.
-- Read-only: after the build every file and directory loses its write bit, a manifest (sha256 over the sorted relative
+- Read-only: after the build every file and directory loses its write bit (the top directory too, before the rename
+  publishes it; the venv is staged as `ROOT/.stage-RANDOM` so that rename needs no write access), a manifest (sha256 over the sorted relative
   path, size and mode of every member) is stored in the marker, and the venv is renamed into place in one step. Agents
   run it and never install into it. A changed lockfile is a new key and a new venv.
 - Reuse: the entry directory, `pyvenv.cfg` and the marker must be plain files and directories owned by the current
@@ -74,12 +75,19 @@ safo-shared-venv --gc --max-age-days 30 --delete
   example a redirect line or a bare token). On success nothing from pip is printed. On failure only a fixed message
   with pip's exit status and the build step is printed. With `--keep-pip-log`, a failed install's full output is
   written to `ROOT/pip-<key prefix>-<random>.log` (mode 0600, exclusive create) and its path is named in the message; it
-  may contain credentials, so delete it after reading. Without the flag the output is discarded.
+  may contain credentials, so delete it after reading. Without the flag the output is discarded. A child that times out or fails is reported by a fixed message with no
+  exception chain, so the captured output cannot be reached through `__cause__`, `__context__` or exception
+  attributes. Argument errors from the command line are a fixed message too: argparse's own text, which would echo
+  the offending arguments, is never shown.
 - Age and timeout: `--max-age-days` must be finite, from 0 to 36500, and `--lock-timeout` finite, from 0 to 7 days, checked in `ensure`, `gc` and `Lock` themselves, not only on the command line;
   anything else (nan, inf, negative, absurd) is refused and nothing is deleted. GC also never selects an entry whose
   age does not compare as at least the threshold.
-- Writable entries: reuse validation refuses a venv, marker or member with any write bit; a failure after the
-  publish rename removes the entry.
+- Interrupted builds: a leftover `.build-RANDOM` or `.stage-RANDOM` is removed only when it carries this tool's marker
+  and is owned by you. An entry named by a key whose top directory has only the owner write bit and holds this
+  tool's complete marker is rebuilt over; group or world write, a missing or foreign marker, or any other mismatch is
+  refused and never deleted.
+- Writable entries: reuse validation refuses a venv, marker or member with any write bit (except the rebuild case
+  above).
 - Exit codes: 0 done, 1 build or lock failure, 2 refusal or bad usage. Only the interpreter path goes to stdout.
 
 Tests: `tests/test_sharedvenv.py` (a local wheel built in the test, no network, two concurrent processes).
