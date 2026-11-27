@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import functools
 import hashlib
 import json
 import math
@@ -31,9 +32,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, ParamSpec, TypeVar
 
 ROOT_ENV = "SAFO_SHARED_VENV_ROOT"
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
@@ -75,6 +76,35 @@ class Refused(Exception):
 
 class Failed(Exception):
     """A build or lock step failed."""
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _boundary(func: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Across a public boundary only fixed errors leave, and never with a cause or a context.
+
+    A Refused or Failed is re-raised as a fresh copy of itself (its text is already fixed). A filesystem error becomes a
+    Failed carrying the errno number only; any other unexpected error becomes a Failed carrying the class name only.
+    The new error is raised after the handler has ended, so nothing the original carried (a path, a message) is chained.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        kind: type[Exception] = Failed
+        text = ""
+        try:
+            return func(*args, **kwargs)
+        except (Refused, Failed) as exc:
+            kind, text = type(exc), str(exc)
+        except OSError as exc:
+            text = f"a filesystem operation failed (errno {exc.errno})"
+        except Exception as exc:
+            text = f"an unexpected error occurred ({type(exc).__name__})"
+        raise kind(text)
+
+    return wrapper
 
 
 def check_plain(value: str | os.PathLike[str]) -> None:
@@ -271,6 +301,7 @@ def _make_missing(root: Path) -> None:
             raise Refused("a venv root component is not a plain directory of this user")
 
 
+@_boundary
 def open_root(root: Path) -> RootHandle:
     check_plain(root)
     _check_ancestors(root)
@@ -310,6 +341,7 @@ class Lock:
     def __init__(self, root: Path, timeout: float) -> None:
         self.path, self.timeout, self.fd = root / ".lock", check_timeout(timeout), -1
 
+    @_boundary
     def __enter__(self) -> Lock:
         deadline = time.monotonic() + self.timeout
         while True:
@@ -505,6 +537,7 @@ def manifest(venv: Path, skip: frozenset[str] = frozenset({MARKER})) -> str:
     return hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest()
 
 
+@_boundary
 def valid(venv: Path, key: str) -> None:
     """Refuse a venv entry that is not exactly what a finished build leaves (layout, owner, modes, marker, manifest)."""
     if not venv.is_symlink() and not venv.exists():
@@ -793,6 +826,7 @@ def _touch_stamp(root: Path, key: str) -> None:
         os.close(fd)
 
 
+@_boundary
 def ensure(
     root: Path,
     lockfile: Path,
@@ -848,6 +882,7 @@ def check_age(value: float) -> float:
     return value
 
 
+@_boundary
 def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float | None = None) -> list[str]:
     check_age(max_age_days)
     check_timeout(timeout)
@@ -875,7 +910,7 @@ def _gc_locked(
                 continue
             try:
                 valid(entry, entry.name)  # only what this tool built, intact; anything else is reported and left
-            except (Refused, OSError):
+            except (Refused, Failed):
                 lines.append(f"skipped (not a valid shared venv): {entry.name}")
                 continue
             stamp = root / f"{entry.name}.used"
@@ -941,8 +976,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-age-days", type=_age, help="age threshold for --gc, required with it")
     parser.add_argument("--delete", action="store_true", help="with --gc: delete what the listing names")
     args = parser.parse_args(argv)
-    root = args.root or default_root()
     try:
+        root = args.root or default_root()
         if args.gc:
             if args.max_age_days is None or args.max_age_days < 0 or args.lockfile is not None:
                 raise Refused("--gc takes --max-age-days N (N >= 0) and no lockfile")
@@ -965,6 +1000,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_REFUSED
     except Failed as exc:
         print(f"safo-shared-venv: failed: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    except KeyboardInterrupt:
+        print("safo-shared-venv: interrupted", file=sys.stderr)
+        return 130
+    except Exception as exc:  # the last boundary: no traceback, no str(exc), at most the class name and an errno
+        print(
+            f"safo-shared-venv: unexpected error ({type(exc).__name__}, errno {getattr(exc, 'errno', None)}); "
+            "nothing from the input is shown",
+            file=sys.stderr,
+        )
         return EXIT_FAIL
 
 

@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 import zipfile
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -1444,3 +1446,152 @@ def test_rebuild_over_and_reuse_demand_the_exact_marker(tmp_path: Path, wheels: 
     marker.chmod(0o444)
     done = cli(*build_args(lock, root, wheels))
     assert done.returncode == 0 and not venv.stat().st_mode & 0o222
+
+
+# ---- round 10: a final boundary and converters at each public boundary ----
+
+
+def assert_clean(exc: BaseException) -> None:
+    assert PATH_SECRET not in str(exc) + repr(exc) + repr(exc.args)
+    assert exc.__cause__ is None and exc.__context__ is None, (exc.__cause__, exc.__context__)
+
+
+def _fs_roots(base: Path) -> dict[str, Path]:
+    file = base / "afile"
+    file.write_text("x")
+    locked = base / "locked"
+    (locked / "inner").mkdir(parents=True)
+    locked.chmod(0)
+    lockdir_root = base / "venvs"
+    (lockdir_root / ".lock").mkdir(parents=True)
+    lockdir_root.chmod(0o700)
+    return {
+        "read-only filesystem": Path("/sys") / f"{PATH_SECRET}-ro" / "root",
+        "root under a file": file / PATH_SECRET / "root",
+        "inaccessible ancestor": locked / PATH_SECRET / "root",
+        "lock file cannot be opened": lockdir_root,
+    }
+
+
+def test_cli_filesystem_failures_show_no_traceback_and_no_input(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    base = tmp_path / f"{PATH_SECRET}-base"
+    base.mkdir(mode=0o700)
+    try:
+        for name, root in _fs_roots(base).items():
+            done = cli(lock, "--root", root, "--no-index", "--find-links", wheels)
+            assert done.returncode in (1, 2), (name, done.returncode, done.stderr)
+            assert PATH_SECRET not in done.stdout + done.stderr, (name, done.stderr)
+            assert "Traceback" not in done.stderr, name
+            gc_done = cli("--gc", "--max-age-days", "1", "--root", root)
+            assert gc_done.returncode in (1, 2) and PATH_SECRET not in gc_done.stdout + gc_done.stderr, name
+            assert "Traceback" not in gc_done.stderr, name
+    finally:
+        (base / "locked").chmod(0o700)
+
+
+def _enter_lock(root: Path) -> object:
+    return sharedvenv.Lock(root, 1).__enter__()
+
+
+def test_public_boundaries_turn_filesystem_errors_into_fixed_errors_with_no_chain(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    base = tmp_path / f"{PATH_SECRET}-base"
+    base.mkdir(mode=0o700)
+    args = ["--no-index", "--find-links", str(wheels)]
+    try:
+        for name, root in _fs_roots(base).items():
+            calls: dict[str, Callable[[], object]] = {
+                "open_root": partial(sharedvenv.open_root, root),
+                "gc": partial(sharedvenv.gc, root, 1, False, 5),
+                "ensure": partial(sharedvenv.ensure, root, lock, sys.executable, args, 5),
+            }
+            if name == "lock file cannot be opened":
+                del calls["open_root"]  # opening the root does not touch the lock file
+                calls["Lock"] = partial(_enter_lock, root)
+            for call in calls.values():
+                with pytest.raises((sharedvenv.Failed, sharedvenv.Refused)) as caught:
+                    call()
+                assert_clean(caught.value)
+    finally:
+        (base / "locked").chmod(0o700)
+
+
+def test_a_root_removed_while_the_lock_is_taken_gives_a_fixed_error(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / f"{PATH_SECRET}-root"
+    monkeypatch.setattr(sharedvenv, "_after_flock", lambda path: shutil.rmtree(root))
+    with pytest.raises((sharedvenv.Failed, sharedvenv.Refused)) as caught:
+        sharedvenv.ensure(root, lock, sys.executable, ["--no-index", "--find-links", str(wheels)], 5)
+    assert_clean(caught.value)
+
+
+@pytest.mark.parametrize("boom", [OSError(5, f"/x/{PATH_SECRET}"), RuntimeError(PATH_SECRET), KeyError(PATH_SECRET)])
+def test_an_unexpected_failure_inside_valid_or_ensure_becomes_a_fixed_error(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch, boom: Exception
+) -> None:
+    root, _ = build_in(tmp_path, wheels, lock)
+    args = ["--no-index", "--find-links", str(wheels)]
+
+    def raising(*a: object, **k: object) -> None:
+        raise boom
+
+    monkeypatch.setattr(sharedvenv, "valid", raising)
+    with pytest.raises(sharedvenv.Failed) as caught:
+        sharedvenv.ensure(root, lock, sys.executable, args, 5)
+    assert_clean(caught.value)
+
+
+def test_valid_itself_converts_an_os_error_from_a_step_inside_it(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, venv = build_in(tmp_path, wheels, lock)
+
+    def raising(*a: object, **k: object) -> str:
+        raise OSError(5, f"/x/{PATH_SECRET}")
+
+    monkeypatch.setattr(sharedvenv, "manifest", raising)
+    with pytest.raises(sharedvenv.Failed) as caught:
+        sharedvenv.valid(venv, venv.name)
+    assert_clean(caught.value)
+
+
+@pytest.mark.parametrize("boom", [OSError(5, PATH_SECRET), RuntimeError(PATH_SECRET), ValueError(PATH_SECRET)])
+def test_the_cli_final_boundary_prints_one_fixed_line(
+    tmp_path: Path, lock: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], boom: Exception
+) -> None:
+    def raising(*a: object, **k: object) -> Path:
+        raise boom
+
+    monkeypatch.setattr(sharedvenv, "ensure", raising)
+    code = sharedvenv.main([str(lock), "--root", str(tmp_path / "r"), "--no-index"])
+    seen = capsys.readouterr()
+    assert code == 1 and PATH_SECRET not in seen.out + seen.err and "Traceback" not in seen.err
+    assert "unexpected error" in seen.err and type(boom).__name__ in seen.err
+    assert "nothing from the input is shown" in seen.err and len(seen.err.strip().splitlines()) == 1
+
+
+def test_the_cli_reports_an_interrupt_with_a_fixed_line_and_the_conventional_code(
+    tmp_path: Path, lock: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def raising(*a: object, **k: object) -> Path:
+        raise KeyboardInterrupt(PATH_SECRET)
+
+    monkeypatch.setattr(sharedvenv, "ensure", raising)
+    code = sharedvenv.main([str(lock), "--root", str(tmp_path / "r"), "--no-index"])
+    seen = capsys.readouterr()
+    assert code == 130 and PATH_SECRET not in seen.out + seen.err and "interrupted" in seen.err
+
+
+@pytest.mark.parametrize("boom", [OSError(5, f"/x/{PATH_SECRET}"), RuntimeError(PATH_SECRET)])
+def test_gc_converts_a_failure_inside_its_own_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boom: Exception
+) -> None:
+    def raising(*a: object, **k: object) -> list[str]:
+        raise boom
+
+    monkeypatch.setattr(sharedvenv, "_gc_locked", raising)
+    with pytest.raises(sharedvenv.Failed) as caught:
+        sharedvenv.gc(tmp_path / "root", 1, False, 5)
+    assert_clean(caught.value)

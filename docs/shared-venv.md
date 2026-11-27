@@ -78,6 +78,11 @@ safo-shared-venv --gc --max-age-days 30 --delete
   refused up front, with a fixed message, if they hold whitespace, a control character or a non-printable character
   (so a `--python` under a directory with a space in its name is refused; use a path without one). The earlier
   redaction helper is gone: nothing is parsed and scrubbed, nothing is echoed.
+- Errors at the boundaries: `ensure`, `gc`, `open_root`, `Lock` and `valid` raise only `Refused` or `Failed`, with fixed
+  text and no `__cause__` or `__context__`. A filesystem error becomes `Failed` with the errno number only, any other
+  unexpected error becomes `Failed` with its class name only. The command line adds a last boundary: anything else
+  prints one line, `unexpected error (CLASS, errno N); nothing from the input is shown`, exit 1, with no traceback and
+  never `str(exc)`; an interrupt prints `interrupted` and exits 130.
 - Child output: the output of pip and of the venv step is never relayed (credentials can appear in any shape, for
   example a redirect line or a bare token). On success nothing from pip is printed. On failure only a fixed message
   with pip's exit status and the build step is printed. With `--keep-pip-log`, a failed install's full output is
