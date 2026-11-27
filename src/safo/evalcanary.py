@@ -18,6 +18,14 @@ The baseline is written only with `--update-baseline`, and only when every model
 model) and alerts (exit 1) when the token count the server reports for it is no longer the known cut (`--expected-cap`,
 default 4098): a server setting changed, in either direction. `--probe-only` runs just the probe and needs no baseline.
 When both run, the exit code is the worst of the two in the order 3, 75, 1, 2: unreachable over busy over drop.
+
+Precedence, in two places. Within one attempt on one model, a busy record wins over an unreachable, malformed or scored
+one: the attempt is retried, so a busy server never hides a failure and never decides a score. Across models and across
+the scoring run and the probe, the order above holds: unreachable (3) over busy (75) over drop (1) over usage (2).
+
+Limits (a flag above its cap is exit 2): `--busy-retries` at most 10, `--wait` at most 600 seconds, `--repeats`
+at most 20. One busy sleep is at most 300 seconds and all busy sleeps of a run together at most 1800 seconds;
+past that the busy result stands (exit 75) and nothing more is retried.
 """
 
 from __future__ import annotations
@@ -50,6 +58,11 @@ MAX_BASELINE_BYTES = 64 * 1024
 MAX_MODELS = 16
 BASELINE_VERSION = 2
 BUSY_SLEEP = 30.0
+MAX_BUSY_RETRIES = 10
+MAX_WAIT = 600  # seconds, the `llm-local --wait` value
+MAX_REPEATS = 20
+MAX_SLEEP = 300.0  # one busy sleep
+MAX_TOTAL_SLEEP = 1800.0  # all busy sleeps of one run, scoring and probe together
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}")
 _MODEL_FAILURE = re.compile(r"exit [34]:.*", re.DOTALL)  # the model's own failure (truncated, over the cap): not passed
 
@@ -66,6 +79,25 @@ _CUT_LINE = re.compile(r"llm-local: prompt truncated by the server: estimate [0-
 
 class CanaryError(Exception):
     """A usage or baseline problem: shown, exit 2."""
+
+
+class _Deadline(Exception):
+    """The run's total busy-sleep budget is spent: stop retrying and keep the busy result."""
+
+
+class _Napper:
+    """The injected sleep, with each nap capped and the total of all naps bounded (measured in requested seconds)."""
+
+    def __init__(self, sleep: Callable[[float], None], total: float = MAX_TOTAL_SLEEP) -> None:
+        self._sleep = sleep
+        self._left = total
+
+    def __call__(self, seconds: float) -> None:
+        seconds = min(seconds, MAX_SLEEP)
+        if seconds > self._left:
+            raise _Deadline
+        self._left -= seconds
+        self._sleep(seconds)
 
 
 def canary_models() -> tuple[str, ...]:
@@ -97,6 +129,7 @@ def _open_dir(path: Path, *, create: bool) -> int:
                 if not create:
                     raise
                 os.mkdir(part, 0o700, dir_fd=fd)
+                os.fsync(fd)  # the new entry lives in the parent: make the folder itself durable
                 nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = nxt
@@ -152,7 +185,7 @@ def read_baseline_doc(path: Path) -> tuple[dict[str, float], str]:
         raise CanaryError("baseline is over the size cap")
     try:
         doc = bounded.loads(raw, MAX_BASELINE_BYTES)
-    except ValueError as exc:  # includes duplicate keys, bad constants, bad UTF-8, depth
+    except (ValueError, UnicodeError) as exc:  # includes duplicate keys, bad constants, bad UTF-8, depth
         raise CanaryError("baseline is not valid JSON") from exc
     if (
         not isinstance(doc, dict)
@@ -174,17 +207,30 @@ def read_baseline_doc(path: Path) -> tuple[dict[str, float], str]:
     return out, pop
 
 
+def _create_temp(dir_fd: int, name: str) -> tuple[str, int]:
+    """Create a fresh temporary file beside the baseline. The name is unique per call (pid and random token) and made
+    with O_EXCL, so a leftover from a crashed run, or a file someone planted, is never reused, overwritten or deleted:
+    a taken name just means another name is tried."""
+    for _ in range(8):
+        tmp = f".{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        try:
+            return tmp, os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            continue
+    raise OSError(errno.EEXIST, "no free temporary name")
+
+
 def write_baseline(path: Path, scores: dict[str, float], population: str) -> None:
     """Replace the baseline atomically with mode 0600, all relative to one folder descriptor.
 
     No symlink is followed in any component, a non-regular file is never replaced, and the temporary file and the
     rename both go through the descriptor, so the folder cannot be swapped between the check and the write.
     """
+    scores = {m: _score_value(v) for m, v in scores.items()}  # a NaN, bool or out-of-range score is never stored
     text = (
         json.dumps({"version": BASELINE_VERSION, "scores": scores, "population": population}, indent=1, sort_keys=True)
         + "\n"
     )
-    tmp = f".{path.name}.{os.getpid()}.tmp"
     try:
         dir_fd = _open_dir(path.parent, create=True)
     except OSError as exc:
@@ -197,7 +243,7 @@ def write_baseline(path: Path, scores: dict[str, float], population: str) -> Non
                 mode = None
             if mode is not None and not stat.S_ISREG(mode):
                 raise CanaryError("refusing to replace a baseline that is a symlink or not a regular file")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+            tmp, fd = _create_temp(dir_fd, path.name)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(text)
                 fh.flush()
@@ -205,35 +251,42 @@ def write_baseline(path: Path, scores: dict[str, float], population: str) -> Non
             os.rename(tmp, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
             os.fsync(dir_fd)
         except OSError as exc:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp, dir_fd=dir_fd)
+            with contextlib.suppress(OSError, UnboundLocalError):
+                os.unlink(tmp, dir_fd=dir_fd)  # only the name this call created
             raise CanaryError(f"cannot write the baseline: {exc.strerror}") from exc
     finally:
         os.close(dir_fd)
 
 
 def _classify(records: Sequence[dict[str, Any]]) -> tuple[str, float | None]:
-    """('ok', score) | ('unreachable', None) | ('busy', None). Any busy record makes the whole attempt busy."""
-    passed = scored = busy = 0
+    """('busy', None) | ('unreachable', None) | ('ok', score). Every record is inspected, none returns early.
+
+    Any busy record makes the whole attempt busy (it is retried), whatever else is in it; next an unreachable,
+    malformed or non-model failure makes it unreachable; only a clean set of records is scored.
+    """
+    passed = scored = busy = bad = 0
     for rec in records:
         if not isinstance(rec, dict):  # a buggy runner: not a quality signal
-            return "unreachable", None
+            bad += 1
+            continue
         status = rec.get("status")
         if status == "busy":
             busy += 1
         elif status == "ok":
             score = rec.get("score")
-            if not isinstance(score, dict):
-                return "unreachable", None
+            ok = score.get("passed") if isinstance(score, dict) else None
+            if not isinstance(ok, bool):  # a missing or non-boolean verdict is a malformed record, not a failed run
+                bad += 1
+                continue
             scored += 1
-            passed += 1 if score.get("passed") is True else 0
+            passed += int(ok)
         elif status == "failed" and _MODEL_FAILURE.fullmatch(str(rec.get("error", ""))):
             scored += 1
         else:  # any other failure: the server, the wrapper or the call did not work; not a quality signal
-            return "unreachable", None
+            bad += 1
     if busy:  # a busy server must not choose which fixtures count: the whole attempt is retried
         return "busy", None
-    if scored == 0:
+    if bad or scored == 0:
         return "unreachable", None
     return "ok", passed / scored
 
@@ -248,7 +301,10 @@ def measure(
         if state[0] != "busy":
             return state
         if attempt < busy_retries:
-            sleep(BUSY_SLEEP * 2**attempt)
+            try:
+                sleep(BUSY_SLEEP * 2**attempt)
+            except _Deadline:
+                return state
     return state
 
 
@@ -259,8 +315,17 @@ def dropped(base: float, score: float, threshold: float) -> bool:
     return drop > Decimal(repr(threshold)).quantize(quantum)
 
 
-def _default_runner(wait: int) -> Runner:
-    return lambda fx, model: le.run_one(fx, model, wait=wait)
+def _default_runner(wait: int, sleep: Callable[[float], None]) -> Runner:
+    """The real runner. Its own busy backoff sleeps through the run's budgeted `sleep` too, so no sleep escapes the
+    total; when the budget is spent the call counts as busy."""
+
+    def call(fx: Any, model: str) -> dict[str, Any]:
+        try:
+            return le.run_one(fx, model, wait=wait, sleep=sleep)
+        except _Deadline:
+            return {"fixture": getattr(fx, "id", ""), "model": model, "status": "busy"}
+
+    return call
 
 
 def _default_probe_runner(wait: int) -> ProbeRunner:
@@ -314,7 +379,10 @@ def measure_probe(
         if state[0] != "busy":
             return state
         if attempt < busy_retries:
-            sleep(BUSY_SLEEP * 2**attempt)
+            try:
+                sleep(BUSY_SLEEP * 2**attempt)
+            except _Deadline:
+                return state
     return state
 
 
@@ -341,6 +409,15 @@ def _threshold(text: str) -> float:
     return value
 
 
+def _check_limits(args: argparse.Namespace) -> None:
+    if args.repeats < 1 or args.busy_retries < 0 or args.wait < 0:
+        raise CanaryError("--repeats must be at least 1; --busy-retries and --wait at least 0")
+    if args.repeats > MAX_REPEATS or args.busy_retries > MAX_BUSY_RETRIES or args.wait > MAX_WAIT:
+        raise CanaryError(
+            f"--repeats is at most {MAX_REPEATS}, --busy-retries at most {MAX_BUSY_RETRIES}, --wait at most {MAX_WAIT}"
+        )
+
+
 def entry(
     argv: Sequence[str] | None = None,
     *,
@@ -363,15 +440,15 @@ def entry(
     ap.add_argument("--expected-cap", default=str(PROBE_EXPECTED_CAP), help="the token count the cut is expected at")
     args = ap.parse_args(argv)
     codes: list[int] = []
+    sleep = _Napper(sleep)  # one budget for the scoring run and the probe together
     try:
+        _check_limits(args)
         if args.probe_only and args.update_baseline:
             raise CanaryError("--probe-only and --update-baseline cannot be combined")
         if args.truncation_probe and args.update_baseline:
             raise CanaryError("--truncation-probe cannot be combined with --update-baseline")
         expected = _expected_cap(args.expected_cap)
         if args.probe_only:
-            if args.repeats < 1 or args.busy_retries < 0 or args.wait < 0:
-                raise CanaryError("--repeats must be at least 1; --busy-retries and --wait at least 0")
             return _probe(args, expected, probe_runner, sleep, nonce)
     except CanaryError as exc:
         output.write(sys.stderr, f"safo-eval-canary: {exc}")
@@ -408,8 +485,6 @@ def _probe(
 def _score(args: argparse.Namespace, runner: Runner | None, sleep: Any) -> int:
     try:
         threshold = _threshold(args.threshold)
-        if args.repeats < 1 or args.busy_retries < 0 or args.wait < 0:
-            raise CanaryError("--repeats must be at least 1; --busy-retries and --wait at least 0")
         tasks = None if args.tasks == "all" else [t.strip() for t in args.tasks.split(",")]
         bad = [t for t in tasks or [] if t not in le.TASKS]
         if bad:
@@ -425,7 +500,7 @@ def _score(args: argparse.Namespace, runner: Runner | None, sleep: Any) -> int:
         pop = population_id(fixtures)
         if not args.update_baseline and pop != stored_pop:
             raise CanaryError("baseline was made from a different task or fixture set; run with --update-baseline")
-        call = runner or _default_runner(args.wait)
+        call = runner or _default_runner(args.wait, sleep)
         results = {m: measure(m, fixtures, args.repeats, call, args.busy_retries, sleep) for m in models}
         unreachable = [m for m, (s, _) in results.items() if s == "unreachable"]
         busy = [m for m, (s, _) in results.items() if s == "busy"]
