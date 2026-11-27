@@ -34,6 +34,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Claude Code plugins](plugins.md): set up the Codex and Ollama plugins, and where each one fits.
 - [Prerequisites](prerequisites.md): the tools, plugins, packs and accounts SAFO leans on, with verified minimum versions, and `safo doctor` to check them.
 - [Local LLM](local-llm.md): what a local model is good and bad at, and the guard that keeps it from evicting a resident model.
+- [Local drafts](local-draft.md): `safo-draft`, local-first drafts of issues, pull requests and comments, checked in code before filing, and short digests of CI logs and board drift.
 - [Local LLM evaluation](local-eval.md): how well the local models do on the work SAFO routes to them, scored by code only, and the routing table.
 - [Runner-first](runner-first.md): `safo-runner-check`, which keeps heavy work on a public repo for the runner and prints the ra-remote command.
 - [Shared GitHub API budget and card edits](ratebudget.md): `ghw`, `safo-ratebudget` and `safo-card`: one budget view for every session, one REST call per card edit.
