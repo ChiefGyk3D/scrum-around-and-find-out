@@ -1548,18 +1548,25 @@ def test_a_body_that_stalls_is_cannot_tell_after_the_read_timeout() -> None:
 
     from safo.protection import CannotTell
 
+    release = threading.Event()
+
     def respond(h: BaseHTTPRequestHandler) -> None:
         h.send_response(200)
         h.send_header("Content-Length", "50")
         h.end_headers()
         h.wfile.write(b'{"a"')
         h.wfile.flush()
-        time.sleep(1.5)
+        release.wait(60)  # the body never finishes: only the client's read timeout can end the read
 
     started = time.monotonic()
-    with pytest.raises(CannotTell):
-        read_with(respond, timeout=0.3)
-    assert time.monotonic() - started < 1.2
+    try:
+        with pytest.raises(CannotTell):
+            read_with(respond, timeout=0.3)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    # far under the 60 s the server would hold the body and far over the 0.3 s timeout: a loaded runner cannot trip it
+    assert elapsed < 30
 
 
 # -- the structural proof (sampling is switched off in these, so only the structure can decide) ----------------------
