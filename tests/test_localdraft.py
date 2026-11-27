@@ -2184,3 +2184,10 @@ def test_project_comes_from_repo_or_the_cwd_remote(env: Env, tmp_path: Path) -> 
     code, _, _ = env.run(["digest", "ci-log", "-"], stdin="Error: boom\n")
     row = env.metrics()[-1]
     assert code == 0 and row["project"] == "Own/proj" and row["call_id"] == "abc-1" and "outcome" not in row
+
+
+def test_argparse_errors_go_to_the_caller_stderr(env: Env) -> None:
+    """A parse error must land in the injected stream on every Python version, not the process stderr."""
+    code, out, err = env.run(["--outcome", "abc-1"])
+    assert code == localdraft.EXIT_ERROR and "--outcome" in err and out == ""
+    assert _outcomes(env) == [] and env.metrics() == []

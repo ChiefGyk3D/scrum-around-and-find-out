@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import collections
+import contextlib
 import dataclasses
 import datetime as dt
 import ipaddress
@@ -1463,7 +1464,9 @@ def main(
     now: dt.datetime | None = None,
 ) -> int:
     try:
-        args = parser().parse_args(list(argv))
+        # argparse prints its usage and errors to the process streams; route them to the caller's streams.
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            args = parser().parse_args(list(argv))
     except SystemExit as stop:
         return int(stop.code) if isinstance(stop.code, int) else EXIT_ERROR
     if args.report:
