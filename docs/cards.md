@@ -45,5 +45,7 @@ The first failure stops the run (exit non-zero). A lost reply is an unknown outc
 run finds nothing to change. `--max-writes N` stops cleanly after N writes or adds (exit 0); re-run to continue.
 Output lists card references, field names and table values; no response body and no token is printed.
 
-Not verified against the live board: the shape of the single-item read and of the add reply are read defensively; a
-shape that differs fails closed rather than guessing.
+The add body (`type`, `owner`, `repo`, `number`) is one of the two shapes in GitHub's published REST description of
+`POST /users/{username}/projectsV2/{project_number}/items` (fetched 2026-11-27; the other is `type` and `id`). Not
+verified against the live board: the shape of the single-item read and of the add reply are read defensively; a shape
+that differs fails closed rather than guessing.

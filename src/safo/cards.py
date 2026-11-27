@@ -300,6 +300,10 @@ def run_rows(
             item_id = add_item(board, transport, row.key)
             result.added += 1
             say(f"ADDED {row.key}")
+            if max_writes is not None and result.written + result.added >= max_writes:
+                result.capped = True  # the add used the cap; the next run sets the fields from the remembered item id
+                say(f"stopped at the write cap ({max_writes}); re-run to continue (it is idempotent)")
+                break
             old = {n: None for n in names}
         else:
             old = current_values(board, transport, row.key, item_id, names)

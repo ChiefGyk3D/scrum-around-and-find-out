@@ -284,3 +284,19 @@ def test_output_holds_no_token_or_response_body(tmp_path: Path) -> None:
     api = FakeApi({7: 101})
     _, out, err = run(tmp_path, api, [row(7)])
     assert "ghp_" not in out + err and "{" not in out
+
+
+def test_an_add_that_uses_the_write_cap_stops_before_the_patch(tmp_path: Path) -> None:
+    api = FakeApi()
+    code, out, _ = run(tmp_path, api, [row(8)], "--max-writes", "1")
+    assert code == 0 and "write cap" in out
+    assert [c[0] for c in api.writes()] == ["POST"]  # the add used the cap; no PATCH followed
+    code, _, _ = run(tmp_path, api, [row(8)], "--max-writes", "1")  # the next run uses the remembered item id
+    assert code == 0 and [c[0] for c in api.writes()] == ["POST", "PATCH"]
+
+
+def test_the_add_body_is_the_documented_owner_repo_number_shape(tmp_path: Path) -> None:
+    api = FakeApi()
+    run(tmp_path, api, [row(8)])
+    post = next(c for c in api.calls if c[0] == "POST")
+    assert json.loads(post[2] or "") == {"type": "Issue", "owner": "ChiefGyk3D", "repo": "widgets", "number": 8}
