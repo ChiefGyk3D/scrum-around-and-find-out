@@ -399,3 +399,158 @@ def test_update_stores_the_population_and_compare_accepts_it(tmp_path: Path) -> 
     assert run(tmp_path, {m: 0.9 for m in MODELS}, "--update-baseline")[0] == 0
     assert json.loads((tmp_path / "base.json").read_text())["population"] == population()
     assert run(tmp_path, {m: 0.9 for m in MODELS})[0] == 0
+
+
+# ---- qwen silent-truncation probe (#569) ----
+
+QWEN = localdraft.DIGEST_MODEL
+CUT_LINE = (
+    "llm-local: prompt truncated by the server: estimate {est} tokens, reported {n}; the answer was not used; "
+    "fix: route to a long-context model or shorten the prompt"
+)
+
+
+class FakeProbe:
+    """A fake llm-local for the probe: a script of (exit code, stderr) per call, no process, no network."""
+
+    def __init__(self, *script: tuple[int, str]) -> None:
+        self.script = list(script)
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, model: str, prompt: str) -> tuple[int, str]:
+        self.calls.append((model, prompt))
+        return self.script.pop(0) if len(self.script) > 1 else self.script[0]
+
+
+def cut(n: int = 4098) -> tuple[int, str]:
+    return 3, CUT_LINE.format(est=12000, n=n) + "\n"
+
+
+def probe(*script: tuple[int, str], extra: tuple[str, ...] = ()) -> tuple[int, FakeProbe]:
+    fake = FakeProbe(*script)
+    code = ec.entry(["--probe-only", *extra], probe_runner=fake, sleep=lambda _s: None, nonce="n0nce")
+    return code, fake
+
+
+def test_probe_same_cap_is_ok(capsys: pytest.CaptureFixture[str]) -> None:
+    code, fake = probe(cut())
+    assert code == 0
+    assert [m for m, _ in fake.calls] == [QWEN]  # only the model that truncates, no name repeated in code
+    assert "ok" in capsys.readouterr().out
+
+
+def test_probe_prompt_is_long_nonced_and_free_of_private_text() -> None:
+    _, fake = probe(cut())
+    prompt = fake.calls[0][1]
+    assert len(prompt) > ec.PROBE_MIN_CHARS and "n0nce" in prompt[:80]
+
+
+def test_probe_cap_changed_alerts_exit_1(capsys: pytest.CaptureFixture[str]) -> None:
+    code, _ = probe(cut(8192))
+    err = capsys.readouterr().err
+    assert code == 1 and err.count("ALERT") == 1 and "8192" in err and "4098" in err
+
+
+def test_probe_cap_lifted_alerts_exit_1(capsys: pytest.CaptureFixture[str]) -> None:
+    code, _ = probe((0, ""))  # the guard saw a full prompt: the cut is gone
+    assert code == 1 and "ALERT" in capsys.readouterr().err
+
+
+def test_probe_expected_cap_is_configurable() -> None:
+    assert probe(cut(8192), extra=("--expected-cap", "8192"))[0] == 0
+    assert probe(cut(), extra=("--expected-cap", "8192"))[0] == 1
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc", "9999999999"])
+def test_probe_bad_expected_cap_is_usage(bad: str) -> None:
+    assert probe(cut(), extra=("--expected-cap", bad))[0] == 2
+
+
+def test_probe_busy_then_ok_is_retried() -> None:
+    code, fake = probe((75, "busy"), (75, "busy"), cut())
+    assert code == 0 and len(fake.calls) == 3
+
+
+def test_probe_busy_all_the_way_is_75_not_alert(capsys: pytest.CaptureFixture[str]) -> None:
+    code, _ = probe((75, "busy"))
+    assert code == 75 and "ALERT" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        (2, "cannot reach the server"),
+        (4, "prompt too large"),
+        (3, "unrelated failure"),
+        (3, "x " + CUT_LINE.format(est=1, n=2)),
+    ],
+)
+def test_probe_other_failures_are_unreachable_exit_3_never_an_alert(
+    result: tuple[int, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _ = probe(result)
+    assert code == 3 and "ALERT" not in capsys.readouterr().err
+
+
+def test_probe_cut_line_must_be_anchored_a_quoted_line_is_not_a_cut() -> None:
+    quoted = (3, "noise llm-local: prompt truncated by the server: estimate 1 tokens, reported 4098; x")
+    assert probe(quoted)[0] == 3
+
+
+def test_probe_runs_beside_scoring_with_unreachable_over_busy_over_drop(tmp_path: Path) -> None:
+    write_base(tmp_path, {m: 0.9 for m in MODELS})
+    ok = {m: 0.9 for m in MODELS}
+    run_probe = lambda *s: ec.entry(  # noqa: E731 - test shorthand
+        args(tmp_path, "--truncation-probe"), runner=FakeClient(ok), probe_runner=FakeProbe(*s), sleep=lambda _s: None
+    )
+    assert run_probe(cut()) == 0
+    assert run_probe(cut(8192)) == 1
+    assert run_probe((75, "b")) == 75
+    assert run_probe((2, "down")) == 3
+    # a score drop (1) never hides an unreachable probe (3) or a busy one (75)
+    drop = {m: 0.1 for m in MODELS}
+    both = lambda *s: ec.entry(  # noqa: E731
+        args(tmp_path, "--truncation-probe"), runner=FakeClient(drop), probe_runner=FakeProbe(*s), sleep=lambda _s: None
+    )
+    assert both(cut()) == 1 and both((75, "b")) == 75 and both((2, "down")) == 3
+
+
+def test_probe_not_run_unless_asked(tmp_path: Path) -> None:
+    write_base(tmp_path, {m: 0.9 for m in MODELS})
+    fake = FakeProbe(cut(8192))
+    code = ec.entry(
+        args(tmp_path), runner=FakeClient({m: 0.9 for m in MODELS}), probe_runner=fake, sleep=lambda _s: None
+    )
+    assert code == 0 and fake.calls == []
+
+
+def test_probe_with_update_baseline_is_usage(tmp_path: Path) -> None:
+    assert (
+        ec.entry(
+            args(tmp_path, "--update-baseline", "--truncation-probe"), runner=FakeClient({}), sleep=lambda _s: None
+        )
+        == 2
+    )
+
+
+def test_probe_only_reads_and_writes_no_baseline(tmp_path: Path) -> None:
+    code = ec.entry(
+        ["--probe-only", "--baseline", str(tmp_path / "none.json")],
+        probe_runner=FakeProbe(cut()),
+        sleep=lambda _s: None,
+        nonce="n0nce",
+    )
+    assert code == 0 and list(tmp_path.iterdir()) == []
+
+
+def test_default_probe_runner_calls_llm_local_with_loaded_ctx_and_forced_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    class Done:
+        returncode, stderr = 3, "x"
+
+    monkeypatch.setattr(le, "_run_cmd", lambda argv, timeout: (seen.append(list(argv)), Done())[1])
+    ec._default_probe_runner(30)(QWEN, "PROMPT")
+    argv = seen[0]
+    assert argv[0] == "llm-local" and "--force-size" in argv and argv[-1] == "PROMPT"
+    assert "--num-ctx" not in argv and "--no-truncation-guard" not in argv  # llm-local sends the loaded context itself
