@@ -55,7 +55,12 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
         if not report:
             ctx.say("  no calls recorded")
         for caller, buckets in sorted(report.items()):
-            cells = ", ".join(f"{b} {c['calls']} calls ({c['writes']} writes)" for b, c in sorted(buckets.items()))
+            cells = ", ".join(
+                f"{b} {c['calls']} calls ({c['writes']} writes"
+                + (f", {c['hits']} cache hits" if c.get("hits") else "")
+                + ")"
+                for b, c in sorted(buckets.items())
+            )
             ctx.say(f"  {caller:<24} {cells}")
     return worst
 
