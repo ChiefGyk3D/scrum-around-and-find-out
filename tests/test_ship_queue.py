@@ -144,7 +144,7 @@ def test_a_failing_check_is_named_and_never_merged(rig: Rig) -> None:  # noqa: F
 
 
 def test_branch_protection_refusal_has_its_own_code_and_word(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
+    rig.state["views"] = [view(GREEN)]
     rig.state["merges"] = [
         {"rc": 1, "err": "Pull request is not mergeable: the base branch policy prohibits the merge"}
     ]
@@ -179,7 +179,7 @@ def test_a_head_change_that_is_not_the_update_commit_is_head_moved(rig: Rig) -> 
 
 
 def test_a_conflict_found_at_merge_time_is_a_conflict_stop(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
+    rig.state["views"] = [view(GREEN)]  # no merge state: the text is the only evidence
     rig.state["merges"] = [{"rc": 1, "err": "Pull request is not mergeable: merge conflict between base and head"}]
     code, out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
     assert code == ship.EXIT_CONFLICT and out.startswith("CONFLICT")
@@ -379,4 +379,177 @@ def test_no_merge_starts_after_the_deadline(rig: Rig) -> None:  # noqa: F811
     pending = sv("CLEAN", rollup=[])
     rig.state["views"] = [pending, pending, pending, sv("CLEAN"), sv("CLEAN")]
     code, out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1", "--timeout", "2")
-    assert code == ship.EXIT_TIMEOUT and "before the merge" in out and merges(calls) == []
+    assert code == ship.EXIT_TIMEOUT and out.startswith("TIMEOUT") and merges(calls) == []
+
+
+# Daybreak round 2 (PR #594)
+
+
+def run_of(name: str, run: int, app_id: int = 15368) -> dict[str, Any]:
+    return {
+        "name": name,
+        "status": "completed",
+        "conclusion": "success",
+        "app_id": app_id,
+        "details_url": f"https://github.com/o/r/actions/runs/{run}/job/{run}",
+    }
+
+
+def test_a_same_app_same_name_job_from_another_workflow_does_not_count(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["check_runs"] = [run_of("CI green", 1)]
+    rig.state["run_api"] = {"1": {"path": ".github/workflows/evil.yml"}}
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+
+
+def test_only_the_trusted_workflows_job_counts_beside_an_impostor(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN"), sv("CLEAN"), sv("CLEAN", state="MERGED")]
+    rig.state["check_runs"] = [run_of("CI green", 1), run_of("CI green", 2)]
+    rig.state["run_api"] = {"1": {"path": ".github/workflows/evil.yml"}}
+    code, out, _calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == 0, out
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"head_sha": "f" * 40},
+        {"event": "pull_request_target"},
+        {"event": "workflow_dispatch"},
+        {"conclusion": "failure"},
+        {"status": "in_progress"},
+        {"repository": {"full_name": "evil/r"}},
+        {"path": ".github/workflows/ci.yml.evil"},
+    ],
+)
+def test_the_gate_run_must_match_sha_event_repo_and_conclusion(
+    rig: Rig,  # noqa: F811
+    change: dict[str, Any],
+) -> None:
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["check_runs"] = [run_of("CI green", 1)]
+    rig.state["run_api"] = {"1": change}
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+
+
+def test_a_check_run_with_no_workflow_run_cannot_be_verified(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["check_runs"] = [dict(run_of("CI green", 1), details_url="https://example.com/x")]
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+
+
+def test_the_gate_workflow_flag_names_the_expected_path(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["run_api"] = {"777": {"path": ".github/workflows/build.yml"}}
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "2", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+    rig.state["views"] = [sv("CLEAN"), sv("CLEAN"), sv("CLEAN", state="MERGED")]
+    code, out, _calls = rig.go(
+        "5", "--repo", REPO, "--max-polls", "3", "--interval", "1", "--gate-workflow", ".github/workflows/build.yml"
+    )
+    assert code == 0, out
+
+
+def test_without_a_derivable_gate_workflow_it_stops_with_an_error(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["workflows"] = [".github/workflows/a.yml", ".github/workflows/b.yml"]
+    code, out, calls = rig.go("5", "--repo", REPO, "--max-polls", "2", "--interval", "1")
+    assert code == ship.EXIT_ERROR and "--gate-workflow" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("queue", [False, True])
+@pytest.mark.parametrize("changed", [[".github/workflows/x.yml"], ["docs/a.md", ".github/workflows/ci.yml"]])
+def test_a_pr_that_changes_workflow_files_is_not_merged_automatically(
+    rig: Rig,  # noqa: F811
+    queue: bool,
+    changed: list[str],
+) -> None:
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["changed"] = changed
+    code, out, calls = rig.go(*(["--queue"] if queue else []), "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_NEEDS_HUMAN == 10 and out.startswith("NEEDS-HUMAN") and merges(calls) == []
+    assert ".github/workflows" in out
+
+
+def test_other_paths_do_not_trigger_the_workflow_stop(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN"), sv("CLEAN"), sv("CLEAN", state="MERGED")]
+    rig.state["changed"] = ["docs/.github/workflows/x.yml", ".github/workflows-notes.md", "src/a.py"]
+    code, out, _calls = rig.go("5", "--repo", REPO, "--interval", "1")
+    assert code == 0, out
+
+
+def test_a_huge_file_list_fails_closed_and_is_read_with_pagination(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["changed"] = [f"f{i}.txt" for i in range(300)]
+    code, _out, calls = rig.go("5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
+    compare = [c for c in calls if len(c) > 2 and c[1] == "api" and "/compare/" in c[2]]
+    assert compare and all("--paginate" in c for c in compare)
+
+
+def test_every_gh_call_is_capped_by_the_per_pr_deadline_and_none_starts_after_it(rig: Rig) -> None:  # noqa: F811
+    rig.tick = 2.0
+    rig.state["views"] = [sv("CLEAN", rollup=[])]
+    code, _out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1", "--timeout", "5")
+    assert code == ship.EXIT_TIMEOUT and rig.timeouts
+    assert all(now < 5 and now + (t or 0) <= 5 + 1e-9 for now, t in rig.timeouts), rig.timeouts
+
+
+def test_the_total_deadline_also_caps_every_call(rig: Rig) -> None:  # noqa: F811
+    rig.tick = 2.0
+    rig.state["views"] = [sv("CLEAN", rollup=[])]
+    code, _out, _calls = rig.go(
+        "--queue", "5", "--repo", REPO, "--interval", "1", "--timeout", "1000", "--total-timeout", "3"
+    )
+    assert code == ship.EXIT_TIMEOUT
+    assert all(now < 3 and now + (t or 0) <= 3 + 1e-9 for now, t in rig.timeouts), rig.timeouts
+
+
+def test_a_call_is_not_started_after_the_deadline() -> None:
+    seen: list[float] = []
+
+    def blocking(argv: list[str], **kw: Any) -> Any:
+        seen.append(kw["timeout"])
+        raise AssertionError("must not start")
+
+    gh = ship.Gh("gh", "git", {}, blocking, None, clock=lambda: 20.0, limit=14.0)
+    with pytest.raises(ship.ShipError) as stop:
+        gh.gh_call("x")
+    assert stop.value.code == ship.EXIT_TIMEOUT and seen == []
+
+
+def test_a_merge_retry_is_not_started_after_the_deadline(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}]
+    code, _out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1", "--timeout", "1")
+    assert len(merges(calls)) <= 1 and code != 0
+
+
+def test_required_check_apps_do_not_leak_between_queued_prs(rig: Rig) -> None:  # noqa: F811
+    pinned = {"rc": 0, "out": json.dumps({"contexts": [], "checks": [{"context": "CI green", "app_id": 7}]})}
+    rig.state["protection_by_base"] = {"main": pinned, "other": {"rc": 1, "err": "x", "http": 404}}
+    first = sv("CLEAN", rollup=[dict(check("CI green"), app_id=7)])
+    second = sv("CLEAN", rollup=[dict(check("CI green"), app_id=7)])
+    second["baseRefName"] = "other"
+    done = dict(first, state="MERGED")
+    rig.state["views"] = [first, first, first, done, second]
+    code, out, _calls = rig.go("--queue", "5", "6", "--repo", REPO, "--interval", "1", "--max-polls", "2")
+    lines = out.strip().splitlines()
+    assert lines[0].startswith("MERGED") and lines[1].startswith("TIMEOUT") and code == ship.EXIT_TIMEOUT
+
+
+def test_clean_structured_state_beats_hostile_error_text(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["merges"] = [{"rc": 1, "err": "temporary backend conflict while applying policy"}]
+    code, out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_MERGE_REFUSED and out.startswith("MERGE-REFUSED")
+
+
+def test_unknown_structured_state_falls_back_to_the_text(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("UNKNOWN", "UNKNOWN")]
+    rig.state["merges"] = [{"rc": 1, "err": "merge conflict between base and head"}]
+    code, _out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_CONFLICT

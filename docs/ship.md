@@ -55,6 +55,7 @@ lines.
 | 7 | error: gh or git missing or failing, push or open failed, protection unreadable, or a malformed answer |
 | 8 | conflict with the base branch (`--queue` only; an agent must resolve it) |
 | 9 | branch protection refused the merge (`--queue` only) |
+| 10 | NEEDS-HUMAN: the pull request changes a workflow file, so it is never merged automatically (plain and `--queue`) |
 
 Protection is read from the base branch with `gh api -i`; only an HTTP 404 status line means "none listed" (text in stderr
 is never used to decide that) and `CI green` is still required, any other failure to
@@ -67,9 +68,31 @@ poll. A merge gh refuses is re-checked: if the head moved meanwhile the result i
 A required check counts only as a successful check run of the right GitHub App on the pinned commit, read from the
 check-runs API with every page. A commit status of the same name never counts, and neither does a check run of another
 app. The app is the `app_id` that branch protection lists for the context; `CI green` is always checked, by default
-against GitHub Actions (app 15368, `--gate-app-id` to change). A protected context with no `app_id` is accepted from any
-source: pin it in branch protection to close that gap. Matching is by name, so two workflows of the same app that produce
-the same job name cannot be told apart.
+against GitHub Actions (app 15368, `--gate-app-id` to change it; that flag weakens nothing below, but a wrong id only
+makes the gate wait or time out).
+
+The app id does not say which workflow ran: every workflow in the repository posts as the same app, and a check run's
+name is chosen by its author. So for `CI green` the check run is also tied to its workflow run (the run id in its
+details URL, then `GET actions/runs/<id>`), and it counts only when that run
+
+- has `path` equal to the gate workflow file: `--gate-workflow PATH`, else the one `.github/workflows/ci.yml` (or
+  `ci.yaml`) listed on the base branch; if neither is derivable the tool stops with exit 7 and asks for the flag;
+- has `head_sha` equal to the pinned commit, the `pull_request` or `push` event, status `completed`, conclusion
+  `success`, and belongs to this repository.
+
+A same-name job from another workflow is ignored, not fatal. The gate path is read from the base branch, never from the
+pull request.
+
+Because a pull request can edit the gate itself, any pull request that changes a file under `.github/workflows/`, or the
+gate file, or whose changed-file list is 300 or longer (the compare API cannot show more), stops with `NEEDS-HUMAN`
+(exit 10) and the first such file. A human merges it.
+
+What this does not prove: an author with push access can still change inputs the gate workflow trusts without touching a
+workflow file, such as a reusable workflow ref it calls (when that lives elsewhere), scripts, configuration or
+dependencies the workflow runs, and `path` equality is a name match, not a signature. The real control is branch
+protection with required workflows (rulesets) and CODEOWNERS on `.github/`; this tool narrows the gap and does not
+replace them. A protected context with no `app_id` is accepted from any source; pin it. Other pinned contexts are checked
+by app and name only, not by workflow.
 
 ## Queue mode
 
@@ -89,9 +112,13 @@ positive. Differences from the plain mode:
   then waited for again on the new head. A second `BEHIND` stops with `MERGE-REFUSED`.
 - Stop words: `CONFLICT` (8), `THREADS` (3, with the count and each thread), `CI-FAILED` (1, naming the failing checks),
   `PROTECTED` (9), `MERGE-REFUSED` (6), `HEAD-MOVED` (4), `TIMEOUT` (5), `ERROR` (7). A merge gh refuses is classified
-  from the pull request's merge state (`mergeable`, `mergeStateStatus`) first; the English error text is only a fallback.
+  from the pull request's merge state (`mergeable`, `mergeStateStatus`), and that state always wins: a clean state with
+  a merge error is a plain `MERGE-REFUSED`, whatever the text says. The error text is read only when the state is
+  missing or `UNKNOWN`.
 - `--timeout` is one deadline per PR, shared by the head wait, update-branch, CI, the review wait and the thread read; no
-  sleep goes past it, each `gh` call gets at most the time left, and no merge starts after it. `--total-timeout`
+  sleep goes past it, each `gh` call gets at most the time left (min of the per-PR time, the total time and 60 s), no call
+  is started once it has passed (`TIMEOUT`, exit 5), and no merge retry starts after it. A merge call that was already
+  sent is followed by its read-back. `--total-timeout`
   (default 7200, at most 28800) bounds the whole run: the PR it cuts off prints `TIMEOUT` and the rest `SKIPPED`.
 
 ### The thread check is best-effort

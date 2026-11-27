@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import stat
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -64,11 +65,29 @@ STUB = textwrap.dedent(
                 "status": i["status"].lower(),
                 "conclusion": i["conclusion"].lower(),
                 "app_id": i.get("app_id", 15368),
+                "details_url": i.get("detailsUrl") or "https://github.com/o/r/actions/runs/777/job/1",
             }}
             for i in state.get("last_view", {{}}).get("statusCheckRollup", [])
             if "name" in i
         ]
         reply({{"out": "\\n".join(json.dumps(x) for x in state.get("check_runs", runs))}})
+    if rest[0] == "api" and "/actions/runs/" in rest[1]:
+        run_id = rest[1].rsplit("/", 1)[1]
+        view_now = state.get("last_view", {{}})
+        run = {{
+            "path": ".github/workflows/ci.yml",
+            "head_sha": view_now.get("headRefOid"),
+            "event": "pull_request",
+            "status": "completed",
+            "conclusion": "success",
+            "repository": {{"full_name": "o/r"}},
+        }}
+        run.update(state.get("run_api", {{}}).get(run_id, {{}}))
+        reply({{"out": json.dumps(run)}})
+    if rest[0] == "api" and "/compare/" in rest[1]:
+        reply({{"out": "\\n".join(state.get("changed", []))}})
+    if rest[0] == "api" and "/contents/.github/workflows" in rest[1]:
+        reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
     if rest[0] == "api" and "required_conversation_resolution" in rest[1]:
         reply({{"out": json.dumps(state.get("conv", {{"enabled": True}}))}})
     if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
@@ -94,6 +113,9 @@ STUB = textwrap.dedent(
         reply({{"out": json.dumps(state.get("commit_pulls", []))}})
     if rest[0] == "api":
         item = state["protection"]
+        for base_name, other in state.get("protection_by_base", {{}}).items():
+            if "/branches/" + base_name + "/" in " ".join(rest):
+                item = other
         if "-i" in rest:  # the HTTP status line comes on stdout, as `gh api -i` prints it
             code = 200 if item.get("rc", 0) == 0 else item.get("http", 404 if "404" in item.get("err", "") else 500)
             item = dict(item, out="HTTP/2.0 " + str(code) + " X\\r\\n\\r\\n" + item.get("out", ""))
@@ -180,6 +202,8 @@ class Rig:
         }
         self.slept: list[float] = []
         self.now = 0.0
+        self.tick = 0.0  # fake seconds a gh call takes
+        self.timeouts: list[tuple[float, float | None]] = []  # (clock at the call, its timeout)
         monkeypatch.setenv("FAKE_STATE", str(self.state_path))
 
     def go(self, *argv: str) -> tuple[int, str, list[list[str]]]:
@@ -190,8 +214,15 @@ class Rig:
             self.slept.append(seconds)
             self.now += seconds
 
+        def run(argv: list[str], **kw: Any) -> Any:
+            self.timeouts.append((self.now, kw.get("timeout")))
+            done = subprocess.run(argv, **kw)  # noqa: S603 (argv is the fake gh the rig wrote)
+            self.now += self.tick
+            return done
+
         code = ship.main(
             [*argv],
+            run=run,
             env={"PATH": str(self.bin), "FAKE_STATE": str(self.state_path)},
             out=out,
             err=err,

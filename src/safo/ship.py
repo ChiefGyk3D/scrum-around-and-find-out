@@ -29,6 +29,7 @@ Exit codes (several pull requests: the highest code wins):
     3 unresolved review threads        6 merge refused, or the read-back did not say MERGED
     7 an error: gh missing or failing, push or open failed, unreadable protection
     8 conflict (queue mode only)       9 branch protection refused the merge (queue mode only)
+   10 NEEDS-HUMAN: the pull request changes a workflow file (never merged automatically)
     (argparse's 2 is a usage error)
 """
 
@@ -57,6 +58,10 @@ EXIT_MERGE_REFUSED = 6
 EXIT_ERROR = 7
 EXIT_CONFLICT = 8  # queue mode: the pull request conflicts with its base; an agent must resolve it
 EXIT_PROTECTED = 9  # queue mode: branch protection refused the merge
+EXIT_NEEDS_HUMAN = 10  # the pull request changes a workflow file: never merged automatically
+WORKFLOW_DIR = ".github/workflows/"
+GATE_RUN_EVENTS = ("pull_request", "push")  # events a trusted gate run may come from
+COMPARE_CAP = 300  # the compare API lists at most 300 files: that many or more cannot prove "no workflow changed"
 
 GATE = "CI green"
 CANARY = "EX-0001"
@@ -147,7 +152,12 @@ class Gh:
     limit: float | None = None  # absolute clock time the whole run must end by; caps each call's time
 
     def _call(self, argv: list[str]) -> tuple[int, str, str]:
-        wait = CALL_TIMEOUT if self.limit is None else max(1.0, min(float(CALL_TIMEOUT), self.limit - self.clock()))
+        wait = float(CALL_TIMEOUT)
+        if self.limit is not None:
+            left = self.limit - self.clock()
+            if left <= 0:  # no process is started after the deadline
+                raise ShipError(EXIT_TIMEOUT, "the time ran out before this call")
+            wait = min(wait, left)
         try:
             done = self.run(
                 argv,
@@ -291,9 +301,13 @@ class Watcher:
         queue: bool = False,
         gate_app: int = GATE_APP_ID,
         total_deadline: float | None = None,
+        gate_workflow: str = "",
     ):
         self.gate_app, self.total_deadline = gate_app, total_deadline
-        self.apps: dict[str, int] = {}
+        self.gate_workflow = gate_workflow
+        self.gate_paths: dict[tuple[str, str], str] = {}
+        self.last_base = ""
+        self.deadline: float | None = None
         self.noticed = False
         self.queue = queue
         self.wait_for_review = wait_for_review
@@ -321,7 +335,7 @@ class Watcher:
             raise ShipError(EXIT_ERROR, f"PR #{number}: no head commit in the answer")
         return data
 
-    def required(self, repo: str, base: str) -> list[str]:
+    def required(self, repo: str, base: str) -> tuple[list[str], dict[str, int]]:
         # -i puts the HTTP status line on stdout, so a missing protection is told by status, never by stderr text
         code, out, _err = self.gh.gh_call(
             "api", "-i", f"repos/{repo}/branches/{base}/protection/required_status_checks"
@@ -331,7 +345,7 @@ class Watcher:
         found = re.match(r"HTTP/\S+ (\d{3})", head)
         status = int(found.group(1)) if found else 0
         if status == 404:
-            return names
+            return names, {}
         if code != 0 or not 200 <= status < 300:
             raise ShipError(EXIT_ERROR, f"cannot read the required checks of {base}: HTTP status {status or 'unknown'}")
         try:
@@ -339,11 +353,82 @@ class Watcher:
         except ValueError as error:
             raise ShipError(EXIT_ERROR, "unreadable required-checks answer") from error
         found_contexts = protection_contexts(data)
-        self.apps = protection_apps(data)
         for context in found_contexts:
             if context not in names:
                 names.append(context)
-        return names
+        return names, protection_apps(data)
+
+    def gate_path(self, repo: str, base: str) -> str:
+        """The workflow file that must have produced `CI green`: --gate-workflow, else the one `ci.yml` (or `ci.yaml`)
+        that the base branch holds. Anything else is an error: the gate's identity is never guessed."""
+        if self.gate_workflow:
+            return self.gate_workflow
+        if (repo, base) not in self.gate_paths:
+            code, out, err = self.gh.gh_call(
+                "api", f"repos/{repo}/contents/.github/workflows?ref={base}", "--jq", ".[].path"
+            )
+            if code != 0:
+                raise ShipError(EXIT_ERROR, f"cannot list the workflows of {base}: {err.strip()[:200]}")
+            found = [p for p in out.split() if p in (f"{WORKFLOW_DIR}ci.yml", f"{WORKFLOW_DIR}ci.yaml")]
+            if len(found) != 1:
+                raise ShipError(EXIT_ERROR, "cannot tell which workflow file is the gate: pass --gate-workflow PATH")
+            self.gate_paths[(repo, base)] = found[0]
+        return self.gate_paths[(repo, base)]
+
+    def trusted_run(self, repo: str, pin: str, check: dict[str, Any], gate_path: str, cache: dict[str, bool]) -> bool:
+        """True when the check run belongs to a successful run of the gate workflow file, of this repository, on exactly
+        `pin`, from a pull_request or push event. Any doubt (no run id, unreadable answer) is False."""
+        found = RUN_URL.search(str(check.get("details_url") or ""))
+        if not found:
+            return False
+        run_id = found.group(1)
+        if run_id not in cache:
+            code, out, _err = self.gh.gh_call("api", f"repos/{repo}/actions/runs/{run_id}")
+            try:
+                run = bounded.loads(out) if code == 0 else None
+            except ValueError:
+                run = None
+            repo_name = (
+                str(((run or {}).get("repository") or {}).get("full_name") or "") if isinstance(run, dict) else ""
+            )
+            cache[run_id] = (
+                isinstance(run, dict)
+                and str(run.get("path") or "").split("@")[0] == gate_path
+                and run.get("head_sha") == pin
+                and run.get("event") in GATE_RUN_EVENTS
+                and str(run.get("status")) == "completed"
+                and str(run.get("conclusion")) == "success"
+                and repo_name.lower() == repo.lower()
+            )
+        return cache[run_id]
+
+    def workflow_stop(self, repo: str, pin: str) -> Result | None:
+        """NEEDS-HUMAN when the pull request touches any workflow file or the gate's file (or the list is too long to
+        prove it does not): a change to the gate can make its own CI green, so it is never merged automatically."""
+        base = self.last_base
+        gate = self.gate_path(repo, base)
+        code, out, err = self.gh.gh_call(
+            "api",
+            f"repos/{repo}/compare/{base}...{pin}?per_page=100",
+            "--paginate",
+            "--jq",
+            ".files[] | .filename, (.previous_filename // empty)",
+        )
+        if code != 0:
+            raise ShipError(EXIT_ERROR, f"cannot list the changed files: {err.strip()[:200]}")
+        files = [line for line in out.splitlines() if line.strip()]
+        hit = next((f for f in files if f.startswith(WORKFLOW_DIR) or f == gate), None)
+        if hit is not None:
+            return Result(
+                EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"changes {clean(hit, 200)[0]}; a workflow change is merged by a human"
+            )
+        if len(files) >= COMPARE_CAP:
+            return Result(
+                EXIT_NEEDS_HUMAN,
+                "NEEDS-HUMAN",
+                f"{COMPARE_CAP} or more changed files: cannot prove no workflow changed",
+            )
+        return None
 
     def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]:
         """Every check run of `sha` (all pages) with the id of the GitHub App that made it."""
@@ -352,7 +437,8 @@ class Watcher:
             f"repos/{repo}/commits/{sha}/check-runs?per_page=100",
             "--paginate",
             "--jq",
-            ".check_runs[] | {name: .name, status: .status, conclusion: .conclusion, app_id: .app.id}",
+            ".check_runs[] | {name: .name, status: .status, conclusion: .conclusion, app_id: .app.id,"
+            " details_url: .details_url}",
         )
         if code != 0:
             raise ShipError(EXIT_ERROR, f"cannot read the check runs of {sha[:12]}: {err.strip()[:200]}")
@@ -368,17 +454,23 @@ class Watcher:
                 runs.append(item)
         return runs
 
-    def verify_sources(self, repo: str, pin: str, required: Sequence[str]) -> str:
+    def verify_sources(
+        self, repo: str, pin: str, required: Sequence[str], apps: Mapping[str, int], gate_path: str
+    ) -> str:
         """ "" when every app-pinned required check (the gate always) is a successful check run of the pinned app on
-        `pin`, else why not. A commit status, or a check run of another app, never counts for such a check."""
-        need = {c: self.apps[c] for c in required if c in self.apps}
+        `pin`, else why not. A commit status, or a check run of another app, never counts for such a check. For the
+        gate the run must also be a trusted run of `gate_path` (see trusted_run); impostor jobs are ignored."""
+        need = {c: apps[c] for c in required if c in apps}
         if GATE in required and GATE not in need:
             need[GATE] = self.gate_app
         if not need:
             return ""
         runs = self.check_runs(repo, pin)
+        cache: dict[str, bool] = {}
         for context, app in need.items():
             mine = [r for r in runs if r.get("app_id") == app and name_ok(context, str(r.get("name") or ""))]
+            if context == GATE:
+                mine = [r for r in mine if self.trusted_run(repo, pin, r, gate_path, cache)]
             good = OK_REQUIRED if context != GATE else {"SUCCESS"}
             if not mine or not all(
                 str(r.get("status")).upper() == "COMPLETED" and str(r.get("conclusion") or "").upper() in good
@@ -504,6 +596,8 @@ class Watcher:
         start = self.clock()
         base = ""
         required: list[str] = []
+        apps: dict[str, int] = {}
+        gate_path = ""
         cancels: dict[str, int] = {}
         canaries: dict[str, int] = {}
         grace: dict[tuple[str, str], int] = {}
@@ -519,11 +613,13 @@ class Watcher:
                 return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", f"pull request is {data.get('state')}")
             if not required:
                 base = str(data.get("baseRefName") or "")
-                required = self.required(repo, base)
+                self.last_base = base
+                required, apps = self.required(repo, base)  # per call: nothing carries over from another PR
+                gate_path = self.gate_path(repo, base)
             checks = parse_checks(data.get("statusCheckRollup"))
             verdict = judge(checks, required)
             if verdict.state == "green":
-                why = self.verify_sources(repo, pin, required)
+                why = self.verify_sources(repo, pin, required, apps, gate_path)
                 if not why:
                     return None
                 last = why
@@ -594,10 +690,16 @@ class Watcher:
             argv.append("--delete-branch")
         for attempt in (1, 2):
             code, _out, err = self.gh.gh_call(*argv)
+            self.gh.limit = None  # the merge call ran: its read-back and classification are not cut off
             if code == 0:
                 break
             if attempt == 1 and "base branch was modified" in err.lower():
-                self.sleep(self.interval)
+                left = None if self.deadline is None else self.deadline - self.clock()
+                if left is not None and left <= 0:  # no second attempt after the deadline
+                    return Result(EXIT_TIMEOUT, "TIMEOUT", "the base branch moved and the time is up")
+                self.sleep(self.interval if left is None else min(self.interval, left))
+                if self.deadline is not None and self.clock() >= self.deadline:
+                    return Result(EXIT_TIMEOUT, "TIMEOUT", "the base branch moved and the time is up")
                 moved = self.view(repo, number)
                 if str(moved["headRefOid"]) != pin:
                     return Result(
@@ -621,15 +723,19 @@ class Watcher:
             return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
         reason = err.strip().splitlines()[0][:200] if err.strip() else "gh refused"
         if self.queue:
-            # the structured merge state decides; the error text is only a fallback when the state says nothing
-            if (stop := self.conflicting(data)) is not None:
-                return Result(stop.code, stop.word, reason)
-            if data.get("mergeStateStatus") == "BLOCKED":
-                return Result(EXIT_PROTECTED, "PROTECTED", reason)
-            if "conflict" in reason.lower():
-                return Result(EXIT_CONFLICT, "CONFLICT", reason)
-            if any(word in reason.lower() for word in PROTECTED_WORDS):
-                return Result(EXIT_PROTECTED, "PROTECTED", reason)
+            # Structured state wins unconditionally; the error text is read only when the state says nothing (missing
+            # or UNKNOWN), because a clean state with a hostile or buggy message must not name a stop it cannot prove.
+            state, mergeable = data.get("mergeStateStatus"), data.get("mergeable")
+            if state in (None, "", "UNKNOWN") and mergeable in (None, "", "UNKNOWN"):
+                if "conflict" in reason.lower():
+                    return Result(EXIT_CONFLICT, "CONFLICT", reason)
+                if any(word in reason.lower() for word in PROTECTED_WORDS):
+                    return Result(EXIT_PROTECTED, "PROTECTED", reason)
+            else:
+                if (stop := self.conflicting(data)) is not None:
+                    return Result(stop.code, stop.word, reason)
+                if state == "BLOCKED":
+                    return Result(EXIT_PROTECTED, "PROTECTED", reason)
         return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", reason)
 
     # queue mode
@@ -645,6 +751,8 @@ class Watcher:
             if left <= 0:
                 break
             self.sleep(min(self.interval, left))
+            if deadline - self.clock() <= 0:
+                break
             data = self.view(repo, number)
         if str(data["headRefOid"]) == expect:
             return data
@@ -705,6 +813,7 @@ class Watcher:
             deadline = started + self.timeout
             if self.total_deadline is not None:
                 deadline = min(deadline, self.total_deadline)
+            self.deadline, self.gh.limit = deadline, deadline  # every gh call is capped by what is left of this PR
             first = self.pinned_view(repo, number, expect, deadline) if expect else self.view(repo, number)
             if isinstance(first, Result):
                 return first
@@ -738,6 +847,9 @@ class Watcher:
             ended = self.await_review(repo, number, pin, deadline)
             if ended is not None:
                 return ended
+            stop = self.workflow_stop(repo, pin)
+            if stop is not None:
+                return stop
             self.conversation_notice(repo, str(data.get("baseRefName") or ""))
             open_threads = self.threads(repo, number)  # the last read before the merge call
             if open_threads:
@@ -747,11 +859,11 @@ class Watcher:
                     f"{len(open_threads)} unresolved review thread(s)",
                     [line for t in open_threads for line in t.lines()],
                 )
-            if self.clock() >= deadline:  # no merge is started after the time is up
-                return Result(EXIT_TIMEOUT, "TIMEOUT", "the time ran out before the merge")
             return self.merge(repo, number, pin)
         except ShipError as error:
-            return Result(error.code, "ERROR", str(error))
+            return Result(error.code, "TIMEOUT" if error.code == EXIT_TIMEOUT else "ERROR", str(error))
+        finally:
+            self.deadline, self.gh.limit = None, None
 
     def conversation_notice(self, repo: str, base: str) -> None:
         """Say once when branch protection does not require conversation resolution: then the thread check is the only
@@ -784,6 +896,9 @@ class Watcher:
             ended = self.await_review(repo, number, pin, started + self.timeout)
             if ended is not None:
                 return ended
+            stop = self.workflow_stop(repo, pin)
+            if stop is not None:
+                return stop
             open_threads = self.threads(repo, number)
             if open_threads:
                 return Result(
@@ -846,6 +961,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=7200.0,
         help="queue only: seconds for the whole run, 1 to 28800 (default 7200); later PRs print SKIPPED",
     )
+    p.add_argument(
+        "--gate-workflow",
+        default="",
+        metavar="PATH",
+        help="workflow file that must have produced `CI green` (default: the base branch's one ci.yml or ci.yaml)",
+    )
     p.add_argument("--gate-app-id", type=int, default=GATE_APP_ID, help="GitHub App id that must own `CI green`")
     p.add_argument("--delete-branch", action="store_true")
     p.add_argument(
@@ -879,6 +1000,8 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error("--max-polls must be 1 to 1000")
     if not 1 <= args.total_timeout <= MAX_TOTAL_TIMEOUT:
         parser.error(f"--total-timeout must be 1 to {MAX_TOTAL_TIMEOUT}")
+    if args.gate_workflow and not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", args.gate_workflow):
+        parser.error("--gate-workflow is a path like .github/workflows/ci.yml")
     if args.gate_app_id < 1:
         parser.error("--gate-app-id must be a positive App id")
     if any(n < 1 for n in args.pr):
@@ -938,6 +1061,7 @@ def main(
         out,
         total_deadline=total_deadline,
         gate_app=args.gate_app_id,
+        gate_workflow=args.gate_workflow,
         timeout=args.timeout,
         interval=args.interval,
         max_polls=args.max_polls,
@@ -992,6 +1116,7 @@ def wait_ci_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", type=float, default=20.0)
     p.add_argument("--max-polls", type=int, default=120)
     p.add_argument("--workdir", default=None)
+    p.add_argument("--gate-workflow", default="", metavar="PATH", help="as safo-ship")
     return p
 
 
@@ -1031,6 +1156,7 @@ def wait_ci_main(
         max_polls=args.max_polls,
         method="squash",
         delete_branch=False,
+        gate_workflow=args.gate_workflow,
         sleep=sleep,
         clock=clock,
     )
