@@ -11,6 +11,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Agent profiles](profiles.md): how to brief each agent, with every claim tied to a pointer at a measurement (the loader, the evidence check and the rendering into `examples/harness/` are built).
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
 - [Spend report](spend-report.md): `safo spend`, the weekly weighted token-spend report and stored baseline every token-savings change is measured by.
+- [Impacted tests](impacted-tests.md): `scripts/impacted-tests.py`, which changed files map to which tests for a targeted run, and when it says run the full suite. CI stays the judge.
 - [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit.
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
