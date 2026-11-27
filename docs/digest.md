@@ -84,15 +84,15 @@ allow = [
   1. **The repository's config is checked first.** Before any command runs, `git config --list --show-scope -z` is
      read in the working directory and the run is refused if the repository's own config (any scope except our
      own command-scope settings) sets any of: `filter.*`, `diff.*.textconv`, `diff.*.command`, `merge.*.driver`,
-     `alias.*`, `include.*`, `includeIf.*`, `url.*`, `core.fsmonitor`, `core.hooksPath`. A filter, textconv or
+     `alias.*`, `include.*`, `includeIf.*`, `url.*`, the `core` keys `fsmonitor` and `hooksPath`. A filter, textconv or
      merge driver needs one of those keys, so `.gitattributes` is not inspected. A config that cannot be read, or
      whose listing has an unexpected shape, is refused too.
   2. **Program-running settings are forced off at command scope**, which beats the repository's config, through
-     `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`: `core.fsmonitor=false`, `core.pager=cat`,
-     `core.editor`, `core.askPass`, `core.sshCommand`, `core.alternateRefsCommand`, `diff.external`, `gpg.program`,
-     `gpg.ssh.program`, `gpg.x509.program`, `gpg.openpgp.program` (all `/bin/false`), `core.hooksPath=/dev/null`,
-     `core.attributesFile=/dev/null`, `log.showSignature=false`, `credential.helper=` (empty) and
-     `protocol.ext.allow=never`; plus `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`.
+     `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`: in section `core`: `fsmonitor=false`, `pager=cat`,
+     `editor`, `askPass`, `sshCommand` and `alternateRefsCommand` (all `/bin/false`), `hooksPath=/dev/null` and
+     `attributesFile=/dev/null`; the external diff program, the `gpg` program settings (plain, ssh, x509 and openpgp;
+     all `/bin/false`), `showSignature=false` in section `log`, an empty credential helper and the `ext` protocol set
+     to `never`; plus `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`.
      The command line gets `--no-pager --no-optional-locks` before the subcommand, and after `diff`, `log` and `show`
      `--no-ext-diff --no-textconv` (`log` and `show` also `--no-show-signature`; `blame` gets `--no-textconv`).
   A user `-c`, `--textconv`, `--ext-diff`, `--open-files-in-pager`, `-O*`, `-x*`, `-u`, `--exec*`, `--extcmd*`,
@@ -160,7 +160,7 @@ without following a symlink; it must be a regular file of yours, not group or wo
 keys are an error.
 
 ```toml
-out_dir = "/home/you/.local/state/safo-digest"   # absolute and normalised; default is this path under your home
+out_dir = "/path/to/state/safo-digest"   # absolute and normalised; default is this path under your home
 allow = [ ... ]                                  # required, see above
 max_lines = 40            # 8 to 1000 (default 40)
 max_bytes = 4000          # 1024 to 65536 (default 4000)
