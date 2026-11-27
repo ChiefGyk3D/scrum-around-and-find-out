@@ -961,9 +961,10 @@ def test_contents_args_quote_each_segment_and_pass_the_ref_as_a_field() -> None:
     ]
 
 
-def test_an_answer_about_another_path_is_an_error_not_a_comparison(rig: Rig) -> None:  # noqa: F811
+@pytest.mark.parametrize("asked", ["tools/act", ".github/workflows/ci.yml"])
+def test_an_answer_about_another_path_is_an_error_not_a_comparison(rig: Rig, asked: str) -> None:  # noqa: F811
     rig.state["views"] = [sv("CLEAN")]
     rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./tools/act\n"
-    rig.state["path_override"] = "somewhere/else"
+    rig.state["path_override"] = {asked: "somewhere/else"}
     code, out, calls = rig.go(*args(False))
     assert code == ship.EXIT_ERROR and "not about" in out and merges(calls) == []

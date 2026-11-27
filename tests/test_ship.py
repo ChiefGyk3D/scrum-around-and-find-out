@@ -99,7 +99,7 @@ STUB = textwrap.dedent(
     if rest[0] == "api" and "/contents/" in url:
         assert "?" not in url and list(rest[1:3]) == ["-X", "GET"], rest  # the ref is a field, never part of the URL
         cpath = unquote(url.split("/contents/")[1])
-        shown = state.get("path_override", cpath)  # lets a test make the answer be about another path
+        shown = state.get("path_override", {{}}).get(cpath, cpath)  # a test can make an answer be about another path
         jq = rest[rest.index("--jq") + 1] if "--jq" in rest else ""
         if "-H" in rest:  # the raw text of a workflow file
             default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: x\\n")
