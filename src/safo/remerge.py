@@ -29,6 +29,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -98,8 +99,11 @@ def _insertions(base: list[str], other: list[str]) -> dict[int, list[str]]:
     return found
 
 
-def _addable(line: str) -> bool:
-    return bool(_LIST_OR_TABLE.match(line) or _CONTINUATION.match(line))
+def _addable(block: list[str]) -> bool:
+    """A block of added lines starts with a list item or table row; only then may indented lines follow it."""
+    if not block or not _LIST_OR_TABLE.match(block[0]):
+        return False
+    return all(_LIST_OR_TABLE.match(line) or _CONTINUATION.match(line) for line in block)
 
 
 def merge_additions(
@@ -123,7 +127,7 @@ def merge_additions(
         block = mine if mine == other else mine + other
         if block and allowed_at is not None and not allowed_at(i):
             return None
-        if any(not _addable(line) for line in block):
+        if any(side and not _addable(side) for side in (mine, other)):
             return None
         out.extend(block)
         added.extend(block)
@@ -146,7 +150,7 @@ def resolve_changelog(base: str, ours: str, theirs: str) -> str | None:
         return None
     first = starts[0] + 1
     last = next((n for n in range(first, len(lines)) if lines[n].startswith("## ")), len(lines))
-    return merge_additions(base, ours, theirs, allowed_at=lambda i: first <= i < last)
+    return merge_additions(base, ours, theirs, allowed_at=lambda i: first <= i <= last)
 
 
 def resolve_table_page(base: str, ours: str, theirs: str) -> str | None:
@@ -259,15 +263,28 @@ def _restore(worktree: Path, head: str) -> bool:
     return same and git(worktree, "status", "--porcelain", "--untracked-files=all").stdout.strip() == b""
 
 
+OUTPUT_TAIL_BYTES = 65536
+OUTPUT_TAIL_LINES = 40
+
+
 def _run_tests(worktree: Path, argv: list[str], timeout: int) -> int | None:
-    try:
-        return subprocess.run(  # noqa: S603 - the caller's argv list, no shell
-            argv, cwd=worktree, stdin=subprocess.DEVNULL, timeout=timeout, check=False
-        ).returncode
-    except subprocess.TimeoutExpired:
-        return None
-    except OSError:
-        return 127
+    """Run the caller's command; its output is captured and shown through safo.output, never passed through raw."""
+    with tempfile.TemporaryFile() as sink:
+        try:
+            code: int | None = subprocess.run(  # noqa: S603 - the caller's argv list, no shell
+                argv, cwd=worktree, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT, timeout=timeout,
+                check=False,
+            ).returncode  # fmt: skip
+        except subprocess.TimeoutExpired:
+            code = None
+        except OSError:
+            code = 127
+        size = sink.seek(0, os.SEEK_END)
+        sink.seek(max(0, size - OUTPUT_TAIL_BYTES))
+        tail = sink.read().decode("utf-8", "replace").splitlines()[-OUTPUT_TAIL_LINES:]
+    for text in tail:
+        output.write(sys.stdout, "test> " + text[:300])
+    return code
 
 
 def _parse_argv(text: str) -> list[str] | None:
@@ -290,6 +307,20 @@ def remerge(
         output.write(out, f"refused: {reason}")
         return EXIT_REFUSED
     head = _text(git(worktree, "rev-parse", "HEAD"))
+    try:
+        return _transaction(worktree, head, test_argv, test_timeout, resolvers)
+    except subprocess.TimeoutExpired:
+        output.write(out, "a git step timed out; merge aborted")
+        try:
+            return EXIT_GIT if _restore(worktree, head) else EXIT_NOT_RESTORED
+        except subprocess.TimeoutExpired:
+            return EXIT_NOT_RESTORED
+
+
+def _transaction(
+    worktree: Path, head: str, test_argv: list[str], test_timeout: int, resolvers: Mapping[str, Resolver]
+) -> int:
+    out = sys.stdout
     if git(worktree, "fetch", "origin", "--quiet").returncode != 0:
         output.write(out, "git fetch origin failed; nothing changed")
         return EXIT_GIT

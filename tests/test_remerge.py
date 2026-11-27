@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+import pytest
 
 from gitrepo import git, make_repo
 from safo import remerge
@@ -305,3 +308,65 @@ def test_console_script_registered_and_not_a_safo_subcommand() -> None:
     assert meta["project"]["scripts"]["safo-remerge"] == "safo.remerge:entry"
     guard = (Path(__file__).parent.parent / "src" / "safo" / "guard.py").read_text()
     assert "remerge" not in guard
+
+
+def test_indented_prose_added_by_both_sides_is_not_a_continuation(tmp_path: Path) -> None:
+    page = "- [B](b.md): b page.\n"
+    ours = {"docs/home.md": HOME.replace(page, page + "  ours indented prose\n")}
+    theirs = {"docs/home.md": HOME.replace(page, page + "  theirs indented prose\n")}
+    _, work = scene(tmp_path, {"docs/home.md": HOME}, ours, theirs)
+    done = run(work)
+    assert done.returncode == remerge.EXIT_NEEDS_AGENT
+    assert clean(work)
+
+
+def test_a_list_row_with_its_continuation_still_merges(tmp_path: Path) -> None:
+    page = "- [B](b.md): b page.\n"
+    ours = {"docs/home.md": HOME.replace(page, page + "- [O](o.md): ours\n  more ours.\n")}
+    theirs = {"docs/home.md": HOME.replace(page, page + "- [T](t.md): theirs\n  more theirs.\n")}
+    _, work = scene(tmp_path, {"docs/home.md": HOME}, ours, theirs)
+    assert run(work).returncode == 0
+    assert "  more ours.\n- [T]" in (work / "docs/home.md").read_text()
+
+
+@pytest.mark.parametrize("tail", ["## v0.1.0\n\n- old\n", ""])
+def test_additions_at_the_end_of_unreleased_merge(tmp_path: Path, tail: str) -> None:
+    base = "# Changelog\n\n## Unreleased\n- base\n" + tail
+    ours = {"CHANGELOG.md": base.replace("- base\n", "- base\n- ours\n")}
+    theirs = {"CHANGELOG.md": base.replace("- base\n", "- base\n- theirs\n")}
+    _, work = scene(tmp_path, {"CHANGELOG.md": base}, ours, theirs)
+    done = run(work)
+    assert done.returncode == 0, done.stdout
+    assert "- ours\n- theirs\n" in (work / "CHANGELOG.md").read_text()
+
+
+def test_a_git_timeout_mid_merge_restores_the_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ours = {"CHANGELOG.md": CHANGELOG.replace("- base entry\n", "- base entry\n- ours\n")}
+    theirs = {"CHANGELOG.md": CHANGELOG.replace("- base entry\n", "- base entry\n- theirs\n")}
+    _, work = scene(tmp_path, {"CHANGELOG.md": CHANGELOG}, ours, theirs)
+    for key, value in IDENT.items():
+        monkeypatch.setenv(key, value)
+    head = git(work, "rev-parse", "HEAD")
+    real = remerge.git
+
+    def slow(worktree: Path, *args: str, timeout: int = 120) -> subprocess.CompletedProcess[bytes]:
+        if args[:1] == ("ls-files",):
+            raise subprocess.TimeoutExpired("git", timeout)
+        return real(worktree, *args, timeout=timeout)
+
+    monkeypatch.setattr(remerge, "git", slow)
+    code = remerge.remerge(work, [PY, "-c", "pass"], 5)
+    monkeypatch.setattr(remerge, "git", real)
+    assert code == remerge.EXIT_GIT
+    assert git(work, "rev-parse", "HEAD") == head and clean(work)
+    assert not (work / ".git" / "MERGE_HEAD").exists()
+
+
+def test_test_command_output_cannot_write_workflow_commands(tmp_path: Path) -> None:
+    _, work = scene(tmp_path, {"a.txt": "a\n"}, {"b.txt": "b\n"}, {"c.txt": "c\n"})
+    code = 'import sys; print("::error::boom"); print("::set-output name=x::1", file=sys.stderr)'
+    noisy = json.dumps([PY, "-c", code])
+    done = run(work, noisy)
+    assert done.returncode == 0
+    assert "::" not in done.stdout + done.stderr  # the helper breaks every workflow-command marker
+    assert "boom" in done.stdout

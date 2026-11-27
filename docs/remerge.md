@@ -25,15 +25,17 @@ directory (an editor, a shell, an agent) makes it refuse.
    - `CHANGELOG.md`, inside its `## Unreleased` section only.
    - `docs/home.md` and `README.md`.
 
-   Both sides must have only added lines, and every added line must be a list item (`-`, `*`, `+` or `1.`), a table row
-   (`|`) or an indented continuation of one. The added lines are kept, this branch's first, then the lines from `main`.
+   Both sides must have only added lines, and every added block must start with a list item (`-`, `*`, `+` or `1.`) or a table row
+   (`|`); indented continuation lines are accepted only after such a row inside the same block. The added lines are kept, this branch's first, then the lines from `main`.
    A line that would appear twice, a blank or prose line, a changed or removed line, a symlink, a delete on one side or
    a conflict marker sends the whole merge to an agent. The rule reads the whole file, so a branch that also reworded an
    old line of one of these files goes to an agent as well.
 4. Any other conflicted path, or any path that fails those rules: `git merge --abort`, the tree is checked back to the
    starting commit and clean, and the exit is 11 with one `needs-agent: PATH` line per conflicted path.
 5. After a clean result, runs the test command. Exit 0 commits the merge with a fixed message; any other exit, or a
-   timeout, aborts the merge and restores the tree (exit 12). The test exit code is printed as `tests: exit N`.
+   timeout, aborts the merge and restores the tree (exit 12). The test exit code is printed as `tests: exit N`. The command's output is captured and
+   its last 40 lines are shown through the safe output helper (`test> ` prefix), never passed through raw. A git step that
+   times out aborts and restores the merge too (exit 13).
 
 ## Exit codes
 
