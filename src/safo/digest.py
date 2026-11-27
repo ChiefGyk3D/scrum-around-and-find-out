@@ -425,6 +425,8 @@ def open_private_dir(path: str) -> int:
             except FileNotFoundError:
                 os.mkdir(comp, 0o700, dir_fd=fd)
                 nfd = os.open(comp, flags, dir_fd=fd)
+                # 0o700 is owner-only, the strictest mode; the rule flags the x bit a directory needs.
+                # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
                 os.fchmod(nfd, 0o700)
             except OSError as e:
                 if e.errno in (errno.ELOOP, errno.ENOTDIR):
@@ -459,6 +461,8 @@ def private_home(dirfd: int) -> None:
     try:
         if os.fstat(hfd).st_uid != os.getuid():
             raise DigestError("the private home directory is not yours")
+        # 0o700 is owner-only, the strictest mode; the rule flags the x bit a directory needs.
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         os.fchmod(hfd, 0o700)
     finally:
         os.close(hfd)
@@ -931,7 +935,9 @@ def _run(
     rc = proc.returncode
     code = EXIT_TIMEOUT if timed_out else (128 - rc if rc < 0 else rc)
     if not swept:
-        output.write(sys.stderr, "safo-digest: the process sweep could not read /proc; the run is not known to be contained")
+        output.write(
+            sys.stderr, "safo-digest: the process sweep could not read /proc; the run is not known to be contained"
+        )
         return EXIT_REFUSED, b""
     extra = (
         (f" timeout={cfg.timeout:g}s" if timed_out else "")

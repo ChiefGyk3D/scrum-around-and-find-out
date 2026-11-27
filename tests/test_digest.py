@@ -13,6 +13,7 @@ import getpass
 import importlib
 import itertools
 import os
+import re
 import shutil
 import signal
 import socket
@@ -35,9 +36,12 @@ REAL_PY = os.path.realpath(sys.executable)
 _COUNTER = itertools.count()
 
 
-def enc(code: str) -> str:
-    """Arguments may not hold a newline, so multi-line test programs travel with a marker the test tool expands."""
-    return code.replace("\n", " ;;NL;; ")
+def enc(code: str, directory: Path) -> str:
+    """Arguments may not hold a newline, so a multi-line test program is saved to a file and the argument is its path;
+    the test tool runs the file (it never runs text from its arguments)."""
+    path = directory / f"snippet{next(_COUNTER)}.snippet.py"
+    path.write_text(code)
+    return str(path)
 
 
 def _q(s: str) -> str:
@@ -84,8 +88,9 @@ class Env:
         d.mkdir(mode=0o700, exist_ok=True)
         p = d / name
         p.write_text(
-            f"#!{REAL_PY}\nimport sys, os, time\n"
-            'exec(next(a for a in sys.argv[2:] if "(" in a).replace(" ;;NL;; ", chr(10)))\n'
+            f"#!{REAL_PY}\nimport runpy, sys, os, time\n"
+            'path = next(a for a in sys.argv[2:] if a.endswith(".snippet.py"))\n'
+            'runpy.run_path(path, init_globals={"sys": sys, "os": os, "time": time})\n'
         )
         p.chmod(0o755)
         return p
@@ -122,7 +127,7 @@ class Env:
     def py(
         self, code: str, *extra: str, flags: tuple[str, ...] = (), env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[bytes]:
-        return self.digest(str(self.tool), "x", enc(code), *extra, flags=flags, env=env)
+        return self.digest(str(self.tool), "x", enc(code, self.tmp), *extra, flags=flags, env=env)
 
     def saved(self) -> list[Path]:
         return sorted(self.out.glob("*.log")) if self.out.exists() else []
@@ -493,7 +498,7 @@ def test_value_options_are_typed_and_double_dash_is_never_a_value(env: Env, args
     marker = env.tmp / "ran"
     tool = env.make_tool("tool2", "bin")
     env.cfg.write_text(f'out_dir = "{env.out}"\n' + _FAKE_OPTS % tool)
-    code = f"open({str(marker)!r}, 'w')"
+    code = enc(f"open({str(marker)!r}, 'w')", env.tmp)
     r = env.digest(str(tool), "log", code, *args)
     assert r.returncode == 125 and not marker.exists(), args
     good = env.digest(str(tool), "log", code, "-n", "5", "--author", "someone", "--oneline")
@@ -506,9 +511,12 @@ def test_options_come_first_then_end_of_options_then_positionals(env: Env) -> No
         f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"], options = ["--oneline"],'
         f" end_of_options = true }}]\n"
     )
-    r = env.digest(str(tool), "log", "print(sys.argv[2:])", "--oneline")
+    snip = enc("print(sys.argv[2:])", env.tmp)
+    r = env.digest(str(tool), "log", snip, "--oneline")
     assert r.returncode == 0
-    assert b"'--oneline', '--end-of-options', 'print(sys.argv[2:])'" in r.stdout, r.stdout
+    # the output replaces home text, so match the order and the snippet's file name, not its full path
+    want = rb"\['--oneline', '--end-of-options', '[^']*" + re.escape(Path(snip).name.encode()) + rb"'\]"
+    assert re.search(want, r.stdout), r.stdout
 
 
 @pytest.mark.parametrize("opts", ['["--"]', '{ "--" = "flag" }', '{ "-n" = "number" }', '["plain"]'])
@@ -741,7 +749,7 @@ def test_normal_exit_does_not_leave_background_descendants(env: Env) -> None:
 def test_signal_to_the_parent_kills_the_command_and_everything_it_started(env: Env, sig: int) -> None:
     pre = env.tmp / "p"
     e = {**os.environ, "PYTHONPATH": SRC, "HOME": str(env.home)}
-    argv = [PY, DRIVER, "--config", str(env.cfg), "--", str(env.tool), "x", enc(_SPAWN), str(pre)]
+    argv = [PY, DRIVER, "--config", str(env.cfg), "--", str(env.tool), "x", enc(_SPAWN, env.tmp), str(pre)]
     proc = subprocess.Popen(argv, env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603 - our own argv
     pids: list[int] = []
     try:
@@ -1250,7 +1258,7 @@ def test_a_value_must_match_in_full_not_just_up_to_a_trailing_newline(env: Env) 
         f" end_of_options = false }}]\n"
     )
     marker = env.tmp / "ran"
-    code = f"open({str(marker)!r}, 'w')"
+    code = enc(f"open({str(marker)!r}, 'w')", env.tmp)
     assert env.digest(str(tool), "log", code, "-n", "5\n").returncode == 125
     assert env.digest(str(tool), "log", code, "--author", "bob\n").returncode == 125
     assert env.digest(str(tool), "log", code, "-n", "5x").returncode == 125  # a prefix match is not a match
