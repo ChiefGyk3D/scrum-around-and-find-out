@@ -173,6 +173,7 @@ replaced are gone.
 - [Usage](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Usage)
 - [Spend report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Spend-report)
 - [Impacted tests](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Impacted-tests)
+- [Remerge](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Remerge): `safo-remerge`, merge `origin/main` into a branch and keep both sides of list conflicts
 - [Port ledger](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Port-ledger)
 - [Hooks](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Hooks)
 - [Handoff](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Handoff)

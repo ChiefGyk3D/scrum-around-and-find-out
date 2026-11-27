@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import json
 import os
 import re
 import stat
@@ -34,7 +33,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from safo import output
+from safo import bounded, output
 
 EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_NEEDS_AGENT = 0, 2, 10, 11
 EXIT_TESTS_FAILED, EXIT_GIT, EXIT_NOT_RESTORED = 12, 13, 14
@@ -289,7 +288,7 @@ def _run_tests(worktree: Path, argv: list[str], timeout: int) -> int | None:
 
 def _parse_argv(text: str) -> list[str] | None:
     try:
-        data = json.loads(text)
+        data = bounded.loads(text, 65536)
     except ValueError:
         return None
     if isinstance(data, list) and data and all(isinstance(x, str) and x and chr(0) not in x for x in data):
