@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-codex-run` (#557): harden git config handling. The repository config check is now an allowlist and the child git environment forces more settings off. Docs: `docs/codex-run.md`. Tests: `tests/test_codexrun.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
   frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
   stderr and kills and reaps the child on any exit, and a hung-child test proves the harness fails instead of hanging.

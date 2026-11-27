@@ -282,10 +282,10 @@ def hostile_script(tmp_path: Path) -> Path:
     return marker
 
 
-def test_a_hostile_fsmonitor_in_the_repository_config_never_runs(world: World, tmp_path: Path) -> None:
+def test_a_hostile_fsmonitor_in_the_repository_config_is_refused_and_never_runs(world: World, tmp_path: Path) -> None:
     marker = hostile_script(tmp_path)
     git(world.dev / "repo", "config", "core.fsmonitor", str(tmp_path / "hostile.sh"))
-    assert go(world, "implementer") == 0
+    refused(world, go(world, "implementer"))
     assert not marker.exists()
 
 
@@ -341,6 +341,135 @@ def test_hostile_config_text_is_refused_by_the_real_git_listing(tmp_path: Path, 
         codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
 
 
+def real_repo(tmp_path: Path) -> tuple[str, Path]:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    gitbin = shutil.which("git")
+    assert gitbin
+    subprocess.run([gitbin, "init", "-q", str(repo)], check=True, env={"PATH": "/usr/bin:/bin"})  # noqa: S603
+    return gitbin, repo
+
+
+def real_config(gitbin: str, repo: Path, key: str, value: str) -> None:
+    env = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+    subprocess.run([gitbin, "-C", str(repo), "config", key, value], check=True, env=env)  # noqa: S603
+
+
+# Classes of key the old denylist missed. Each one is real git config text, listed by real git, and must be refused.
+PROGRAM_KEYS = [  # keys that name a program git may start
+    "merge.x.driver",
+    "diff.x.command",
+    "diff.x.cmd",
+    "difftool.x.cmd",
+    "mergetool.x.cmd",
+    "mergetool.x.path",
+    "gpg.program",
+    "gpg.ssh.program",
+    "gpg.x509.program",
+    "gpg.openpgp.program",
+    "pager.status",
+    "sequence.editor",
+    "core.alternateRefsCommand",
+    "core.fsmonitor",
+    "core.hooksPath",
+    "core.worktree",
+    "uploadpack.packObjectsHook",
+    "remote.x.uploadpack",
+    "remote.x.vcs",
+    "submodule.x.update",
+    "sendemail.smtpserver",
+    "http.proxy",
+    "diff.external",
+    "credential.helper",
+    "protocol.ssh.allow",
+    "url.x.insteadof",
+]
+SIGNING_KEYS = ["commit.gpgsign", "tag.gpgsign", "push.gpgsign", "user.signingkey", "gpg.format"]
+UNKNOWN_KEYS = ["zzz.unknown", "core.somethingnew", "branch.x.unknownsetting", "x.y.z.w"]
+
+
+@pytest.mark.parametrize("key", PROGRAM_KEYS)
+def test_a_program_key_outside_the_allowlist_is_refused_by_real_git(tmp_path: Path, key: str) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    real_config(gitbin, repo, key, "/bin/false")
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+@pytest.mark.parametrize("key", SIGNING_KEYS)
+def test_a_signing_key_is_refused_by_real_git(tmp_path: Path, key: str) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    real_config(gitbin, repo, key, "true")
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+@pytest.mark.parametrize("key", UNKNOWN_KEYS)
+def test_an_unknown_key_is_refused_fail_closed_by_real_git(tmp_path: Path, key: str) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    real_config(gitbin, repo, key, "x")
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+INERT_KEYS = {  # the guard bites only on what it should: these stay accepted
+    "user.name": "Someone",
+    "user.email": "someone@example.invalid",
+    "remote.origin.url": "https://example.invalid/x.git",
+    "remote.origin.fetch": "+refs/heads/*:refs/remotes/origin/*",
+    "branch.main.remote": "origin",
+    "branch.main.merge": "refs/heads/main",
+    "branch.feat/x.vscode-merge-base": "origin/main",
+    "core.autocrlf": "false",
+    "init.defaultbranch": "main",
+}
+
+
+def test_an_inert_repository_config_still_passes_real_git(tmp_path: Path) -> None:
+    gitbin, repo = real_repo(tmp_path)
+    for key, value in INERT_KEYS.items():
+        real_config(gitbin, repo, key, value)
+    codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+def test_core_worktree_is_accepted_only_in_a_submodule_and_only_when_relative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(codexrun, "_git", lambda *args, **kwargs: "local\0core.worktree\n../../../sub\0")
+    monkeypatch.setattr(codexrun, "_submodule_folders", lambda *args, **kwargs: [])
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config("git", "/home/x", "/home/x/r")  # the top-level repository
+    codexrun.check_repo_config("git", "/home/x", "/home/x/r", depth=1)  # a submodule
+    monkeypatch.setattr(codexrun, "_git", lambda *args, **kwargs: "local\0core.worktree\n/etc\0")
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config("git", "/home/x", "/home/x/r", depth=1)
+
+
+def test_the_allowlist_refuses_a_key_with_a_subsection_in_an_exact_only_section() -> None:
+    assert not codexrun.config_key_is_inert("user.x.name")
+    assert not codexrun.config_key_is_inert("core.x.bare")
+    assert not codexrun.config_key_is_inert("remote.origin.uploadpack")
+    assert codexrun.config_key_is_inert("remote.a.b.url")  # a subsection may hold dots
+    assert codexrun.config_key_is_inert("USER.NAME")  # git lists keys in lower case; the check lowers them anyway
+
+
+def test_the_child_git_environment_forces_signing_and_programs_off(world: World) -> None:
+    assert go(world, "review") == 0
+    env = world.calls()[0]["env"]
+    pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))}
+    for key in ("commit.gpgsign", "tag.gpgsign", "push.gpgsign"):
+        assert pairs[key] == "false"
+    for key in (
+        "gpg.program",
+        "gpg.ssh.program",
+        "gpg.x509.program",
+        "gpg.openpgp.program",
+        "core.alternateRefsCommand",
+    ):
+        assert pairs[key] == "/bin/false"
+    assert pairs["core.pager"] == "cat" and pairs["core.sshCommand"] == "/bin/false"
+
+
 def test_a_plain_repository_passes_the_real_git_listing(tmp_path: Path) -> None:
     repo = tmp_path / "r"
     repo.mkdir()
@@ -377,7 +506,7 @@ def test_a_listing_that_does_not_parse_is_refused(monkeypatch: pytest.MonkeyPatc
 
 def test_only_the_wrappers_own_command_settings_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = "".join(f"command\0{k}\n{v}\0" for k, v in sorted(codexrun.WRAPPER_COMMAND_SETTINGS))
-    listing += "local\0core.bare\nfalse\0local\0x.novalue\0"
+    listing += "local\0core.bare\nfalse\0local\0core.symlinks\0"
     monkeypatch.setattr(codexrun, "_git", lambda *args, **kwargs: listing)
     monkeypatch.setattr(codexrun, "_submodule_folders", lambda *args, **kwargs: [])
     codexrun.check_repo_config("git", "/home/x", "/home/x/r")

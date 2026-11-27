@@ -368,11 +368,45 @@ WRAPPER_COMMAND_SETTINGS = frozenset(
     }
 )
 CONFIG_SCOPES = frozenset({"system", "global", "local", "worktree", "command", "submodule"})
-# Keys of the repository's own config that can start a program or redirect git in ways the options above do not cover
-# (a content filter named by an attributes file, a textconv, an include of another file, a URL rewrite, an alias).
-DANGEROUS_CONFIG_PREFIXES = ("filter.", "include.", "includeif.", "alias.", "url.", "credential.", "protocol.")
-DANGEROUS_CONFIG_SUFFIXES = (".textconv", ".clean", ".smudge", ".process", ".command", ".external")
-DANGEROUS_CONFIG_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.askpass", "core.gitproxy")
+# The repository's own config is checked against an ALLOWLIST: a key that is not known to be inert is refused (fail
+# closed), so a setting git adds later, or one nobody thought of, never passes. Keys are compared in lower case.
+INERT_CONFIG_KEYS = frozenset(
+    {
+        "core.repositoryformatversion",
+        "core.filemode",
+        "core.bare",
+        "core.logallrefupdates",
+        "core.ignorecase",
+        "core.precomposeunicode",
+        "core.symlinks",
+        "core.autocrlf",
+        "core.safecrlf",
+        "core.eol",
+        "extensions.worktreeconfig",
+        "extensions.objectformat",
+        "user.name",
+        "user.email",
+        "init.defaultbranch",
+        "pull.rebase",
+        "fetch.prune",
+        "submodule.active",
+    }
+)
+# Section -> names allowed under any subsection (remote.<name>.url). A subsection may hold dots.
+INERT_SUBSECTION_NAMES = {
+    "remote": frozenset({"url", "pushurl", "fetch", "tagopt", "prune"}),
+    "branch": frozenset({"remote", "merge", "rebase", "description", "pushremote", "vscode-merge-base"}),
+    "submodule": frozenset({"url", "active"}),
+}
+
+
+def config_key_is_inert(key: str) -> bool:
+    key = key.lower()
+    if key in INERT_CONFIG_KEYS:
+        return True
+    section, _, rest = key.partition(".")
+    subsection, dot, name = rest.rpartition(".")
+    return bool(dot and subsection and name in INERT_SUBSECTION_NAMES.get(section, ()))
 
 
 def _git(git: str, home: str, root: str, *args: str, errors: str = "replace") -> str:
@@ -451,7 +485,7 @@ def worktree_identity(worktree: str, home: str) -> tuple[tuple[int, int], ...]:
 MAX_SUBMODULE_DEPTH = 4
 
 
-def _check_config_keys(git: str, home: str, folder: str) -> None:
+def _check_config_keys(git: str, home: str, folder: str, submodule: bool = False) -> None:
     """Git prints `scope NUL key [NEWLINE value] NUL` per setting. Anything that does not fit that shape is refused, and
     only the wrapper's own command-scope settings are skipped."""
     listing = _git(git, home, folder, "config", "--list", "--show-scope", "-z")
@@ -467,13 +501,12 @@ def _check_config_keys(git: str, home: str, folder: str) -> None:
             raise CodexRunError("the repository config listing is not in the expected form; nothing was run")
         if scope == "command" and (key, value) in WRAPPER_COMMAND_SETTINGS:
             continue
-        if (
-            key.startswith(DANGEROUS_CONFIG_PREFIXES)
-            or key.endswith(DANGEROUS_CONFIG_SUFFIXES)
-            or key in DANGEROUS_CONFIG_KEYS
-        ):
+        if submodule and key == "core.worktree" and value and not os.path.isabs(value):
+            continue  # git itself writes a relative core.worktree into a submodule's config
+        if not config_key_is_inert(key):
             raise CodexRunError(
-                f"the repository config sets {output.line(key[:60])}, which can start a program; nothing was run"
+                f"the repository config sets {output.line(key[:60])}, which is not on the list of inert settings; "
+                "nothing was run"
             )
 
 
@@ -492,7 +525,7 @@ def check_repo_config(git: str, home: str, root: str, depth: int = 0) -> None:
     """Refuse a repository whose own config can start a program through a setting the command-line options do not
     override (a content filter, a textconv, an include, an alias). The same check runs on every submodule, nested ones
     too, because a submodule keeps its own config. Listing config runs nothing."""
-    _check_config_keys(git, home, root)
+    _check_config_keys(git, home, root, submodule=depth > 0)
     if depth >= MAX_SUBMODULE_DEPTH:
         if _submodule_folders(git, home, root):
             raise CodexRunError("the repository nests submodules too deeply to check; nothing was run")
@@ -778,6 +811,16 @@ def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch:
         ("protocol.allow", "never"),
         ("protocol.ext.allow", "never"),
         ("core.attributesFile", os.devnull),
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+        ("push.gpgsign", "false"),
+        ("gpg.program", "/bin/false"),
+        ("gpg.ssh.program", "/bin/false"),
+        ("gpg.x509.program", "/bin/false"),
+        ("gpg.openpgp.program", "/bin/false"),
+        ("core.alternateRefsCommand", "/bin/false"),
+        ("core.pager", "cat"),
+        ("core.sshCommand", "/bin/false"),
     )
     env["GIT_CONFIG_COUNT"] = str(len(forced))
     for number, (key, value) in enumerate(forced):
