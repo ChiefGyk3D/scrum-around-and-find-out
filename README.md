@@ -71,6 +71,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `agents-status` | One read-only view of what Claude, Codex and Copilot are doing |
 | `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
 | `spend` | A weekly token-spend report from the Claude transcripts, the Codex sessions and the `llm-local`, hook and `safo-draft` logs: weighted spend by pool, cache-read share, per lead turn and per merged PR, local use, agent first-turn context, and the change against a stored baseline. Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
+| `protection` | Reads a default branch's protection back (`--repo OWNER/NAME`, ten conditions) or audits every repository in the board file against the standard (`--all`: `CI green` and the declared security checks required, a pull request required, force pushes and deletion off, admin bypass and conversation resolution reported). GET only. See [`docs/protection-audit.md`](docs/protection-audit.md) |
 | `lead-curve` | How lead-session cost grows with turn position, from the Claude lead transcripts: per session the turn count, context tokens and weighted spend by turn bucket, the share past turn 200 and 400, three labeled lines on where cost climbs, and the cost of each handoff (successor measured, note estimated). Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
 | `spend-post` | Runs the `spend` report and posts a short summary (counts, weighted totals, change since the baseline) as one comment on an issue of a PRIVATE repo; refuses unless `gh api repos/OWNER/REPO --jq .private` says `true`, and the body carries no path, user or host name. No scheduler; timer and cron examples in [`docs/spend-report.md`](docs/spend-report.md) |
 | `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
@@ -196,8 +197,11 @@ replaced are gone.
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [Codex-run](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Codex-run)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
+- [safo-threads](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threads): list, reply to and resolve review threads from a dispositions file
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
+- [Cards](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Cards): `safo-cards`, Kind, Epic and Effort from a table at issue creation
 - [Board-kind](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-kind): `safo kind` and the reconcile write cap
+- [Protection-audit](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Protection-audit): `safo protection --all`, the default-branch drift audit
 - [safo-file](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/File): the idea gate and the cross-project line for filing work
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
