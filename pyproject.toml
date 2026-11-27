@@ -29,10 +29,12 @@ safo-wait-ci = "safo.ship:run_wait_ci"
 ghw = "safo.ratebudget:run"
 safo-ratebudget = "safo.ratebudget_cli:entry"
 safo-card = "safo.card_cli:entry"
+safo-cards = "safo.cards:entry"
 safo-file = "safo.idea_gate:entry"
 safo-draft = "safo.localdraft:entry"
 safo-eval = "safo.localeval:run"
 safo-eval-canary = "safo.evalcanary:run"
+safo-threads = "safo.threads:run"
 safo-runner-check = "safo.runner_check:run"
 
 [tool.setuptools.dynamic]
