@@ -148,7 +148,7 @@ project's built-in workflows). `bootstrap` prints them as a checklist and `audit
 
 Every list the loader reads has a limit, checked on the length of the raw list before any entry is read, so a hostile
 file costs one comparison. The error names the key and the limit, for example `fields: at most 100 entries`. The
-shipped boards use at most 25 repositories, 12 fields, 5 views, 15 options in a field and 27 area rules in a
+shipped boards use at most 26 repositories, 12 fields, 5 views, 15 options in a field and 27 area rules in a
 repository, well under every limit.
 
 | List | Limit |
