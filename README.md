@@ -25,6 +25,7 @@ Checked 2026-10-26 against `main` at cf53799.
 |---|---|
 | Python scaffold, CI on git-your-ship-together, repository files, `scripts/apply-baseline.sh` | Built, merged on `main` |
 | `scripts/impacted-tests.py`: which tests a set of changed files needs for a targeted run, or ALL; CI stays the judge ([`docs/impacted-tests.md`](docs/impacted-tests.md)) | Built, merged on `main` |
+| `safo-remerge` (merge `origin/main` into a branch, keep both sides of changelog, home and README list conflicts, abort and name the paths for anything else; never pushes; see [`docs/remerge.md`](docs/remerge.md)) | Built for #588; in review on a pull request, not yet on `main` |
 | GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown), `board.yaml` schema and validator | Built, merged on `main` |
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
 | `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App installation token on the App credential path, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
