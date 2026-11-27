@@ -926,6 +926,7 @@ TOP_LEVEL_COMMANDS = (
     "gemini",
     "handoff",
     "hooks",
+    "kind",
     "local",
     "outcome",
     "profiles",

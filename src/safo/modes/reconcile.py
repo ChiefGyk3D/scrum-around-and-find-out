@@ -5,7 +5,9 @@ Exit codes: 0 the board is current (or the changes were applied), 1 changes are 
 (a dry run with work pending, a rate limit that did not clear, an open card sitting in Done, a repository that
 was renamed), 2 the run cannot tell (an unknown outcome, an unreadable repository, cards the listing did not
 show, a read that contradicts itself, a payload not shaped as asked). After an unknown outcome nothing more is
-written: the run re-reads, says what it saw and stops.
+written: the run re-reads, says what it saw and stops. `--max-writes N` stops after N mutations with exit 0 and a line
+saying so (a planned stop; re-run to continue). `--no-adds` repairs cards already on the board and adds none;
+`--closed-only` writes only the Status and Done date of closed cards already on the board (#479).
 
 Each card gets one desired value per field, decided from the rules in priority order (a closed card is Done,
 then the Area rule, then `new_item_defaults`) against what the card holds now. The status, Area and Done
@@ -54,6 +56,23 @@ from safo.threatmodel import unthreatened_issues
 SHOWN = 20  # how many cards a "not attempted" line names before it counts the rest
 
 
+class WriteCap(Exception):
+    """The write budget of this run is spent (--max-writes). Not an error: the run stops and says so."""
+
+
+@dataclass
+class WriteBudget:
+    """At most `limit` mutations in one run (an add counts one, each field write counts one). None means no cap."""
+
+    limit: int | None = None
+    spent: int = 0
+
+    def take(self) -> None:
+        if self.limit is not None and self.spent >= self.limit:
+            raise WriteCap
+        self.spent += 1
+
+
 def safe(text: str) -> str:
     """Text from GitHub or from an exception, made safe for one log line (see safo.output)."""
     return output.line(text)
@@ -78,6 +97,9 @@ class Outcome:
     not_attempted: list[str] = field(default_factory=list)
     verified: list[tuple[str, str]] = field(default_factory=list)
     seen: set[str] = field(default_factory=set)  # item ids the run actually read: listed, or looked up by content
+    capped: bool = False  # the run stopped because --max-writes was spent
+    not_added: list[str] = field(default_factory=list)  # cards left off the board because of --no-adds
+    left_alone: int = 0  # open cards on the board that --closed-only did not touch
 
 
 @dataclass(frozen=True)
@@ -159,6 +181,8 @@ def initialize(
     item: ItemState,
     action: str = "reconcile",
     did: list[str] | None = None,
+    budget: WriteBudget | None = None,
+    only: frozenset[str] | None = None,
 ) -> list[str]:
     """Blank-default repair policy applies to every card; nonblank manual values are never overwritten.
 
@@ -168,6 +192,10 @@ def initialize(
     did = [] if did is None else did
     refused = frozenset(mismatched_fields(ctx.board, live))
     for write in desired_writes(ctx.board, repo, content, item, action, ctx.today, refused):
+        if only is not None and write.field not in only:
+            continue
+        if budget is not None:
+            budget.take()
         if write.kind == "select":
             applier.set_select(item.id, write.field, write.value)
         elif write.kind == "date":
@@ -219,7 +247,14 @@ def _observe(
 
 
 def apply_plan(
-    ctx: Context, live: LiveBoard, plan: Plan, work: dict[str, list[Content]], listed: list[ItemState]
+    ctx: Context,
+    live: LiveBoard,
+    plan: Plan,
+    work: dict[str, list[Content]],
+    listed: list[ItemState],
+    budget: WriteBudget | None = None,
+    no_adds: bool = False,
+    closed_only: bool = False,
 ) -> Outcome:
     out = Outcome()
     dry = ctx.client.dry_run
@@ -254,10 +289,18 @@ def apply_plan(
         previous = by_content.get(content.id)
         try:
             item = previous
+            if item is not None and closed_only and content.is_open:
+                out.left_alone += 1
+                continue
+            if item is None and (no_adds or closed_only):
+                out.not_added.append(label)
+                continue
             if item is None:
                 if not content_exists(ctx.client, content.id):
                     out.vanished.append(label)
                     continue
+                if budget is not None:
+                    budget.take()
                 item_id = applier.add(content.id)
                 added = True
                 if dry:
@@ -268,7 +311,13 @@ def apply_plan(
                     if item is None or item.id != item_id:
                         raise UnknownOutcomeError(f"{label}: the added card cannot be found on the board")
                     out.verified.append((content.id, item.id))
-            initialize(ctx, live, repo, content, item, did=did)
+            only = frozenset({ctx.board.rules.status_field, ctx.board.rules.done_date_field}) if closed_only else None
+            initialize(ctx, live, repo, content, item, did=did, budget=budget, only=only)
+        except WriteCap:
+            if did or added:
+                applied(added, label, did, stopped=True)
+            out.capped = True
+            break
         except (UnknownOutcomeError, ApiError, AuthError) as err:
             if did or added:
                 applied(added, label, did, stopped=True)
@@ -376,7 +425,17 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
                 f"{labels[content_id]} is on the board {n} times; safo repairs one card and leaves the rest"
             )
     human = needs_a_human(ctx, live, items, plan)
-    out = apply_plan(ctx, live, plan, work, items)
+    limit: int | None = getattr(args, "max_writes", None)
+    out = apply_plan(
+        ctx,
+        live,
+        plan,
+        work,
+        items,
+        WriteBudget(limit),
+        bool(getattr(args, "no_adds", False)),
+        bool(getattr(args, "closed_only", False)),
+    )
     problem = verify_adds(ctx, live, out)
     # The listing lags behind items.totalCount, and a lookup by content id covers only the work this run knows about.
     # Cards that neither reached cannot be named: the run cannot say the board is current.
@@ -388,6 +447,13 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         say(ctx, line)
     if out.not_attempted:
         say(ctx, _not_attempted(out.not_attempted))
+    if out.not_added:
+        n = len(out.not_added)
+        say(ctx, f"NOT ADDED {n} card{'s' if n != 1 else ''} not on the board (--no-adds); run without it to add them")
+    if out.left_alone:
+        say(ctx, f"LEFT ALONE {out.left_alone} open cards on the board (--closed-only)")
+    if out.capped:
+        say(ctx, f"stopped at the write cap ({limit}), re-run to continue (reconcile is idempotent)")
     for name in unreachable:
         say(ctx, f"UNREACHABLE {name}: the token cannot read it (is the App installed on it?)")
     for line in plan.anomalies:
@@ -407,6 +473,8 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         )
     if out.unknown or problem or unreachable or unread > 0:
         return EXIT_UNKNOWN
+    if out.capped:
+        return EXIT_OK  # a cap is a planned stop, said above; the next run picks up where this one ended
     if plan.anomalies or human or out.failed or (dry and out.applied):
         return EXIT_DRIFT
     if not out.applied and not out.vanished:
@@ -414,8 +482,34 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def positive(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("a whole number of at least 1") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("a whole number of at least 1")
+    return value
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    del parser
+    parser.add_argument(
+        "--max-writes",
+        type=positive,
+        default=None,
+        metavar="N",
+        help="stop cleanly after N mutations (exit 0); reconcile is idempotent, so re-run to continue",
+    )
+    parser.add_argument(
+        "--closed-only",
+        action="store_true",
+        help="phase 1: write only Status and the Done date, on closed cards already on the board (implies --no-adds)",
+    )
+    parser.add_argument(
+        "--no-adds",
+        action="store_true",
+        help="repair cards already on the board; do not add missing work (a count is printed)",
+    )
 
 
 register(Mode("reconcile", "add missing work and repair blank values", add_arguments, run))
