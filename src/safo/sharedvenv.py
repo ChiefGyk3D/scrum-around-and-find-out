@@ -36,6 +36,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NoReturn, ParamSpec, TypeVar
 
+from safo import output
+
 ROOT_ENV = "SAFO_SHARED_VENV_ROOT"
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
 MARKER = ".safo-lock-sha256"
@@ -47,6 +49,9 @@ LOCK_TIMEOUT = 900.0
 VENV_TIMEOUT = 600.0
 PIP_TIMEOUT = 1800.0
 IDENTITY_TIMEOUT = 60.0
+_PRIVATE_DIR = stat.S_IRWXU
+_PRIVATE_FILE = stat.S_IRUSR | stat.S_IWUSR
+_READ_ONLY = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 STAGE_PREFIX = ".stage-"
 BUILD_MARK_TEXT = "safo-shared-venv build 1\n"
 _MARKER_RE = re.compile(rb"[0-9a-f]{64}\n[0-9a-f]{64}\n")
@@ -110,8 +115,8 @@ def _boundary(func: Callable[_P, _R]) -> Callable[_P, _R]:
 def check_plain(value: str | os.PathLike[str]) -> None:
     """Refuse whitespace, control and non-printable characters in a caller-supplied argument, with a fixed message."""
     text = os.fspath(value)
-    if not text.isprintable() or any(ch.isspace() for ch in text):
-        raise Refused("an argument holds whitespace, control or non-printable characters")
+    if not text.isprintable() or any(ch.isspace() for ch in text) or "::" in text:
+        raise Refused("an argument holds whitespace, control or non-printable characters, or a double colon")
 
 
 def default_root(env: dict[str, str] | os._Environ[str] = os.environ) -> Path:
@@ -294,7 +299,7 @@ def _make_missing(root: Path) -> None:
         missing.append(candidate)
     for component in reversed(missing):
         with contextlib.suppress(FileExistsError):  # another agent made it first: verified like our own below
-            os.mkdir(component, 0o700)
+            os.mkdir(component, _PRIVATE_DIR)
         _after_mkdir(component)
         info = component.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
@@ -345,7 +350,7 @@ class Lock:
     def __enter__(self) -> Lock:
         deadline = time.monotonic() + self.timeout
         while True:
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, _PRIVATE_FILE)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -586,7 +591,7 @@ def _pip_failure(root: Path, key: str, status: int, output: bytes, keep: bool) -
     if not keep:
         return text + " (its output was discarded; --keep-pip-log keeps it in a private file)"
     log = root / f"pip-{key[:12]}-{secrets.token_hex(4)}.log"
-    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, _PRIVATE_FILE)
     with os.fdopen(fd, "wb") as handle:
         handle.write(output)
     return (
@@ -633,13 +638,13 @@ def build(
     try:
         try:
             mark_fd = os.open(
-                work / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+                work / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, _PRIVATE_FILE
             )
             os.write(mark_fd, BUILD_MARK_TEXT.encode())
             os.close(mark_fd)
             home = work / "home"
-            home.mkdir(mode=0o700)
-            fd = os.open(work / "req.txt", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            home.mkdir(mode=_PRIVATE_DIR)
+            fd = os.open(work / "req.txt", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _PRIVATE_FILE)
             os.write(fd, data)
             if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
                 raise Refused("the private lockfile copy does not match the checked hash")
@@ -651,7 +656,7 @@ def build(
             if code != 0:
                 raise Failed(f"the venv step failed: the interpreter exited with status {code}")
             stage_mark = os.open(
-                stage / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+                stage / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, _PRIVATE_FILE
             )
             os.write(stage_mark, BUILD_MARK_TEXT.encode())
             os.close(stage_mark)
@@ -673,7 +678,7 @@ def build(
             _seal(stage)
             marker_path = stage / MARKER
             marker_path.write_text(f"{key}\n{manifest(stage, frozenset({MARKER, BUILD_MARK}))}\n")
-            marker_path.chmod(0o444)
+            marker_path.chmod(_READ_ONLY)
             (stage / BUILD_MARK).unlink()
             stage.chmod(stage.stat().st_mode & ~0o222)  # the top is sealed BEFORE it is published
             if handle:
@@ -710,7 +715,7 @@ def _rm_at(parent_fd: int, name: str) -> None:
     """Remove a directory tree relative to an open parent descriptor: nothing is followed, so nothing can escape."""
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     try:
-        os.fchmod(fd, 0o700)  # fails for a directory that is not ours
+        os.fchmod(fd, stat.S_IRWXU)  # fails for a directory that is not ours
         for entry in os.listdir(fd):
             if stat.S_ISDIR(os.lstat(entry, dir_fd=fd).st_mode):
                 _rm_at(fd, entry)
@@ -814,7 +819,7 @@ def _poisoned(entry: Path, key: str) -> bool:
 def _touch_stamp(root: Path, key: str) -> None:
     stamp = root / f"{key}.used"
     try:
-        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, _PRIVATE_FILE)
     except OSError as exc:
         raise Refused("the use stamp cannot be opened (a symbolic link?)") from exc
     try:
@@ -848,7 +853,7 @@ def ensure(
             handle.check()
             left = _own_stale_builds(root, handle.fd)
             if left:
-                sys.stderr.write(f"safo-shared-venv: left {left} unrecognized leftover entries alone\n")
+                output.write(sys.stderr, f"safo-shared-venv: left {left} unrecognized leftover entries alone")
             final = root / key
             present = final.exists() or final.is_symlink()
             if present:
@@ -982,7 +987,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.max_age_days is None or args.max_age_days < 0 or args.lockfile is not None:
                 raise Refused("--gc takes --max-age-days N (N >= 0) and no lockfile")
             for line in gc(root, args.max_age_days, args.delete, args.lock_timeout):
-                print(line)
+                output.write(sys.stdout, line)
             return EXIT_OK
         if args.lockfile is None or args.delete or args.max_age_days is not None:
             raise Refused("usage: safo-shared-venv LOCKFILE, or --gc --max-age-days N [--delete]")
@@ -993,22 +998,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             pip_args += ["--index-url", args.index_url]
         if args.find_links:
             pip_args += ["--find-links", args.find_links]
-        print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout, args.keep_pip_log))
+        output.write(
+            sys.stdout, str(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout, args.keep_pip_log))
+        )
         return EXIT_OK
     except Refused as exc:
-        print(f"safo-shared-venv: refused: {exc}", file=sys.stderr)
+        output.write(sys.stderr, f"safo-shared-venv: refused: {exc}")
         return EXIT_REFUSED
     except Failed as exc:
-        print(f"safo-shared-venv: failed: {exc}", file=sys.stderr)
+        output.write(sys.stderr, f"safo-shared-venv: failed: {exc}")
         return EXIT_FAIL
     except KeyboardInterrupt:
-        print("safo-shared-venv: interrupted", file=sys.stderr)
+        output.write(sys.stderr, "safo-shared-venv: interrupted")
         return 130
     except Exception as exc:  # the last boundary: no traceback, no str(exc), at most the class name and an errno
-        print(
+        output.write(
+            sys.stderr,
             f"safo-shared-venv: unexpected error ({type(exc).__name__}, errno {getattr(exc, 'errno', None)}); "
             "nothing from the input is shown",
-            file=sys.stderr,
         )
         return EXIT_FAIL
 

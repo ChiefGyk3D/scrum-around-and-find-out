@@ -205,6 +205,7 @@ replaced are gone.
 - [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
 - [Rmguard](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Rmguard): `safo-rmguard`, the Bash hook that guards shared dev directories
 - [Idle check](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Idle-check): `safo-idle-check`, the Stop hook that blocks the end of a turn while workers are under the floor and ready work exists
+- [Shared venv](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Shared-venv): `safo-shared-venv`, one read-only, hash-locked venv per lockfile shared by every agent, with its trust boundary.
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
 - [Safo-threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Safo-threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)

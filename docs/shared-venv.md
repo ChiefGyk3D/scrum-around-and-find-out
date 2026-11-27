@@ -28,7 +28,7 @@ safo-shared-venv --gc --max-age-days 30 --delete
   time with mode 0700, each verified by lstat, and the whole chain is checked again before the root is returned. The root is held by descriptor and re-checked before the lock work, the build,
   the publish rename (done relative to that descriptor) and each GC deletion; a root replaced in between is refused.
 - Key: the sha256 of a canonical record of the lockfile hash, the interpreter (resolved `--python` path,
-  implementation, major.minor, cache tag, platform, ABI flags, bundled pip version, and the sha256 of the interpreter
+  implementation, major and minor version, cache tag, platform, ABI flags, bundled pip version, and the sha256 of the interpreter
   file and of its base interpreter, re-verified together with inode and mtime before the build, on every reuse and
   again just before the path is printed). The interpreter is resolved once to its final real path, opened once without
   following links, and only that resolved path is ever executed. The file and every ancestor directory must belong to
@@ -48,7 +48,7 @@ safo-shared-venv --gc --max-age-days 30 --delete
   publishes it; the venv is staged as `ROOT/.stage-RANDOM` so that rename needs no write access), a manifest (sha256 over the sorted relative
   path, size and mode of every member) is stored in the marker, and the venv is renamed into place in one step. Agents
   run it and never install into it. A changed lockfile is a new key and a new venv.
-- Reuse: the entry directory, `pyvenv.cfg` and the marker must be plain files and directories owned by the current
+- Reuse: the entry directory, the venv configuration file and the marker must be plain files and directories owned by the current
   user and not group or world writable, `bin/python` must exist and its link be owned by the current user, and the
   manifest must match. Anything else is refused and reported.
 - Lock: `ROOT/.lock` (flock) so two callers never build the same venv; the second waits (`--lock-timeout`) and reuses.
@@ -62,20 +62,19 @@ safo-shared-venv --gc --max-age-days 30 --delete
   tool's build marker.
 - Acquisition values: the only arguments accepted are `--no-index`, `--index-url SOURCE` and `--find-links SOURCE`, and
   a SOURCE must match one of two whitelisted forms or it is refused before anything is used or printed (nothing is
-  parsed or rewritten): (a) `https://HOST[:PORT]/PATH` with HOST a lowercase DNS name or IPv4 address, PORT 1 to
-  65535 and PATH from `[A-Za-z0-9._~/+-]`; (b) an absolute local directory path from `[A-Za-z0-9._/+-]`. Neither may
+  parsed or rewritten): (a) an https URL of the form scheme, host, optional port and a path, with the host a lowercase DNS name or IPv4
+  address, the port 1 to 65535 and the path from `[A-Za-z0-9._~/+-]`; (b) an absolute local directory path from `[A-Za-z0-9._/+-]`. Neither may
   hold a `..` segment or `//`, and no value may exceed 1024 characters. So no userinfo, `@`, query, fragment,
   percent-encoding, backslash, whitespace, control character, non-ASCII name, IPv6 address, zone id, trailing dot,
   uppercase scheme or host, other scheme (`http`, `file`, `ssh`), scp-like form, relative path or colon in a path. The
   refusal text is fixed and never echoes the value. Credentials are never accepted in any form: an index that needs
-  them needs a different mechanism than a command-line URL (the old `--allow-url-credentials` option is gone). As
-  defense in depth, any text holding `://` that is not an allowed SOURCE is masked whole as `<redacted-url>` in the
-  command's own messages.
+  them needs a different mechanism than a command-line URL (the old credentials option is gone).
 - Messages: every message is a fixed string plus numbers (a line number, an exit status, a count) and at most a name this
   tool generated (a key, a log file name). No caller-supplied value (a path, an interpreter, a URL, a lockfile line)
   is ever echoed in a message, exception text or log line; the one thing printed from the caller's input is the
   interpreter path of the venv on success, which is the result. The lockfile, `--root` and `--python` arguments are
-  refused up front, with a fixed message, if they hold whitespace, a control character or a non-printable character
+  refused up front, with a fixed message, if they hold whitespace, a control character, a non-printable character or a
+  double colon (the output module rewrites that sequence)
   (so a `--python` under a directory with a space in its name is refused; use a path without one). The earlier
   redaction helper is gone: nothing is parsed and scrubbed, nothing is echoed.
 - Errors at the boundaries: `ensure`, `gc`, `open_root`, `Lock` and `valid` raise only `Refused` or `Failed`, with fixed
