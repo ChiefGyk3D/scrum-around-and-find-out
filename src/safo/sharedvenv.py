@@ -47,6 +47,8 @@ VENV_TIMEOUT = 600.0
 PIP_TIMEOUT = 1800.0
 IDENTITY_TIMEOUT = 60.0
 STAGE_PREFIX = ".stage-"
+BUILD_MARK_TEXT = "safo-shared-venv build 1\n"
+_MARKER_RE = re.compile(rb"[0-9a-f]{64}\n[0-9a-f]{64}\n")
 STAGE_NAME = re.compile(r"\.stage-[A-Za-z0-9_]{8}")
 MAX_AGE_DAYS = 36500.0
 MAX_TIMEOUT = 7 * 86400.0
@@ -59,12 +61,27 @@ IDENTITY_CODE = (
 )
 
 
+def parse_marker(data: bytes) -> tuple[str, str] | None:
+    """The lock marker is exactly two 64-hex lines, each ending in a newline, and nothing else, or it is not ours."""
+    if not _MARKER_RE.fullmatch(data):
+        return None
+    key, manifest_hex = data.decode("ascii").split("\n")[:2]
+    return key, manifest_hex
+
+
 class Refused(Exception):
     """A lockfile, location or venv this command will not use."""
 
 
 class Failed(Exception):
     """A build or lock step failed."""
+
+
+def check_plain(value: str | os.PathLike[str]) -> None:
+    """Refuse whitespace, control and non-printable characters in a caller-supplied argument, with a fixed message."""
+    text = os.fspath(value)
+    if not text.isprintable() or any(ch.isspace() for ch in text):
+        raise Refused("an argument holds whitespace, control or non-printable characters")
 
 
 def default_root(env: dict[str, str] | os._Environ[str] = os.environ) -> Path:
@@ -78,10 +95,10 @@ def read_lockfile(path: Path) -> bytes:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     except OSError as exc:
-        raise Refused(f"the lockfile cannot be opened (a symbolic link or missing?): {path}") from exc
+        raise Refused("the lockfile cannot be opened (a symbolic link or missing?)") from exc
     with os.fdopen(fd, "rb") as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise Refused(f"the lockfile is not a regular file: {path}")
+            raise Refused("the lockfile is not a regular file")
         data = handle.read(MAX_LOCKFILE + 1)
     if len(data) > MAX_LOCKFILE:
         raise Refused("the lockfile is larger than 4 MiB")
@@ -125,7 +142,7 @@ def check_hashes(data: bytes) -> int:
         joined = " ".join(part for part in pending if part)
         pending = []
         if not _ENTRY.fullmatch(joined):
-            raise Refused(f"line {number}: not `name==version` with sha256 hashes: {joined[:60]!r}")
+            raise Refused(f"line {number}: not `name==version` with sha256 hashes")
         count += 1
     if pending:
         raise Refused("the lockfile ends inside a continued line")
@@ -140,7 +157,6 @@ _HTTPS = re.compile(
 )
 _LOCAL = re.compile(r"/[A-Za-z0-9._/+-]*")
 MAX_SOURCE = 1024
-REDACTED_URL = "<redacted-url>"
 _PIP_FLAGS = ("--index-url", "--find-links")
 
 
@@ -188,15 +204,6 @@ def parse_pip_args(pip_args: Sequence[str]) -> list[str]:
     return urls
 
 
-def redact(text: str) -> str:
-    """Defense in depth: mask whole any token holding `://` that is not an allowed source, in every shown text."""
-    for token in set(text.split()):
-        candidate = token.strip("'\"()<>,;")
-        if "://" in candidate and not source_is_allowed(candidate):
-            text = text.replace(candidate, REDACTED_URL)
-    return text
-
-
 def check_timeout(value: float) -> float:
     if isinstance(value, bool) or not (math.isfinite(value) and 0 <= value <= MAX_TIMEOUT):
         raise Refused(f"the lock timeout must be a finite number of seconds from 0 to {MAX_TIMEOUT:g}")
@@ -212,13 +219,13 @@ def _check_chain(path: Path, what: str) -> None:
         except FileNotFoundError:
             continue
         if stat.S_ISLNK(info.st_mode):
-            raise Refused(f"a symbolic link on the path to {what}: {ancestor}")
+            raise Refused(f"a symbolic link on the path to {what}")
         if not stat.S_ISDIR(info.st_mode):
-            raise Refused(f"a non-directory on the path to {what}: {ancestor}")
+            raise Refused(f"a non-directory on the path to {what}")
         if info.st_uid not in (os.geteuid(), 0):
-            raise Refused(f"an ancestor of {what} is owned by another user: {ancestor}")
+            raise Refused(f"an ancestor of {what} is owned by another user")
         if info.st_mode & 0o022 and not (info.st_mode & stat.S_ISVTX and info.st_uid == 0):
-            raise Refused(f"an ancestor of {what} is writable by group or others: {ancestor}")
+            raise Refused(f"an ancestor of {what} is writable by group or others")
 
 
 def _check_ancestors(root: Path) -> None:
@@ -235,9 +242,9 @@ class RootHandle:
         try:
             info = self.path.lstat()
         except OSError as exc:
-            raise Refused(f"the venv root was replaced or removed: {self.path}") from exc
+            raise Refused("the venv root was replaced or removed") from exc
         if stat.S_ISLNK(info.st_mode) or (info.st_dev, info.st_ino) != self.ident:
-            raise Refused(f"the venv root was replaced after it was validated: {self.path}")
+            raise Refused("the venv root was replaced after it was validated")
 
     def close(self) -> None:
         os.close(self.fd)
@@ -261,25 +268,26 @@ def _make_missing(root: Path) -> None:
         _after_mkdir(component)
         info = component.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-            raise Refused(f"a venv root component is not a plain directory of this user: {component}")
+            raise Refused("a venv root component is not a plain directory of this user")
 
 
 def open_root(root: Path) -> RootHandle:
+    check_plain(root)
     _check_ancestors(root)
     if root.is_symlink():
-        raise Refused(f"the venv root is a symbolic link: {root}")
+        raise Refused("the venv root is a symbolic link")
     _make_missing(root)
     info = root.lstat()
     if not stat.S_ISDIR(info.st_mode):
-        raise Refused(f"the venv root is not a directory: {root}")
+        raise Refused("the venv root is not a directory")
     if info.st_uid != os.geteuid() or info.st_mode & 0o022:
-        raise Refused(f"the venv root must be owned by this user and not writable by others: {root}")
+        raise Refused("the venv root must be owned by this user and not writable by others")
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     held = os.fstat(fd)
     handle = RootHandle(root, fd, (held.st_dev, held.st_ino))
     try:
         if (held.st_dev, held.st_ino) != (info.st_dev, info.st_ino):
-            raise Refused(f"the venv root changed while it was opened: {root}")
+            raise Refused("the venv root changed while it was opened")
         _check_ancestors(root)
         handle.check()
     except Refused:
@@ -363,15 +371,15 @@ def _exe_signature(resolved: str) -> tuple[str, int, int, int]:
     try:
         fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as exc:
-        raise Refused(f"the interpreter cannot be opened (a symbolic link or missing?): {resolved}") from exc
+        raise Refused("the interpreter cannot be opened (a symbolic link or missing?)") from exc
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):
-            raise Refused(f"the interpreter is not a regular file: {resolved}")
+            raise Refused("the interpreter is not a regular file")
         if info.st_uid not in (os.geteuid(), 0):
-            raise Refused(f"the interpreter is owned by another user: {resolved}")
+            raise Refused("the interpreter is owned by another user")
         if info.st_mode & 0o022:
-            raise Refused(f"the interpreter is writable by group or others: {resolved}")
+            raise Refused("the interpreter is writable by group or others")
         _check_chain(Path(resolved), "the interpreter")
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
     return digest, info.st_ino, info.st_dev, info.st_mtime_ns
@@ -407,7 +415,7 @@ def identity(python: str) -> tuple[str, Signature, list[object]]:
     """Resolve the interpreter once to its final real path, record its signature and run ONLY that path."""
     found = shutil.which(python)
     if found is None or not os.access(found, os.X_OK):
-        raise Refused(f"the interpreter does not exist or is not executable: {python}")
+        raise Refused("the interpreter does not exist or is not executable")
     resolved = os.path.realpath(found)
     signature = _exe_signature(resolved)
     report: list[object] | None = None
@@ -421,7 +429,7 @@ def identity(python: str) -> tuple[str, Signature, list[object]]:
     except (OSError, ValueError):
         report = None
     if not isinstance(report, list):
-        raise Refused(f"the interpreter did not report its identity: {python}")
+        raise Refused("the interpreter did not report its identity")
     return resolved, signature, report
 
 
@@ -451,7 +459,7 @@ def verify_base(venv: Path, base: str, base_signature: Signature) -> None:
     """The venv's python must still resolve to the recorded base interpreter, and that file must be unchanged."""
     real = os.path.realpath(interpreter(venv))
     if real != base:
-        raise Refused(f"the venv python resolves to {real}, not the recorded base interpreter {base}")
+        raise Refused("the venv python no longer resolves to the recorded base interpreter")
     if _exe_signature(base) != base_signature:
         raise Refused("the base interpreter changed after its identity was read")
 
@@ -465,13 +473,13 @@ def _trusted(path: Path, what: str, *, kind: str = "file") -> os.stat_result:
     info = path.lstat()
     is_link = stat.S_ISLNK(info.st_mode)
     if kind == "dir" and not stat.S_ISDIR(info.st_mode):
-        raise Refused(f"{what} is not a plain directory (a symbolic link?): {path}")
+        raise Refused(f"{what} is not a plain directory (a symbolic link?)")
     if kind == "file" and not stat.S_ISREG(info.st_mode):
-        raise Refused(f"{what} is not a plain file (a symbolic link?): {path}")
+        raise Refused(f"{what} is not a plain file (a symbolic link?)")
     if info.st_uid != os.geteuid():
-        raise Refused(f"{what} is not owned by this user: {path}")
+        raise Refused(f"{what} is not owned by this user")
     if not is_link and info.st_mode & 0o222:
-        raise Refused(f"{what} is writable: {path}")
+        raise Refused(f"{what} is writable")
     return info
 
 
@@ -489,9 +497,9 @@ def manifest(venv: Path, skip: frozenset[str] = frozenset({MARKER})) -> str:
                 continue
             info = path.lstat()
             if info.st_uid != os.geteuid():
-                raise Refused(f"a member is not owned by this user: {path}")
+                raise Refused("a member is not owned by this user")
             if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o222:
-                raise Refused(f"a member is writable: {path}")
+                raise Refused("a member is writable")
             size = 0 if stat.S_ISDIR(info.st_mode) else info.st_size
             rows.append(f"{rel}\0{size}\0{info.st_mode:o}")
     return hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest()
@@ -500,24 +508,26 @@ def manifest(venv: Path, skip: frozenset[str] = frozenset({MARKER})) -> str:
 def valid(venv: Path, key: str) -> None:
     """Refuse a venv entry that is not exactly what a finished build leaves (layout, owner, modes, marker, manifest)."""
     if not venv.is_symlink() and not venv.exists():
-        raise Refused(f"the venv entry does not exist: {venv}")
+        raise Refused("the venv entry does not exist")
     _trusted(venv, "the venv entry", kind="dir")
     marker = venv / MARKER
     _trusted(marker, "the lock marker")
-    lines = marker.read_text().split("\n")
-    if len(lines) < 2 or lines[0] != key:
-        raise Refused(f"the venv has no matching lock marker: {venv}")
+    if marker.stat().st_size > 200:
+        raise Refused("the venv has no matching lock marker")
+    parsed = parse_marker(marker.read_bytes())
+    if parsed is None or parsed[0] != key:
+        raise Refused("the venv has no matching lock marker")
     cfg = venv / "pyvenv.cfg"
     _trusted(cfg, "pyvenv.cfg")
     if re.search(r"(?im)^include-system-site-packages\s*=\s*true", cfg.read_text()):
-        raise Refused(f"the venv includes system site-packages: {venv}")
+        raise Refused("the venv includes system site-packages")
     python = interpreter(venv)
     if not python.exists():
-        raise Refused(f"the venv has no interpreter: {venv}")
+        raise Refused("the venv has no interpreter")
     if python.lstat().st_uid != os.geteuid():
-        raise Refused(f"the venv interpreter link is not owned by this user: {python}")
-    if manifest(venv) != lines[1]:
-        raise Refused(f"the venv does not match its build manifest: {venv}")
+        raise Refused("the venv interpreter link is not owned by this user")
+    if manifest(venv) != parsed[1]:
+        raise Refused("the venv does not match its build manifest")
 
 
 def _seal(venv: Path) -> None:
@@ -546,7 +556,11 @@ def _pip_failure(root: Path, key: str, status: int, output: bytes, keep: bool) -
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(output)
-    return text + f"; its full output, which may contain credentials, is in {log} (delete it after reading)"
+    return (
+        text
+        + f"; its full output, which may contain credentials, is in the venv root as {log.name}"
+        + " (delete it after reading)"
+    )
 
 
 def _describe(exc: BaseException) -> str:
@@ -555,7 +569,7 @@ def _describe(exc: BaseException) -> str:
         return f"a child process exited with status {exc.returncode}"
     if isinstance(exc, subprocess.SubprocessError):
         return type(exc).__name__
-    return f"{type(exc).__name__}: {redact(str(exc))[:200]}"
+    return f"{type(exc).__name__} (errno {getattr(exc, 'errno', None)})"
 
 
 def build(
@@ -588,6 +602,7 @@ def build(
             mark_fd = os.open(
                 work / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
             )
+            os.write(mark_fd, BUILD_MARK_TEXT.encode())
             os.close(mark_fd)
             home = work / "home"
             home.mkdir(mode=0o700)
@@ -605,6 +620,7 @@ def build(
             stage_mark = os.open(
                 stage / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
             )
+            os.write(stage_mark, BUILD_MARK_TEXT.encode())
             os.close(stage_mark)
             install = [
                 str(interpreter(stage)), "-I", "-m", "pip", "--isolated", "install", "--no-input",
@@ -657,19 +673,90 @@ def _sealed(entry: Path) -> bool:
         return False
 
 
-def _own_stale_builds(root: Path) -> None:
-    """Remove only leftovers matching this tool's random build or stage name and carrying its marker, owned by us."""
-    for entry in sorted(root.iterdir()):
-        stage = bool(STAGE_NAME.fullmatch(entry.name))
-        if not stage and not BUILD_NAME.fullmatch(entry.name):
+def _rm_at(parent_fd: int, name: str) -> None:
+    """Remove a directory tree relative to an open parent descriptor: nothing is followed, so nothing can escape."""
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    try:
+        os.fchmod(fd, 0o700)  # fails for a directory that is not ours
+        for entry in os.listdir(fd):
+            if stat.S_ISDIR(os.lstat(entry, dir_fd=fd).st_mode):
+                _rm_at(fd, entry)
+            else:
+                os.unlink(entry, dir_fd=fd)  # a symbolic link is unlinked, never followed
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _read_at(dir_fd: int, name: str, limit: int = 200) -> bytes | None:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_size > limit:
+            return None
+        return os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+
+
+def _links_expected(dir_fd: int, rel: str, stage: bool) -> bool:
+    """No symbolic link inside except a venv's own (`bin/*` and a top-level `lib64`) in a stage; nothing but plain
+    files and directories otherwise."""
+    for name in os.listdir(dir_fd):
+        info = os.lstat(name, dir_fd=dir_fd)
+        if stat.S_ISLNK(info.st_mode):
+            if not (stage and (rel == "bin" or (rel == "" and name == "lib64"))):
+                return False
+        elif stat.S_ISDIR(info.st_mode):
+            sub = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+            try:
+                if not _links_expected(sub, f"{rel}/{name}" if rel else name, stage):
+                    return False
+            finally:
+                os.close(sub)
+        elif not stat.S_ISREG(info.st_mode):
+            return False
+    return True
+
+
+def _authenticated(root_fd: int, name: str, stage: bool) -> bool:
+    """Owned by us, carrying one of this tool's exactly formed markers, and no unexpected link or special file."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+    except OSError:
+        return False
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            return False
+        build_mark = _read_at(fd, BUILD_MARK)
+        done_mark = _read_at(fd, MARKER) if stage else None
+        if build_mark != BUILD_MARK_TEXT.encode() and (done_mark is None or parse_marker(done_mark) is None):
+            return False
+        return _links_expected(fd, "", stage)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def _own_stale_builds(root: Path, root_fd: int) -> int:
+    """Remove leftovers that match this tool's random name AND authenticate; return how many were left alone."""
+    left = 0
+    for name in sorted(os.listdir(root_fd)):
+        stage = bool(STAGE_NAME.fullmatch(name))
+        if not stage and not BUILD_NAME.fullmatch(name):
             continue
-        info = entry.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        if not _authenticated(root_fd, name, stage):
+            left += 1
             continue
-        names = (BUILD_MARK, MARKER) if stage else (BUILD_MARK,)
-        if not any((entry / n).is_file() and not (entry / n).is_symlink() for n in names):
-            continue
-        _remove_tree(entry)
+        try:
+            _rm_at(root_fd, name)
+        except OSError:
+            left += 1
+    return left
 
 
 def _poisoned(entry: Path, key: str) -> bool:
@@ -682,10 +769,11 @@ def _poisoned(entry: Path, key: str) -> bool:
             return False
         if stat.S_ISLNK(minfo.st_mode) or not stat.S_ISREG(minfo.st_mode) or minfo.st_uid != os.geteuid():
             return False
-        lines = marker.read_text().split("\n")
-        manifest_line = lines[1] if len(lines) > 1 else ""
+        if minfo.st_size > 200:
+            return False
+        parsed = parse_marker(marker.read_bytes())
         # only the owner write bit (an unsealed entry of ours); group or world write is tampering, never rebuilt over
-        return info.st_mode & 0o222 == 0o200 and lines[0] == key and bool(KEY.fullmatch(manifest_line))
+        return info.st_mode & 0o222 == 0o200 and parsed is not None and parsed[0] == key
     except OSError:
         return False
 
@@ -695,11 +783,11 @@ def _touch_stamp(root: Path, key: str) -> None:
     try:
         fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as exc:
-        raise Refused(f"the use stamp cannot be opened (a symbolic link?): {stamp}") from exc
+        raise Refused("the use stamp cannot be opened (a symbolic link?)") from exc
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
-            raise Refused(f"the use stamp is not a plain single-link file of this user: {stamp}")
+            raise Refused("the use stamp is not a plain single-link file of this user")
         os.utime(fd)
     finally:
         os.close(fd)
@@ -714,6 +802,8 @@ def ensure(
     keep_pip_log: bool = False,
 ) -> Path:
     check_timeout(timeout)
+    for value in (root, lockfile, python):
+        check_plain(value)
     parse_pip_args(pip_args)
     data = read_lockfile(lockfile)
     check_hashes(data)
@@ -722,7 +812,9 @@ def ensure(
     try:
         with Lock(root, timeout):
             handle.check()
-            _own_stale_builds(root)
+            left = _own_stale_builds(root, handle.fd)
+            if left:
+                sys.stderr.write(f"safo-shared-venv: left {left} unrecognized leftover entries alone\n")
             final = root / key
             present = final.exists() or final.is_symlink()
             if present:
@@ -731,7 +823,7 @@ def ensure(
                 except Refused:
                     if not _poisoned(final, key):
                         raise
-                    _remove_tree(final)  # an unsealed entry of ours (an interrupted older publish): rebuild over it
+                    _rm_at(handle.fd, key)  # an unsealed entry of ours (an interrupted older publish): rebuild over it
                     present = False
             if not present:
                 verify_interpreter(resolved, signature)  # the file we are about to run is the one we identified
@@ -739,7 +831,7 @@ def ensure(
                 try:
                     valid(final, key)
                 except Refused:
-                    _remove_tree(final)
+                    _rm_at(handle.fd, key)
                     raise
             verify_interpreter(resolved, signature)
             verify_base(final, base, base_signature)
@@ -759,6 +851,7 @@ def check_age(value: float) -> float:
 def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float | None = None) -> list[str]:
     check_age(max_age_days)
     check_timeout(timeout)
+    check_plain(root)
     if now is not None and not math.isfinite(now):
         raise Refused("the reference time must be finite")
     now = time.time() if now is None else now
@@ -782,8 +875,8 @@ def _gc_locked(
                 continue
             try:
                 valid(entry, entry.name)  # only what this tool built, intact; anything else is reported and left
-            except (Refused, OSError) as exc:
-                lines.append(f"skipped (not a valid shared venv: {str(exc)[:80]}): {entry}")
+            except (Refused, OSError):
+                lines.append(f"skipped (not a valid shared venv): {entry.name}")
                 continue
             stamp = root / f"{entry.name}.used"
             times = [entry.stat().st_mtime]
@@ -794,12 +887,12 @@ def _gc_locked(
                 continue
             if delete:
                 handle.check()
-                _remove_tree(entry)
+                _rm_at(handle.fd, entry.name)
                 if stamp.is_file() and not stamp.is_symlink():
                     stamp.unlink()
-                lines.append(f"deleted {entry} (unused {age:.1f} days)")
+                lines.append(f"deleted {entry.name} (unused {age:.1f} days)")
             else:
-                lines.append(f"would delete {entry} (unused {age:.1f} days)")
+                lines.append(f"would delete {entry.name} (unused {age:.1f} days)")
     return lines
 
 
@@ -868,10 +961,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout, args.keep_pip_log))
         return EXIT_OK
     except Refused as exc:
-        print(f"safo-shared-venv: refused: {redact(str(exc))}", file=sys.stderr)
+        print(f"safo-shared-venv: refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     except Failed as exc:
-        print(f"safo-shared-venv: failed: {redact(str(exc))}", file=sys.stderr)
+        print(f"safo-shared-venv: failed: {exc}", file=sys.stderr)
         return EXIT_FAIL
 
 

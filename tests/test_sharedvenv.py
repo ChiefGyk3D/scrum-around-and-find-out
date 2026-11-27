@@ -212,12 +212,10 @@ def test_gc_lists_then_deletes_only_old(tmp_path: Path, wheels: Path, lock: Path
     for path in (root / old_key, root / f"{old_key}.used"):
         os.utime(path, (long_ago, long_ago))
     listing = cli("--gc", "--max-age-days", 30, "--root", root)
-    assert (
-        listing.returncode == 0 and f"would delete {root / old_key}" in listing.stdout and new_key not in listing.stdout
-    )
+    assert listing.returncode == 0 and f"would delete {old_key} " in listing.stdout and new_key not in listing.stdout
     assert (root / old_key).exists()
     done = cli("--gc", "--max-age-days", 30, "--delete", "--root", root)
-    assert done.returncode == 0 and f"deleted {root / old_key}" in done.stdout
+    assert done.returncode == 0 and f"deleted {old_key} " in done.stdout
     assert not (root / old_key).exists() and not (root / f"{old_key}.used").exists()
     assert (root / new_key).exists()
 
@@ -484,7 +482,7 @@ def test_gc_skips_entries_this_tool_did_not_build(tmp_path: Path, wheels: Path, 
     for path in (foreign, venv, root / f"{venv.name}.used"):
         os.utime(path, (long_ago, long_ago))
     done = cli("--gc", "--max-age-days", 30, "--delete", "--root", root)
-    assert done.returncode == 0 and "skipped" in done.stdout and str(foreign) in done.stdout
+    assert done.returncode == 0 and "skipped" in done.stdout and foreign.name in done.stdout
     assert (foreign / "precious.txt").read_text() == "keep"
     assert not venv.exists()  # the valid old one is deleted
 
@@ -494,7 +492,7 @@ def test_stale_cleanup_removes_only_this_tools_build_directories(tmp_path: Path,
     root.mkdir(mode=0o700)
     ours = root / ".build-Ab3dEf9h"
     ours.mkdir(mode=0o700)
-    (ours / sharedvenv.BUILD_MARK).write_text("x")
+    (ours / sharedvenv.BUILD_MARK).write_text(sharedvenv.BUILD_MARK_TEXT)
     for name in (".build-NoMark12", ".tmp-keep", ".home-keep", "notes"):
         (root / name).mkdir()
         (root / name / "f").write_text("keep")
@@ -760,21 +758,6 @@ def test_ancestor_made_writable_while_the_root_is_created_is_caught_before_retur
 # ---- round 5: fail closed ----
 
 
-@pytest.mark.parametrize(
-    "token", ["https://[::1/x?token=tok3n", "ftp:///x?token=tok3n", "file:///tok3n/w", "https://h:notaport/tok3n"]
-)
-def test_an_unparsable_url_like_token_is_masked_whole(token: str) -> None:
-    out = sharedvenv.redact(f"WARNING: Retrying after connection broken by '{token}': /simple/x/\nERROR: done")
-    assert "tok3n" not in out and "<redacted-url>" in out and "ERROR: done" in out
-
-
-def test_a_clean_url_token_without_secrets_is_left_alone() -> None:
-    assert (
-        sharedvenv.redact("Looking in indexes: https://example.invalid/simple")
-        == "Looking in indexes: https://example.invalid/simple"
-    )
-
-
 # ---- round 6: whitelist grammar for index and links values ----
 
 VALID_SOURCES = [
@@ -1019,7 +1002,7 @@ def test_keep_pip_log_writes_a_private_file_and_still_prints_none_of_it(
     assert logs[0].stat().st_mode & 0o777 == 0o600
     assert re.fullmatch(r"pip-[0-9a-f]{12}-[0-9a-f]{8}\.log", logs[0].name)
     assert "PLANTED-MULTILINE-cred" in logs[0].read_text()
-    assert str(logs[0]) in done.stderr and "may contain credentials" in done.stderr
+    assert logs[0].name in done.stderr and str(logs[0]) not in done.stderr and "may contain credentials" in done.stderr
 
 
 def test_output_of_the_venv_step_is_not_relayed_either(tmp_path: Path, wheels: Path, lock: Path) -> None:
@@ -1225,9 +1208,239 @@ def test_stale_stage_directories_are_removed_only_with_our_markers(tmp_path: Pat
     root.mkdir(mode=0o700)
     ours = root / ".stage-Aa1Bb2Cc"
     ours.mkdir(mode=0o700)
-    (ours / sharedvenv.BUILD_MARK).write_text("x")
+    (ours / sharedvenv.BUILD_MARK).write_text(sharedvenv.BUILD_MARK_TEXT)
     bare = root / ".stage-Zz9yXw8v"
     bare.mkdir()
     (bare / "f").write_text("keep")
     assert cli(*build_args(lock, root, wheels)).returncode == 0
     assert not ours.exists() and (bare / "f").exists()
+
+
+# ---- round 9: never echo caller values; authenticated cleanup; exact marker ----
+
+SECRET = "PLANTED-ARG-secret"
+PATH_SECRET = "PLANTED-PATH-secret"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [f"x\n{SECRET}", f"x\t{SECRET}", f"x {SECRET}", f"x\r{SECRET}", f"x\x0b{SECRET}", f"x\x1b[31m{SECRET}"],
+)
+def test_arguments_with_whitespace_or_control_characters_are_refused_with_a_fixed_message(
+    tmp_path: Path, wheels: Path, lock: Path, bad: str
+) -> None:
+    for argv in (
+        [bad, "--root", tmp_path / "root", "--no-index"],
+        [lock, "--root", bad, "--no-index"],
+        [lock, "--root", tmp_path / "root", "--no-index", "--python", bad],
+        ["--gc", "--max-age-days", "1", "--root", bad],
+    ):
+        done = cli(*argv)
+        assert done.returncode == 2 and SECRET not in done.stdout + done.stderr, argv
+        assert "whitespace, control or non-printable" in done.stderr
+
+
+def test_the_function_boundary_refuses_the_same_characters(tmp_path: Path, lock: Path) -> None:
+    bad = f"x\n{SECRET}"
+    with pytest.raises(sharedvenv.Refused) as caught:
+        sharedvenv.ensure(Path(bad), lock, sys.executable, [], 5)
+    assert SECRET not in str(caught.value)
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.gc(Path(bad), 1, False, 5)
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.open_root(Path(bad))
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.ensure(tmp_path / "root", Path(bad), sys.executable, [], 5)
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.ensure(tmp_path / "root", lock, bad, [], 5)
+
+
+def _scenarios(tmp_path: Path, wheels: Path, lock: Path) -> dict[str, list[object]]:
+    base = tmp_path / f"{PATH_SECRET}-base"
+    base.mkdir(mode=0o700)
+    root = base / "venvs"
+    ok = [lock, "--no-index", "--find-links", wheels]
+    out: dict[str, list[object]] = {}
+    out["lockfile missing"] = [base / "missing.txt", "--root", root, "--no-index"]
+    link = base / f"{PATH_SECRET}-link.txt"
+    link.symlink_to(lock)
+    out["lockfile symlink"] = [link, "--root", root, "--no-index"]
+    bad = base / "bad.txt"
+    bad.write_text(f"tinydemo==1.0 {PATH_SECRET}\n")
+    out["lockfile grammar"] = [bad, "--root", root, "--no-index"]
+    afile = base / f"{PATH_SECRET}-rootfile"
+    afile.write_text("x")
+    out["root is a file"] = [*ok, "--root", afile]
+    rlink = base / f"{PATH_SECRET}-rootlink"
+    rlink.symlink_to(base)
+    out["root symlink"] = [*ok, "--root", rlink]
+    out["ancestor symlink"] = [*ok, "--root", rlink / "root"]
+    open_dir = base / f"{PATH_SECRET}-open"
+    open_dir.mkdir()
+    open_dir.chmod(0o777)
+    out["ancestor writable"] = [*ok, "--root", open_dir / "root"]
+    wroot = base / f"{PATH_SECRET}-wroot"
+    wroot.mkdir()
+    wroot.chmod(0o777)
+    out["root writable"] = [*ok, "--root", wroot]
+    out["python missing"] = [*ok, "--root", root, "--python", f"/does/not/exist/{PATH_SECRET}"]
+    wpy = shim(base / f"{PATH_SECRET}-py.sh", "true")
+    wpy.chmod(0o775)
+    out["python writable"] = [*ok, "--root", root, "--python", wpy]
+    idfail = shim(base / f"{PATH_SECRET}-idfail.sh", 'if [ "$VENV_STEP" = 0 ]; then exit 1; fi')
+    out["identity fails"] = [*ok, "--root", root, "--python", idfail]
+    out["gc on a file"] = ["--gc", "--max-age-days", "1", "--root", afile]
+    return out
+
+
+def test_no_caller_supplied_path_is_echoed_by_any_failure_path(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    for name, argv in _scenarios(tmp_path, wheels, lock).items():
+        done = cli(*argv)
+        assert done.returncode in (1, 2), (name, done.returncode, done.stderr)
+        assert PATH_SECRET not in done.stdout + done.stderr, (name, done.stderr)
+
+
+def test_entry_level_failures_do_not_echo_the_root_either(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    base = tmp_path / f"{PATH_SECRET}-base"
+    base.mkdir(mode=0o700)
+    root, venv = build_in(base, wheels, lock)
+    stamp = root / f"{venv.name}.used"
+    outputs = []
+    venv.chmod(0o575)
+    outputs.append(cli(*build_args(lock, root, wheels)))  # group-writable top: refused
+    venv.chmod(0o555)
+    stamp.unlink()
+    os.link(lock, stamp)
+    outputs.append(cli(*build_args(lock, root, wheels)))  # hard-linked use stamp
+    stamp.unlink()
+    foreign = root / ("c" * 64)
+    foreign.mkdir()
+    (venv / sharedvenv.MARKER).chmod(0o644)
+    outputs.append(cli(*build_args(lock, root, wheels)))  # writable marker
+    outputs.append(cli("--gc", "--max-age-days", "0", "--root", root))  # listing with a skipped foreign entry
+    for done in outputs:
+        assert PATH_SECRET not in done.stdout + done.stderr, done.stderr
+    assert outputs[-1].returncode == 0 and "skipped" in outputs[-1].stdout
+
+
+def test_a_kept_pip_log_is_named_without_the_root_path(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    base = tmp_path / f"{PATH_SECRET}-base"
+    base.mkdir(mode=0o700)
+    done = cli(*build_args(lock, base / "venvs", wheels), "--python", fake_pip_shim(tmp_path, 1), "--keep-pip-log")
+    assert done.returncode == 1 and PATH_SECRET not in done.stderr
+    assert re.search(r"pip-[0-9a-f]{12}-[0-9a-f]{8}\.log", done.stderr)
+
+
+def test_the_redaction_helpers_are_gone() -> None:
+    assert not hasattr(sharedvenv, "redact") and not hasattr(sharedvenv, "REDACTED_URL")
+
+
+def _marker(key: str, manifest: str) -> str:
+    return f"{key}\n{manifest}\n"
+
+
+def _stale_root(tmp_path: Path) -> Path:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    return root
+
+
+def _good_build_dir(root: Path, name: str) -> Path:
+    d = root / name
+    d.mkdir(mode=0o700)
+    (d / sharedvenv.BUILD_MARK).write_text(sharedvenv.BUILD_MARK_TEXT)
+    return d
+
+
+def test_stale_cleanup_removes_an_authenticated_leftover(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root = _stale_root(tmp_path)
+    ours = _good_build_dir(root, ".build-Ab3dEf9h")
+    stage = root / ".stage-Cc4dDd5e"
+    stage.mkdir(mode=0o700)
+    (stage / sharedvenv.MARKER).write_text(_marker("a" * 64, "b" * 64))
+    (stage / "bin").mkdir()
+    (stage / "bin" / "python").symlink_to("/usr/bin/true")  # a venv's own link, allowed under bin
+    assert cli(*build_args(lock, root, wheels)).returncode == 0
+    assert not ours.exists() and not stage.exists()
+
+
+def test_stale_cleanup_leaves_unauthenticated_leftovers_alone_and_says_how_many(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    root = _stale_root(tmp_path)
+    no_marker = root / ".build-NoMark12"
+    no_marker.mkdir()
+    (no_marker / "f").write_text("keep")
+    forged = root / ".build-Forged12"
+    forged.mkdir()
+    (forged / sharedvenv.BUILD_MARK).write_text("forged\n")
+    forged_stage = root / ".stage-Forged34"
+    forged_stage.mkdir()
+    (forged_stage / sharedvenv.MARKER).write_text("not-hex\nnot-hex\n")
+    with_link = _good_build_dir(root, ".build-Linked12")
+    (with_link / "evil").symlink_to("/etc")
+    stage_link = root / ".stage-Linked34"
+    stage_link.mkdir(mode=0o700)
+    (stage_link / sharedvenv.MARKER).write_text(_marker("a" * 64, "b" * 64))
+    (stage_link / "lib").symlink_to("/etc")  # a link outside bin/ and lib64
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 0, done.stderr
+    for left in (no_marker, forged, forged_stage, with_link, stage_link):
+        assert left.exists(), left
+    assert (no_marker / "f").read_text() == "keep" and Path("/etc").is_dir()
+    assert re.search(r"left 5 unrecognized leftover", done.stderr)
+
+
+def test_stale_cleanup_leaves_entries_of_another_owner_alone(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _stale_root(tmp_path)
+    mine = _good_build_dir(root, ".build-Ab3dEf9h")
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)  # every entry now looks foreign
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert sharedvenv._own_stale_builds(root, fd) == 1
+    finally:
+        os.close(fd)
+    assert mine.exists()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{k}\n{m}\nextra\n",
+        "{k}\n{m}\n\n",
+        "{k}\n{m}",
+        "{k}\n{m}\n x",
+        "{k}\n{m}\r\n",
+        "{k}\n{m}\n\x00",
+        "{k}\x00\n{m}\n",
+        "{k}\n" + "b" * 63 + "\n",
+        "{k} \n{m}\n",
+        "\n{k}\n{m}\n",
+    ],
+)
+def test_a_marker_with_any_extra_byte_or_line_is_not_ours(text: str) -> None:
+    key, man = "a" * 64, "b" * 64
+    assert sharedvenv.parse_marker(text.format(k=key, m=man).encode()) is None
+    assert sharedvenv.parse_marker(f"{key}\n{man}\n".encode()) == (key, man)
+
+
+def test_rebuild_over_and_reuse_demand_the_exact_marker(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    marker = venv / sharedvenv.MARKER
+    good = marker.read_text()
+    for bad in (good + "extra\n", good + "\x00", good.rstrip("\n"), good + "\n"):
+        venv.chmod(0o755)
+        marker.chmod(0o644)
+        marker.write_text(bad)
+        marker.chmod(0o444)
+        done = cli(*build_args(lock, root, wheels))
+        assert done.returncode == 2, repr(bad)  # neither reused nor rebuilt over
+        assert venv.exists()
+    venv.chmod(0o755)
+    marker.chmod(0o644)
+    marker.write_text(good)
+    marker.chmod(0o444)
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 0 and not venv.stat().st_mode & 0o222

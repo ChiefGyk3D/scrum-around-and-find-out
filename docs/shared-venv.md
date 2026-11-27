@@ -71,6 +71,13 @@ safo-shared-venv --gc --max-age-days 30 --delete
   them needs a different mechanism than a command-line URL (the old `--allow-url-credentials` option is gone). As
   defense in depth, any text holding `://` that is not an allowed SOURCE is masked whole as `<redacted-url>` in the
   command's own messages.
+- Messages: every message is a fixed string plus numbers (a line number, an exit status, a count) and at most a name this
+  tool generated (a key, a log file name). No caller-supplied value (a path, an interpreter, a URL, a lockfile line)
+  is ever echoed in a message, exception text or log line; the one thing printed from the caller's input is the
+  interpreter path of the venv on success, which is the result. The lockfile, `--root` and `--python` arguments are
+  refused up front, with a fixed message, if they hold whitespace, a control character or a non-printable character
+  (so a `--python` under a directory with a space in its name is refused; use a path without one). The earlier
+  redaction helper is gone: nothing is parsed and scrubbed, nothing is echoed.
 - Child output: the output of pip and of the venv step is never relayed (credentials can appear in any shape, for
   example a redirect line or a bare token). On success nothing from pip is printed. On failure only a fixed message
   with pip's exit status and the build step is printed. With `--keep-pip-log`, a failed install's full output is
@@ -82,9 +89,14 @@ safo-shared-venv --gc --max-age-days 30 --delete
 - Age and timeout: `--max-age-days` must be finite, from 0 to 36500, and `--lock-timeout` finite, from 0 to 7 days, checked in `ensure`, `gc` and `Lock` themselves, not only on the command line;
   anything else (nan, inf, negative, absurd) is refused and nothing is deleted. GC also never selects an entry whose
   age does not compare as at least the threshold.
-- Interrupted builds: a leftover `.build-RANDOM` or `.stage-RANDOM` is removed only when it carries this tool's marker
-  and is owned by you. An entry named by a key whose top directory has only the owner write bit and holds this
-  tool's complete marker is rebuilt over; group or world write, a missing or foreign marker, or any other mismatch is
+- Interrupted builds: a leftover `.build-RANDOM` or `.stage-RANDOM` is removed only when it matches the random name,
+  is owned by you, carries one of this tool's exactly formed markers (the build marker text, or for a stage the
+  complete lock marker) and holds no symbolic link or special file (a stage may hold a venv's own links under `bin/`
+  and a top-level `lib64`, which are unlinked and never followed). The removal is done relative to the root
+  descriptor, so it cannot leave the root. Anything else is left alone and counted in one fixed line on stderr.
+  Deviation noted: a stage cannot be required to hold no symbolic link at all, because every venv has some. An entry named by a key whose top directory has only the owner write bit and holds this
+  tool's complete marker is rebuilt over (the marker is exactly two 64-hex lines, each ending in a newline, nothing
+  after; any extra byte, NUL or line makes it not ours); group or world write, a missing or foreign marker, or any other mismatch is
   refused and never deleted.
 - Writable entries: reuse validation refuses a venv, marker or member with any write bit (except the rebuild case
   above).
