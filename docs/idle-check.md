@@ -33,6 +33,13 @@ lead continue). `stop_hook_active: true` always allows, so one block cannot loop
    opt-in (`include_unreviewed`, default off): it listed 120 items on 2026-11-27, which is noise. An agent
    names a PR when `#N`, `pull/N`, `PR N` or the head branch appears in the first 4 KB of its transcript (subagents)
    or in its command line (processes).
+   Only PRs from a trusted author count (#601): the repo owner (the part of `owner/repo` before the slash), a login in
+   `trusted_authors`, and a PR from the same repository (`isCrossRepository` false). A fork PR is skipped unless
+   `allow_forks` is on; the fork flag must be a real true or false either way. Bots count only when listed by their
+   exact login, which keeps the prefix gh gives apps (`app/dependabot`); an app is never the owner. Case is ignored. `gh pr list` has no `authorAssociation` field, so association is not used. Fails closed: a missing or
+   unreadable author or fork flag is not trusted, and an old cache entry without an author is not trusted. A skipped
+   PR is counted in the log field `skipped_untrusted` (failing or conflicting PRs only) and is never listed in the
+   reason, so an outsider cannot steer dispatch with a PR.
 2. Unstarted QUEUE.md items: a `READY:` line (items split on `;`), and rows of the dependency table
    (`| item | depends on | state |`) whose state is ready (or blank, todo, queued) and whose dependency cell is `none`
    or blank, or whose state says `ready`. Rows that are running, blocked, held, done or merged never count.
@@ -65,6 +72,8 @@ notice. It never stays silent on a failure, and never blocks on a guess.
 | `window_seconds` | `SAFO_IDLE_WINDOW` | 300 |
 | `exempt` (`owner/repo#N` list) | | none |
 | `include_unreviewed` | `SAFO_IDLE_UNREVIEWED=1` | off |
+| `trusted_authors` (login list) | `SAFO_IDLE_TRUSTED` (comma list) | none; the repo owner is always trusted |
+| `allow_forks` | `SAFO_IDLE_FORKS=1` | off |
 | `cache_seconds` | `SAFO_IDLE_CACHE` (0 turns it off) | 60 |
 | `mode` | `SAFO_IDLE_MODE` | `block` (`warn` prints the same text as a `systemMessage` and never blocks) |
 
@@ -78,7 +87,7 @@ running count are always read live; only the gh answers are cached.
 ## Measure
 
 Every run appends one JSON row to `~/.local/share/safo-dev/idle-check.log` (override `SAFO_IDLE_LOG`):
-`ts, decision (allow|block|degraded|active), running, ready, floor, session`. `safo-idle-check --stats` prints blocks
+`ts, decision (allow|block|degraded|active), running, ready, skipped_untrusted, floor, session`. `safo-idle-check --stats` prints blocks
 per day, allows and degraded runs. Target: blocks per day trend to 0 while ready-and-not-running stays 0 at turn end.
 
 ## Install (the owner applies it)
