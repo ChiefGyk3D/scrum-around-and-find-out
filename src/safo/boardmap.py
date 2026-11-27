@@ -51,6 +51,14 @@ class MapMiss(ConfigError):
     """The card is not in the map. The fix is to map it (one read), not to list the board."""
 
 
+class UnknownOption(ConfigError):
+    """A single-select value is neither an option id nor a name the map knows; `field` says which field."""
+
+    def __init__(self, message: str, field: str) -> None:
+        super().__init__(message)
+        self.field = field
+
+
 @dataclass
 class Field:
     id: int
@@ -243,7 +251,9 @@ def _value(spec: Field, name: str, value: str | None) -> str | None:
     if OPTION_ID.fullmatch(value):
         return value
     known = ", ".join(sorted(spec.options)) or "none learned"
-    raise ConfigError(f"{name}: {value!r} is not an option id or a known option name ({known}); learn it with --option")
+    raise UnknownOption(
+        f"{name}: {value!r} is not an option id or a known option name ({known}); learn it with --option", name
+    )
 
 
 def build_request(board: BoardMap, key: str, edits: Mapping[str, str | None]) -> Request:
@@ -266,17 +276,109 @@ def build_request(board: BoardMap, key: str, edits: Mapping[str, str | None]) ->
     return Request("PATCH", f"{board.project}/items/{item_id}", json.dumps({"fields": body}, separators=(",", ":")))
 
 
-def edit_card(board: BoardMap, transport: Transport, key: str, edits: Mapping[str, str | None]) -> None:
-    """One PATCH. A refusal is an ApiError; a transport failure after the send is an unknown outcome, never replayed."""
-    request = build_request(board, key, edits)
+_STALE_OPTION = ("not a valid option", "invalid_field_values")
+
+
+def _is_stale_option(reply: Reply) -> bool:
+    """True when GitHub refused the edit because an option id is not (or no longer) one of the column's."""
+    text = reply.error.lower()
+    return any(marker in text for marker in _STALE_OPTION)
+
+
+def _option_name(raw: Any) -> str | None:
+    """An option's name from the REST field list: a string, or an object with `raw` (read defensively)."""
+    if isinstance(raw, dict):
+        raw = raw.get("raw")
+    return raw if isinstance(raw, str) and raw else None
+
+
+def live_options(board: BoardMap, transport: Transport, field_name: str) -> dict[str, str]:
+    """The live option names and ids of one single-select field: one small REST read of the project's field list.
+
+    Never lists items. A field that is missing, or an answer of the wrong shape, is an error and changes nothing.
+    Options whose id is not 8 lowercase hex digits are left out (the map could not use them).
+    """
+    spec = board.fields[field_name]
+    listing = _json_list(transport("GET", f"{board.project}/fields?per_page=100", None), f"{field_name} options")
+    entry = next(
+        (e for e in listing if isinstance(e, dict) and (e.get("id") == spec.id or e.get("name") == field_name)), None
+    )
+    options = entry.get("options") if entry is not None else None
+    if not isinstance(options, list):
+        raise MalformedDataError(f"{field_name}: the live field list has no options for this field")
+    live: dict[str, str] = {}
+    for option in options:
+        name = _option_name(option.get("name")) if isinstance(option, dict) else None
+        option_id = option.get("id") if isinstance(option, dict) else None
+        if name is not None and isinstance(option_id, str) and OPTION_ID.fullmatch(option_id):
+            live[name] = option_id
+    if not live:
+        raise MalformedDataError(f"{field_name}: the live field list has no usable options")
+    return live
+
+
+def _named_selects(board: BoardMap, edits: Mapping[str, str | None]) -> list[str]:
+    """Single-select fields edited by option NAME (a raw option id would only fail the same way again)."""
+    return [
+        n
+        for n, v in edits.items()
+        if v is not None
+        and n in board.fields
+        and board.fields[n].kind == "single_select"
+        and not OPTION_ID.fullmatch(v)
+    ]
+
+
+def _refresh(board: BoardMap, transport: Transport, names: list[str]) -> None:
+    for name in names:
+        board.fields[name].options = live_options(board, transport, name)
+
+
+def _send(request: Request, transport: Transport, key: str) -> Reply:
     try:
-        reply = transport(request.method, request.path, request.body)
+        return transport(request.method, request.path, request.body)
     except (OSError, TimeoutError) as problem:
         raise UnknownOutcomeError(
             f"{key}: the edit may or may not have been applied; re-read the card", problem
         ) from problem
+
+
+def edit_card(board: BoardMap, transport: Transport, key: str, edits: Mapping[str, str | None]) -> list[str]:
+    """One PATCH, and at most one refresh of the option ids (then at most one more PATCH). Returns what was refreshed.
+
+    A stale option id shows as an unknown option NAME in the map, or as GitHub's 400 "not a valid option". Either
+    way each single-select field edited by name is re-read once from the live field list (never the items), the
+    map is updated, and the edit is tried again. A name still unknown after the refresh fails closed with the live
+    names; a second refusal is an ApiError. A refusal is never replayed more than that; a transport failure after
+    the send is an unknown outcome and is never replayed at all.
+    """
+    refreshed: list[str] = []
+    try:
+        request = build_request(board, key, edits)
+    except UnknownOption:
+        names = _named_selects(board, edits)
+        _refresh(board, transport, names)
+        refreshed = names
+        try:
+            request = build_request(board, key, edits)
+        except UnknownOption as problem:
+            live = ", ".join(sorted(board.fields[problem.field].options))
+            raise ConfigError(
+                f"{problem.field}: no such option after refreshing from the live field list (live options: {live})"
+            ) from problem
+    reply = _send(request, transport, key)
+    if not reply.ok and not refreshed and _is_stale_option(reply):
+        names = _named_selects(board, edits)
+        if names:
+            _refresh(board, transport, names)
+            refreshed = names
+            retry = build_request(board, key, edits)
+            if retry.body != request.body:
+                reply = _send(retry, transport, key)
     if not reply.ok:
-        raise ApiError(f"{key}: GitHub refused the edit ({reply.error or 'no detail'})")
+        note = f" (options of {', '.join(refreshed)} were refreshed once)" if refreshed else ""
+        raise ApiError(f"{key}: GitHub refused the edit ({reply.error or 'no detail'}){note}")
+    return refreshed
 
 
 # finding an item id, once

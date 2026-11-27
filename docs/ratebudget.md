@@ -70,6 +70,13 @@ A single-select value is an option name from the map or an 8-hex-digit option id
 `--option Status:Done=<id>`. `Field=` clears the field. An unknown outcome (timeout after the send) is reported and
 never repeated. Unverified: the live shape of the REST items listing and the Epic field's kind (`text` in the map).
 
+Stale option ids (#500): when GitHub answers 400 "Value is not a valid option for this column", or an option name is
+not in the map, `safo-card` reads that field's live options once (`GET users/<owner>/projectsV2/<n>/fields`, never the
+items), updates `boardmap.json`, retries the edit once and prints one line saying so. A name still missing after the
+refresh fails closed and lists the live names; a second refusal is an error, with no third attempt. A value given as a
+raw option id is never refreshed. `--dry-run` never refreshes: it reports that a real run would. Unverified: the live
+shape of the fields listing (option `name` as a string or `{"raw": ...}`); a different shape is one error, no write.
+
 ## Not done here
 
 `safo ratebudget` and `safo card` are subcommands that run the same code as the `safo-ratebudget` and `safo-card`
