@@ -211,6 +211,27 @@ that model unreachable for the run. The baseline is read with a size cap (64 KiB
 duplicate keys and non-finite numbers refused, and scores must be numbers from 0 to 1. The baseline also stores a digest of the exact fixtures it was measured on; a run on a different `--tasks` selection or an edited fixture set is refused (exit 2) until the baseline is updated. `--update-baseline` writes a
 new file at mode 0600 by replace, never through a symlink, and only when every model produced a score.
 
+### Truncation probe (#569)
+
+The digest model silently cuts a long prompt to 4,098 tokens once it passes its 8K loaded context (#490). A server
+setting change would move that cut without any error, so the canary can check it:
+
+```sh
+safo-eval-canary --truncation-probe             # the scoring run, then the probe
+safo-eval-canary --probe-only                   # just the probe; no baseline is read or written
+safo-eval-canary --probe-only --expected-cap 8192
+```
+
+The probe sends one prose prompt of about 30,000 characters (well past 8K tokens), with a fresh random first line so a
+server prefix cache cannot hide a cut, to the `safo-draft` digest model only. It goes through `llm-local` without
+`--num-ctx` (`llm-local` sends the context the model is loaded with) and with its truncation guard on; `--force-size`
+only lifts the route cap that would refuse the prompt. `llm-local` exit 3 is the expected result here: its one stderr
+line, which must match as a whole line, carries the token count the server reported. That count equal to
+`--expected-cap` (default 4098) is `ok`. A different count, or no cut at all, is an alert (exit 1): the setting changed,
+in either direction. After an accepted change, pass the new count as `--expected-cap`. Any other failure is
+unreachable (exit 3) and a busy queue is retried, then exit 75. With the scoring run the exit code is the worst of the
+two in the order 3, 75, 1, 2. `--truncation-probe` cannot be combined with `--update-baseline`. Nothing is stored.
+
 It is a separate entry point (`safo-eval-canary`), not `safo eval-canary`: a new `safo` subcommand needs a line in the
 guard's `TOP_LEVEL_COMMANDS` tuple, which is guard code and waits for the owner's OK (same as `safo-wait-ci`).
 
