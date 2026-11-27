@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-threads` (#587, epic #518): `list REPO PR` shows unresolved, current review threads grouped by file; `apply REPO PR FILE` replies by REST and resolves by one GraphQL mutation per thread from a strict dispositions file (unknown ids, empty or over-long bodies, duplicate ids refused before any write; bounded calls; exit codes 0, 2, 3, 4, 5). Separate entry point, `TOP_LEVEL_COMMANDS` untouched. Docs: `docs/threads.md`. Tests: `tests/test_threads.py`.
 - `safo-eval-canary` (#540, epic #527): runs the safo-eval fixtures on the two configured local models (read from `safo.localdraft`), compares each pass rate with a stored baseline and exits 1 with one `ALERT` line when a score drops by more than `--threshold` (default 0.10). A busy queue is retried (exit 75 if it stays busy), an unreachable server is reported (exit 3) and never scored as zero, a hostile baseline (symlink, FIFO, oversized, malformed, wrong types) is exit 2, and the baseline is written only with `--update-baseline`. Separate entry point because a `safo` subcommand needs the guard's `TOP_LEVEL_COMMANDS`. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
 - `safo-codex-run` (#557): harden git config handling. The repository config check is now an allowlist and the child git environment forces more settings off. Docs: `docs/codex-run.md`. Tests: `tests/test_codexrun.py`.
 - Update the sister-project rule now that the portable edition is public (#573)
