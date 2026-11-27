@@ -355,12 +355,15 @@ def test_a_store_that_blocks_cannot_hold_the_hook_past_its_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     release = threading.Event()
-    monkeypatch.setattr(tracking, "cache_store", lambda *a, **k: release.wait(30))
-    monkeypatch.setattr(hooks_mod, "GUARD_TIMEOUT_SECONDS", 3)
+    monkeypatch.setattr(tracking, "cache_store", lambda *a, **k: release.wait(120))
+    # 8 s, not 3: a starved runner reached a 3 s limit before the verdict was even ready
+    monkeypatch.setattr(hooks_mod, "GUARD_TIMEOUT_SECONDS", 8)
     began = time.monotonic()
     try:
         out, _log = guard_once(_private_home, agents, tmp_path)
     finally:
         release.set()
     assert out == "", "the allow was delivered"
-    assert time.monotonic() - began < 3.5, "the blocked store was cut off at the hook's own limit"
+    # the store blocks for 120 s on an event and the limit is 8 s: a bound of 60 s separates a cut-off from a full wait
+    # and leaves a loaded runner room (the hook's limit itself is a wall-clock deadline by design)
+    assert time.monotonic() - began < 60, "the blocked store was cut off at the hook's own limit"

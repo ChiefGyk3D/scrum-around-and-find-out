@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 import safo.geminibrief as _geminibrief
+from cputime import cpu_bound
 from safo.geminibrief import GEMINI_PAID, _expansion_at_command, findings
 
 _GEMINIBRIEF = _geminibrief.__file__
@@ -221,9 +222,8 @@ def test_a_brief_with_escapes_is_relevant_with_no_visible_gemini_token() -> None
 
 def test_amplification_has_nothing_to_amplify_and_a_big_brief_is_bounded_in_time() -> None:
     big = "\n".join(f"A{i}=x" for i in range(3000)) + "\n" + "\n".join("$A1$A2$A3" for _ in range(3000))
-    started = time.monotonic()
-    found = rules(big + "\nsafo gemini quota --model m\n" + PUBLIC)
-    assert time.monotonic() - started < 3.0
+    with cpu_bound(3.0):  # CPU time: a loaded runner stretches the wall clock only
+        found = rules(big + "\nsafo gemini quota --model m\n" + PUBLIC)
     assert GEMINI_PAID in found, "a variable at a command position in a brief that names safo"
 
 
@@ -339,9 +339,8 @@ def test_a_plain_comment_is_not_code_but_one_that_could_hide_a_command_is_read_w
 
 def test_more_names_than_can_be_followed_is_unreadable() -> None:
     brief = "Notes on safo.\n" + "\n".join(f"V{i}=1" for i in range(2100)) + "\n"
-    started = time.monotonic()
-    assert GEMINI_PAID in rules(brief + PUBLIC)
-    assert time.monotonic() - started < 3.0
+    with cpu_bound(3.0):
+        assert GEMINI_PAID in rules(brief + PUBLIC)
 
 
 def test_a_weak_flow_needs_safo_gemini_and_an_action_all_named() -> None:

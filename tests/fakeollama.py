@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +31,7 @@ class FakeOllama:
         self.url = ""
         self.hosts: list[str] = []  # the Host header of every request
         self.stall_seconds = 0.0  # hold every GET this long before answering: a reachable host that is hung
+        self.released = threading.Event()  # set when the server stops: a held GET ends then, not after its full stall
         self.raw_reply: bytes | None = None  # answer /api/generate and /api/tags with these exact bytes, status 200
         self.redirect_to = ""  # answer every request with a 302 to this URL
 
@@ -67,7 +67,7 @@ class FakeOllama:
                 fake.hosts.append(self.headers.get("Host", ""))
                 fake.requests.append(("GET", self.path, {}))
                 if fake.stall_seconds:
-                    time.sleep(fake.stall_seconds)
+                    fake.released.wait(fake.stall_seconds)
                 if self._raw():
                     return
                 if self.path == "/api/tags":
@@ -100,12 +100,14 @@ class FakeOllama:
                 return
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.released.clear()
         self.url = f"http://127.0.0.1:{server.server_address[1]}"
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         try:
             yield self
         finally:
+            self.released.set()
             server.shutdown()
             server.server_close()
             thread.join()

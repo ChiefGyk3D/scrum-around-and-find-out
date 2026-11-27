@@ -77,10 +77,16 @@ STATE = "state.json"
 LOCK = "lock"
 STATUSLINE = "statusline.txt"
 IDENTITY = "identity.json"
+ETAGS = "etags.json"  # conditional-read cache (#532): ETag and body per account-scoped request, state folder only
+ETAG_MAX_AGE = 86400.0  # an entry older than this is not used
+ETAG_MAX_ENTRIES = 64
+ETAG_MAX_BODY = 131_072  # a larger answer is not cached
+ETAG_MAX_BYTES = 4 * 1024 * 1024  # the whole file; oldest entries go first
 
 _NAME = re.compile(r"[a-z_]{1,32}")
 _NUMBER = re.compile(r"[0-9]{1,12}")
 _TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_ETAG = re.compile(r'(?:W/)?"[\x21\x23-\x7e]{0,200}"')
 _BAD_CALLER = re.compile(r"[^A-Za-z0-9._-]+")
 
 Clock = Callable[[], float]
@@ -1060,10 +1066,13 @@ class Budget:
         status: int,
         counters: Sequence[Counter] = (),
         block_for: float | None = None,
+        cache: str | None = None,
     ) -> None:
         """Save the counters and the block first, then append the audit row; the row may fail alone (OSError)."""
         row = {"t": round(self.clock(), 3), "caller": clean_caller(caller), "bucket": bucket, "class": klass}
         row |= {"write": write, "status": status}
+        if cache:
+            row["cache"] = cache  # "hit": a 304 answered from the ETag cache, which GitHub does not charge
         with self._locked() as dfd:
             state = self._load(dfd)
             self._apply(state, counters, (bucket, block_for) if block_for else None, None)
@@ -1083,6 +1092,69 @@ class Budget:
             _write_all(fd, line.encode())
         finally:
             os.close(fd)
+
+    # conditional reads (#532): any failure here is the caller's cue to make a normal request
+
+    def etag_key(self, target: str) -> str:
+        """The entry name: a hash of this scope (host, account) and the request; no other account or URL matches."""
+        return hashlib.sha256(b"safo-etag\0" + self.scope.encode() + b"\0" + target.encode()).hexdigest()[:32]
+
+    @staticmethod
+    def _valid_etag_entry(key: object, entry: object) -> bool:
+        if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{32}", key) or not isinstance(entry, dict):
+            return False
+        at, tag, body = entry.get("at"), entry.get("e"), entry.get("b")
+        if isinstance(at, bool) or not isinstance(at, int | float) or not -1e15 < at < 1e15:
+            return False
+        return (
+            isinstance(tag, str)
+            and _ETAG.fullmatch(tag) is not None
+            and isinstance(body, str)
+            and len(body) <= ETAG_MAX_BODY
+        )
+
+    def _etag_entries(self, dfd: int) -> dict[str, Any]:
+        raw = _read_private(dfd, ETAGS, ETAG_MAX_BYTES)
+        if not raw or len(raw) > ETAG_MAX_BYTES:
+            return {}
+        try:
+            data = bounded.loads(raw)
+        except (ValueError, RecursionError):
+            return {}
+        loaded = data.get("entries") if isinstance(data, dict) else None
+        return {k: v for k, v in loaded.items() if self._valid_etag_entry(k, v)} if isinstance(loaded, dict) else {}
+
+    def etag_get(self, target: str) -> tuple[str, str] | None:
+        """(etag, body) kept for this request, or None (absent, too old, unsafe file)."""
+        key = self.etag_key(target)
+        try:
+            dfd = open_private_dir(self.directory, create=False)
+        except OSError:
+            return None
+        try:
+            entry = self._etag_entries(dfd).get(key)
+        finally:
+            os.close(dfd)
+        now = self.clock()
+        if entry is None or not entry["at"] - 60 <= now <= entry["at"] + ETAG_MAX_AGE:
+            return None
+        return entry["e"], entry["b"]
+
+    def etag_put(self, target: str, etag: str, body: str) -> None:
+        entry = {"at": self.clock(), "e": etag, "b": body}
+        key = self.etag_key(target)
+        if not self._valid_etag_entry(key, entry):
+            return
+        with self._locked() as dfd:
+            entries = self._etag_entries(dfd)
+            entries[key] = entry
+            kept = dict(sorted(entries.items(), key=lambda kv: -float(kv[1]["at"]))[:ETAG_MAX_ENTRIES])
+            text = bounded_dumps({"entries": kept})
+            while len(text) > ETAG_MAX_BYTES and len(kept) > 1:
+                kept.pop(min(kept, key=lambda k: float(kept[k]["at"])))
+                text = bounded_dumps({"entries": kept})
+            if len(text.encode()) <= ETAG_MAX_BYTES:
+                _replace_private(dfd, ETAGS, text.encode())
 
     # reports
 
@@ -1105,6 +1177,8 @@ class Budget:
             cell = report.setdefault(caller, {}).setdefault(bucket, {"calls": 0, "writes": 0})
             cell["calls"] += 1
             cell["writes"] += 1 if row.get("write") is True else 0
+            if row.get("cache") == "hit":
+                cell["hits"] = cell.get("hits", 0) + 1
         return report
 
     def _line(self, state: Mapping[str, Any]) -> str:
@@ -1217,6 +1291,28 @@ def _injectable(argv: Sequence[str]) -> bool:
     return bool(argv) and argv[0] == "api" and not any(_flag_name(w) in _NO_INCLUDE for w in argv[1:])
 
 
+def cache_target(argv: Sequence[str]) -> str | None:
+    """The request text of a plain REST read (`api [--hostname H] ENDPOINT`), else None: nothing else is cached."""
+    words = list(argv)
+    if len(words) == 4 and words[:2] == ["api", "--hostname"] and not words[3].startswith("-"):
+        host = words[2]
+        words = ["api", words[3]]
+    elif len(words) == 2 and words[0] == "api":
+        host = ""
+    else:
+        return None
+    endpoint = words[1].lstrip("/")
+    if not endpoint or endpoint.startswith("-") or endpoint.split("?", 1)[0] in ("graphql", "rate_limit"):
+        return None
+    return f"{host} {endpoint}" if host else endpoint
+
+
+@dataclass(frozen=True)
+class _Conditional:
+    target: str
+    body: str | None  # the kept answer when If-None-Match was sent
+
+
 def main(
     argv: Sequence[str],
     *,
@@ -1269,6 +1365,17 @@ def main(
     inject = ledger is not None and _injectable(argv)
     if inject:
         command = [exe, "api", "--include", *argv[1:]]
+    conditional: _Conditional | None = None
+    target = cache_target(argv) if inject and not what.write and not what.free else None
+    if ledger is not None and target is not None:
+        found: tuple[str, str] | None = None
+        try:
+            found = ledger.etag_get(target)
+        except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+            found = None  # any cache trouble is a normal request
+        conditional = _Conditional(target, found[1] if found else None)
+        if found:
+            command = [exe, "api", "--include", "-H", f"If-None-Match: {found[0]}", *argv[1:]]
     starter = launch or _launcher(run)
     child: Launched | None = None
     guard = _SignalGuard()
@@ -1314,7 +1421,7 @@ def main(
                 _record(ledger, env, what, 0, [], None, err)
                 return EXIT_UNKNOWN_OUTCOME
             guard.raising = False  # the call is over; a later signal is noted and honoured below
-            return _finish(done, inject, what, ledger, env, clock, out, err, guard)
+            return _finish(done, inject, what, ledger, env, clock, out, err, guard, conditional)
         finally:
             _ACTIVE = None
 
@@ -1329,6 +1436,7 @@ def _finish(
     out: TextIO,
     err: TextIO,
     guard: _SignalGuard,
+    conditional: _Conditional | None = None,
 ) -> int:
     stdout = done.stdout or ""
     try:
@@ -1342,9 +1450,18 @@ def _finish(
         if guard.pending is not None:
             return 128 + guard.pending
         return done.returncode
-    out.write(body)
-    if done.stderr:
-        err.write(done.stderr)
+    kept = conditional.body if conditional is not None else None
+    hit = kept is not None and status == 304
+    code = done.returncode
+    if hit and kept is not None:
+        out.write(kept)  # not modified: GitHub charged nothing and the kept answer is current
+        code = 0
+    else:
+        out.write(body)
+        if done.stderr:
+            err.write(done.stderr)
+        if conditional is not None and ledger is not None and status == 200 and code == 0:
+            _remember(ledger, conditional.target, headers.get("etag", ""), body)
     block: float | None = None
     if status in (403, 429):
         block = parse_retry_after(headers.get("retry-after", ""), clock())
@@ -1355,10 +1472,20 @@ def _finish(
         if block is None:
             block = SECONDARY_WAIT
     counters = counters_from_headers(headers, what.bucket) if headers else []
-    _record(ledger, env, what, status, counters, block, err)
+    _record(ledger, env, what, status, counters, block, err, "hit" if hit else None)
     if guard.pending is not None:  # told to stop while finishing: the call is reported above, then honour it
         return 128 + guard.pending
-    return done.returncode
+    return code
+
+
+def _remember(ledger: Budget, target: str, etag: str, body: str) -> None:
+    """Keep an answer for the next conditional read; every failure is ignored (the answer was already delivered)."""
+    if not etag or len(body) > ETAG_MAX_BODY:
+        return
+    try:
+        ledger.etag_put(target, etag, body)
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        return
 
 
 def _record(
@@ -1369,6 +1496,7 @@ def _record(
     counters: Sequence[Counter],
     block: float | None,
     err: TextIO,
+    cache: str | None = None,
 ) -> None:
     if ledger is None:
         return
@@ -1381,6 +1509,7 @@ def _record(
             status=status,
             counters=counters,
             block_for=block,
+            cache=cache,
         )
     except OSError as problem:  # counters and blocks are saved before the audit row; say so once
         err.write(f"ghw: the budget ledger could not be written ({type(problem).__name__}); the call is not repeated\n")

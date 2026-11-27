@@ -10,6 +10,7 @@ from types import ModuleType
 
 import pytest
 
+from cputime import cpu_bound
 from safo.modes import load_all
 
 ROOT = Path(__file__).parent.parent
@@ -409,12 +410,9 @@ def test_the_pin_is_single_sourced_so_a_bump_needs_no_other_edit() -> None:
 
 @pytest.mark.parametrize("filler", [" ", "\n", " \n", "\t ", "*", ",", "( "])
 def test_the_doia_reference_scan_is_linear_on_long_separator_runs(filler: str) -> None:
-    import time
-
     for text in ("DoIA" + filler * 20_000 + "x", "DoIA" + filler * 20_000 + "v0.2.0", "DoIA release" + filler * 20_000):
-        start = time.perf_counter()
-        GEN_WIKI.doia_tag_refs(text)
-        assert time.perf_counter() - start < 0.5, repr(text[:20])
+        with cpu_bound(0.5, note=repr(text[:20])):  # CPU time: a loaded runner stretches the wall clock only
+            GEN_WIKI.doia_tag_refs(text)
     assert GEN_WIKI.doia_tag_refs("DoIA" + filler * 1_000 + "v0.2.0") == ["v0.2.0"]
 
 
