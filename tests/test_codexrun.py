@@ -322,6 +322,56 @@ def test_a_program_key_in_a_submodule_config_is_refused_and_never_runs(world: Wo
     refused(world, go(world, "review"))
 
 
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_an_index_flag_that_hides_a_modified_file_is_refused(world: World, flag: str) -> None:
+    wt = world.worktree
+    git(wt, "update-index", flag, "a.txt")
+    (wt / "a.txt").write_text("changed behind the flag\n")
+    refused(world, go(world, "implementer"))
+
+
+def test_the_child_git_environment_is_scrubbed(world: World) -> None:
+    assert go(world, "review") == 0
+    env = world.calls()[0]["env"]
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_ATTR_NOSYSTEM"] == "1" and env["GIT_TERMINAL_PROMPT"] == "0"
+    pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))}
+    assert pairs["core.fsmonitor"] == "false" and pairs["core.hooksPath"] == "/dev/null"
+    assert pairs["protocol.allow"] == "never" and pairs["protocol.ext.allow"] == "never"
+
+
+def test_documented_boundary_a_filter_added_during_the_run_still_runs_for_the_child(
+    world: World, tmp_path: Path
+) -> None:
+    """Residual risk, documented in docs/codex-run.md: environment settings cannot name a filter driver that the repo
+    config defines later, so a process that can write the repository config while codex runs can still get a
+    `filter.*` program started by codex's own `git status`. The scrubbed environment closes fsmonitor and hooks only."""
+    fsmonitor_marker = tmp_path / "fsmonitor-ran"
+    fsmonitor = tmp_path / "fsmonitor.sh"
+    fsmonitor.write_text(f"#!/bin/sh\necho ran > {fsmonitor_marker}\n")
+    fsmonitor.chmod(0o755)
+    filter_marker = hostile_script(tmp_path)
+    wt = world.worktree
+    (wt / ".gitattributes").write_text("*.txt filter=x\n")
+    git(wt, "add", ".gitattributes")
+    git(wt, "commit", "-q", "-m", "attrs")
+    assert go(world, "review") == 0  # the config is clean when the check runs
+    env = world.calls()[0]["env"]
+    git(wt, "config", "filter.x.clean", str(tmp_path / "hostile.sh"))  # written while codex runs
+    git(wt, "config", "core.fsmonitor", str(fsmonitor))
+    (wt / "a.txt").write_text("b\n")
+    done = subprocess.run(  # noqa: S603 - fixed argv, scrubbed env, test only
+        ["git", "-C", str(wt), "status", "--porcelain"],  # noqa: S607
+        env={k: v for k, v in env.items() if k in ("PATH", "HOME") or k.startswith("GIT_")},
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert done.returncode == 0
+    assert not fsmonitor_marker.exists()  # closed by the scrubbed environment
+    assert filter_marker.exists()  # the boundary: not closed, and not claimed closed
+
+
 def test_a_clean_submodule_is_accepted(world: World, tmp_path: Path) -> None:
     add_submodule(world, tmp_path)
     assert go(world, "implementer") == 0
@@ -598,7 +648,14 @@ def test_environment_is_an_allow_list(world: World, tmp_path: Path) -> None:
     )
     assert go(world, "review") == 0
     env = world.calls()[0]["env"]
-    assert set(env) <= {"PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"}
+    assert {name for name in env if not name.startswith("GIT_")} <= {
+        "PATH",
+        "HOME",
+        "CODEX_HOME",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+    }
     assert {"PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"} <= set(env)
     assert env["HOME"] == str(world.home)
     # was: == str(tmp_path) (the caller's CODEX_HOME was inherited); now the owner config's, never the caller's

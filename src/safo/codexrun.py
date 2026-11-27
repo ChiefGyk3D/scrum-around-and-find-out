@@ -508,12 +508,20 @@ def _sealed_status(git: str, home: str, root: str, gitdir: str) -> str:
             shutil.copyfile(os.path.join(gitdir, "index"), os.path.join(scratch, "index"))
         except OSError:
             raise CodexRunError("the worktree's index could not be read; nothing was run") from None
+        sealed = (f"--git-dir={scratch}", f"--work-tree={root}")
+        # assume-unchanged ("h", any lower-case tag) and skip-worktree ("S") entries are never compared with the
+        # files, so a modified file behind one of them would read as clean: refuse such an index.
+        for entry in _git(git, home, root, *sealed, "ls-files", "-v", "-z", errors="surrogateescape").split("\0"):
+            if entry and (entry[0].islower() or entry[0] == "S"):
+                raise CodexRunError(
+                    "the index marks a file assume-unchanged or skip-worktree, so the tree cannot be checked; "
+                    "nothing was run"
+                )
         return _git(
             git,
             home,
             root,
-            f"--git-dir={scratch}",
-            f"--work-tree={root}",
+            *sealed,
             "status",
             "--porcelain=v1",
             "-z",
@@ -717,15 +725,38 @@ def child_path(codex: str, node: str | None) -> str:
 
 def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch: str) -> dict[str, str]:
     """The whole environment of codex: this allow-list, built here, never a copy of the caller's. `codex_home` is
-    read from the owner's config (checked), never from the caller's CODEX_HOME."""
-    return {
+    read from the owner's config (checked), never from the caller's CODEX_HOME.
+
+    The git settings here close what the wrapper can close for the git that codex starts itself: no system or global
+    config, and command-scope settings (they beat the repository's config) that turn off fsmonitor and hooks and forbid
+    network and `ext::` transports. RESIDUAL, not closed: the repository config is read by that git at run time, and a
+    `filter.*` / `diff.*.textconv` program cannot be forbidden by name in advance. A process that can write the
+    repository config WHILE codex runs can therefore still get a program started. The checks before the run cover the
+    config as it was then (see docs/codex-run.md)."""
+    env = {
         "PATH": child_path(codex, node),
         "HOME": home,
         "CODEX_HOME": codex_home,
         "LANG": LOCALE,
         "LC_ALL": LOCALE,
         "TMPDIR": scratch,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
     }
+    forced = (
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", os.devnull),
+        ("protocol.allow", "never"),
+        ("protocol.ext.allow", "never"),
+        ("core.attributesFile", os.devnull),
+    )
+    env["GIT_CONFIG_COUNT"] = str(len(forced))
+    for number, (key, value) in enumerate(forced):
+        env[f"GIT_CONFIG_KEY_{number}"] = key
+        env[f"GIT_CONFIG_VALUE_{number}"] = value
+    return env
 
 
 def build_argv(codex: str, cls: str, root: str, out: str) -> list[str]:
