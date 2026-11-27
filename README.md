@@ -24,6 +24,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | Piece | State |
 |---|---|
 | Python scaffold, CI on git-your-ship-together, repository files, `scripts/apply-baseline.sh` | Built, merged on `main` |
+| `safo-digest`: runs `git` or `gh` (nothing else), saves the full output privately and prints a small capped digest in a fixed untrusted-data frame ([`docs/digest.md`](docs/digest.md)) | Built |
 | `scripts/impacted-tests.py`: which tests a set of changed files needs for a targeted run, or ALL; CI stays the judge ([`docs/impacted-tests.md`](docs/impacted-tests.md)) | Built, merged on `main` |
 | GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown), `board.yaml` schema and validator | Built, merged on `main` |
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
@@ -170,6 +171,7 @@ replaced are gone.
 - [Usage](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Usage)
 - [Spend report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Spend-report)
 - [Impacted tests](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Impacted-tests)
+- [Digest](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Digest)
 - [Hooks](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Hooks)
 - [Handoff](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Handoff)
 - [Limits](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Limits)

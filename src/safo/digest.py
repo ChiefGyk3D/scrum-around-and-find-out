@@ -37,6 +37,7 @@ import tomllib
 import unicodedata
 from dataclasses import dataclass, field
 
+from safo import output
 from safo.errors import ConfigError, SafoError
 
 EXIT_TIMEOUT = 124
@@ -930,7 +931,7 @@ def _run(
     rc = proc.returncode
     code = EXIT_TIMEOUT if timed_out else (128 - rc if rc < 0 else rc)
     if not swept:
-        sys.stderr.write("safo-digest: the process sweep could not read /proc; the run is not known to be contained\n")
+        output.write(sys.stderr, "safo-digest: the process sweep could not read /proc; the run is not known to be contained")
         return EXIT_REFUSED, b""
     extra = (
         (f" timeout={cfg.timeout:g}s" if timed_out else "")
@@ -1011,10 +1012,10 @@ def main(argv: list[str] | None = None) -> int:
             raise DigestError("--max-lines 8..1000, --max-bytes 1024..65536, --timeout above 0 and up to 86400")
         code, data = execute(cmd, cfg)
     except SafoError as e:
-        sys.stderr.write(f"safo-digest: refused: {e}\n")
+        output.write(sys.stderr, f"safo-digest: refused: {e}")
         return EXIT_REFUSED
     except OSError as e:
-        sys.stderr.write(f"safo-digest: refused: {e.strerror or type(e).__name__}\n")
+        output.write(sys.stderr, f"safo-digest: refused: {e.strerror or type(e).__name__}")
         return EXIT_REFUSED
     sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
