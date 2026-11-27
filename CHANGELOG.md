@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `safo spend` (#510, epic #428): a read-only weekly token-spend report from the Claude transcripts, the Codex sessions
+  (counted apart, never added), the `llm-local` calls log, the hook log and the `safo-draft` local-share log. Weighted
+  spend by pool (lead, agents by type), cache-read and output shares, weighted tokens per lead turn and the share past
+  turn 200 and 400, per merged PR from a caller-supplied date list, local use counts, and the first-turn context of
+  agents. `--baseline PATH` stores the first report (exclusive create, mode 0600, never overwritten) and later runs
+  print the change per line; `--json PATH` writes a new 0600 file. Counts only, bounded (files, bytes, line size, run
+  time; a bound stops the run), symlinks and special files refused. Docs: `docs/spend-report.md`. Tests:
+  `tests/test_spend.py`.
 - `safo local report` (#372, #380): read-only counts of local-model use per day, week and model from the dispatch-guard
   log, the `safo hooks status` guard counts and the `llm-local` calls and admission state, with a MISSING DATA section
   and `--json`. Nothing is written or created (the hooks log is read without its lock). Bounded reads, malformed, torn

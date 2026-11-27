@@ -65,6 +65,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `status` | Posts a project status update from a Markdown file, or builds it from the board with `--post`: the cards are grouped and counted in code, with an optional one-line headline on top |
 | `agents-status` | One read-only view of what Claude, Codex and Copilot are doing |
 | `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
+| `spend` | A weekly token-spend report from the Claude transcripts, the Codex sessions and the `llm-local`, hook and `safo-draft` logs: weighted spend by pool, cache-read share, per lead turn and per merged PR, local use, agent first-turn context, and the change against a stored baseline. Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
 | `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
 | `outcome add` | Appends a finished task to the outcomes log |
 | `handoff check <owner/repo> <pr>` | Whether the latest review report on a pull request names the head the pull request has now. Exit 0 fresh, 1 stale, 2 cannot tell. Read-only; shows, never blocks. See [Handoff](docs/handoff.md) |
@@ -77,7 +78,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `card` | Edits one project card with one REST PATCH from a persisted map of ids and never lists the board; the same as the `safo-card` script. See [`docs/ratebudget.md`](docs/ratebudget.md) |
 | `doctor` | Is each prerequisite present, missing or too old? Python, git and gh are required; the other tools, plugins and skill packs are reported. Read-only: it runs only `<tool> --version`. See [`docs/prerequisites.md`](docs/prerequisites.md) |
 
-The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`, `doctor`) read
+The Action runs the modes that talk to the board. The local modes (`usage`, `spend`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`, `doctor`) read
 files on a person's machine, or `protection` the repository's settings, and are not allowed in the Action.
 
 ## Trust boundary
@@ -162,6 +163,7 @@ replaced are gone.
 - [Roles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Roles)
 - [Routing](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Routing)
 - [Usage](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Usage)
+- [Spend report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Spend-report)
 - [Hooks](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Hooks)
 - [Handoff](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Handoff)
 - [Limits](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Limits)
