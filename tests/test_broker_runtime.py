@@ -815,7 +815,12 @@ def test_a_client_that_reconnects_while_the_per_user_bound_is_full_is_served_onc
     with pytest.raises((BrokenPipeError, ConnectionResetError, AssertionError)):
         refused = ask_once(tree, protocol.request_body("status"))
         assert refused  # a refused connection is closed unread: no reply frame
-    threading.Timer(0.3, lambda: [c.close() for c in held]).start()
+
+    def free_slots() -> None:
+        for c in held:
+            c.close()
+
+    threading.Timer(0.3, free_slots).start()
     try:
         assert json.loads(ask(tree, protocol.request_body("status"))[0])["ok"] is True
     finally:
