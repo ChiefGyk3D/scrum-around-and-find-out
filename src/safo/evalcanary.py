@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import math
 import os
@@ -63,13 +64,60 @@ def _score_value(value: Any) -> float:
     return float(value)
 
 
+def _open_dir(path: Path, *, create: bool) -> int:
+    """A descriptor for the folder `path`, walked one component at a time with no symlink followed anywhere.
+
+    Every component is opened relative to the one before it with O_NOFOLLOW | O_DIRECTORY, so a symlink in any ancestor
+    (not only the last) is refused and the folder cannot be swapped after the walk: later work uses the descriptor.
+    """
+    parts = Path(os.path.abspath(path)).parts
+    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[1:]:
+            try:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=fd)
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_at(dir_fd: int, name: str) -> bytes:
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise bounded.NotRegularFileError(errno.EINVAL, "not a regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_BASELINE_BYTES:
+            chunk = os.read(fd, min(65_536, MAX_BASELINE_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def read_baseline(path: Path) -> dict[str, float]:
     try:
-        raw = bounded.read_bounded(path, MAX_BASELINE_BYTES + 1)
+        dir_fd = _open_dir(path.parent, create=False)
+        try:
+            raw = _read_at(dir_fd, path.name)
+        finally:
+            os.close(dir_fd)
     except FileNotFoundError as exc:
         raise CanaryError("no baseline file; run once with --update-baseline") from exc
-    except OSError as exc:  # a symlink (ELOOP), a FIFO or other special file, a permission error
-        raise CanaryError("baseline is a symlink, not a regular file, or cannot be opened") from exc
+    except OSError as exc:  # a symlink anywhere in the path, a FIFO or other special file, a permission error
+        raise CanaryError("baseline is behind a symlink, not a regular file, or cannot be opened") from exc
     if len(raw) > MAX_BASELINE_BYTES:
         raise CanaryError("baseline is over the size cap")
     try:
@@ -90,32 +138,39 @@ def read_baseline(path: Path) -> dict[str, float]:
 
 
 def write_baseline(path: Path, scores: dict[str, float]) -> None:
-    """Replace the baseline atomically with mode 0600; never through a symlink, never over a special file."""
-    try:
-        mode = os.lstat(path).st_mode
-    except FileNotFoundError:
-        mode = None
-    if mode is not None and not stat.S_ISREG(mode):
-        raise CanaryError("refusing to replace a baseline that is a symlink or not a regular file")
-    parent = path.parent
-    if parent.is_symlink():
-        raise CanaryError("refusing to write the baseline through a symlinked folder")
-    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = parent / f".{path.name}.{os.getpid()}.tmp"
+    """Replace the baseline atomically with mode 0600, all relative to one folder descriptor.
+
+    No symlink is followed in any component, a non-regular file is never replaced, and the temporary file and the
+    rename both go through the descriptor, so the folder cannot be swapped between the check and the write.
+    """
     text = json.dumps({"version": BASELINE_VERSION, "scores": scores}, indent=1, sort_keys=True) + "\n"
+    tmp = f".{path.name}.{os.getpid()}.tmp"
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
+        dir_fd = _open_dir(path.parent, create=True)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise CanaryError(f"cannot write the baseline: {exc.strerror}") from exc
+        raise CanaryError("refusing to write the baseline through a symlink or an unusable folder") from exc
+    try:
+        try:
+            mode: int | None = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and not stat.S_ISREG(mode):
+            raise CanaryError("refusing to replace a baseline that is a symlink or not a regular file")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.rename(tmp, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=dir_fd)
+            raise CanaryError(f"cannot write the baseline: {exc.strerror}") from exc
+    finally:
+        os.close(dir_fd)
 
 
 def _classify(records: Sequence[dict[str, Any]]) -> tuple[str, float | None]:
-    """('ok', score) | ('unreachable', None) | ('busy', None). Busy runs are left out of the rate."""
+    """('ok', score) | ('unreachable', None) | ('busy', None). Any busy record makes the whole attempt busy."""
     passed = scored = busy = 0
     for rec in records:
         status = rec.get("status")
@@ -128,8 +183,10 @@ def _classify(records: Sequence[dict[str, Any]]) -> tuple[str, float | None]:
             scored += 1
         else:  # any other failure: the server, the wrapper or the call did not work; not a quality signal
             return "unreachable", None
+    if busy:  # a busy server must not choose which fixtures count: the whole attempt is retried
+        return "busy", None
     if scored == 0:
-        return ("busy" if busy else "unreachable"), None
+        return "unreachable", None
     return "ok", passed / scored
 
 

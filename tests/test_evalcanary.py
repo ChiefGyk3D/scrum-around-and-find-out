@@ -12,9 +12,10 @@ import pytest
 
 from safo import evalcanary as ec
 from safo import localdraft
+from safo import localeval as le
 
-FIXTURES = ec.le.FIXTURES_DEFAULT
-N_FIX = len(ec.le.load_fixtures(FIXTURES, ["commit-message"]))
+FIXTURES = le.FIXTURES_DEFAULT
+N_FIX = len(le.load_fixtures(FIXTURES, ["commit-message"]))
 MODELS = tuple(dict.fromkeys((localdraft.DRAFT_MODEL, localdraft.DIGEST_MODEL)))
 
 
@@ -224,3 +225,60 @@ def test_guard_negative_the_hostile_list_is_collected_and_a_good_file_passes(tmp
     assert len(HOSTILE) >= 10
     write_base(tmp_path, {m: 0.9 for m in MODELS})
     assert run(tmp_path, {m: 0.9 for m in MODELS})[0] == 0
+
+
+def test_mixed_busy_and_scored_is_busy_not_a_partial_score() -> None:
+    records = [{"status": "ok", "score": {"passed": True}}] + [{"status": "busy"}] * 9
+    assert ec._classify(records) == ("busy", None)
+
+
+def test_partly_busy_run_is_exit_75_and_never_writes_the_baseline(tmp_path: Path) -> None:
+    class Half:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def __call__(self, fixture: Any, model: str) -> dict[str, Any]:
+            self.n += 1
+            if self.n % 2:
+                return {"status": "ok", "score": {"passed": True}}
+            return {"status": "busy"}
+
+    path = write_base(tmp_path, {m: 0.9 for m in MODELS})
+    before = path.read_bytes()
+    argv = args(tmp_path, "--update-baseline")
+    assert ec.entry(argv, runner=Half(), sleep=lambda _s: None) == 75
+    assert path.read_bytes() == before
+
+
+def _ancestor_link(tmp: Path) -> tuple[Path, Path]:
+    outside = tmp / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (tmp / "alias").symlink_to(outside, target_is_directory=True)
+    return tmp / "alias" / "sub" / "base.json", outside / "sub" / "base.json"
+
+
+def test_write_refuses_a_symlink_in_any_ancestor(tmp_path: Path) -> None:
+    via, real = _ancestor_link(tmp_path)
+    with pytest.raises(ec.CanaryError):
+        ec.write_baseline(via, {m: 0.9 for m in MODELS})
+    assert not real.exists()
+    assert list(real.parent.iterdir()) == []
+
+
+def test_read_refuses_a_symlink_in_any_ancestor(tmp_path: Path) -> None:
+    via, real = _ancestor_link(tmp_path)
+    real.write_text(json.dumps({"version": 1, "scores": {m: 0.9 for m in MODELS}}))
+    with pytest.raises(ec.CanaryError):
+        ec.read_baseline(via)
+    client = FakeClient({m: 0.9 for m in MODELS})
+    code = ec.entry(["--baseline", str(via), "--tasks", "commit-message"], runner=client, sleep=lambda _s: None)
+    assert code == 2 and client.calls == []
+
+
+def test_write_creates_missing_folders_privately_and_reads_back(tmp_path: Path) -> None:
+    path = tmp_path / "a" / "b" / "base.json"
+    ec.write_baseline(path, {m: 0.5 for m in MODELS})
+    assert ec.read_baseline(path) == {m: 0.5 for m in MODELS}
+    assert (path.parent.stat().st_mode & 0o777) == 0o700
+    assert (path.stat().st_mode & 0o777) == 0o600
+    assert [p.name for p in path.parent.iterdir()] == ["base.json"]
