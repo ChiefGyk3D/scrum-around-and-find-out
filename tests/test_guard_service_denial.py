@@ -66,14 +66,14 @@ def test_a_check_that_could_not_finish_stays_a_degraded_error(
     data = guard(agents, _private_home, event("echo hello"))
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
     row = read_log(_private_home)[-1]
-    assert (row["decision"], row["diagnostic"], row["health"]) == ("error", "input", "degraded")
+    assert (row["decision"], row["diagnostic"], row["health"]) == ("error", "input-shell", "degraded")
 
 
 def test_an_unparseable_event_stays_an_input_error(_private_home: Path, agents: Path) -> None:
     out = hooks("guard", "--agents", str(agents), home=_private_home, stdin="{not json")[1]
     assert "degraded" in out
     row = read_log(_private_home)[-1]
-    assert (row["decision"], row["diagnostic"], row["health"]) == ("error", "input", "degraded")
+    assert (row["decision"], row["diagnostic"], row["health"]) == ("error", "input-parse", "degraded")
 
 
 def row(decision: str, diagnostic: str, health: str) -> dict[str, Any]:

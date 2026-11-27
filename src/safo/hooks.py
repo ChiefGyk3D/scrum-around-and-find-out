@@ -668,9 +668,11 @@ def log_record(
     reachable: bool,
     health: str = "healthy",
     diagnostic: str = "",
+    check_ms: int | None = None,
 ) -> dict[str, Any]:
-    """One log line. No brief, no description: only the verdict and the model name."""
-    return {
+    """One log line. No brief, no description: only the verdict and the model name. `check_ms` (#615) is the duration of
+    a shell check that did not finish, in whole milliseconds; the key is absent from every other row."""
+    record: dict[str, Any] = {
         "ts": when,
         "decision": decision,
         "mode": mode,
@@ -682,6 +684,9 @@ def log_record(
         "health": health,
         "diagnostic": diagnostic,
     }
+    if check_ms is not None:
+        record["check_ms"] = check_ms
+    return record
 
 
 CORRUPT_KEEP = 5  # corrupt logs kept beside the log; the oldest beyond this are deleted

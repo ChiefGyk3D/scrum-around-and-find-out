@@ -844,7 +844,7 @@ def test_hooks_probe_with_a_closed_or_empty_stdin_behaves_as_before(_private_hom
         for stream in (closed, null, empty_pipe):
             code, out = run_probe_on(_private_home, agents, stream)
             assert code == 0 and "SAFO routing guard degraded" in out and "nothing was probed" not in out
-    assert [r["diagnostic"] for r in read_log(_private_home)] == ["input"] * 3
+    assert [r["diagnostic"] for r in read_log(_private_home)] == ["input-parse"] * 3
 
 
 def test_hooks_probe_with_a_piped_payload_is_unchanged(_private_home: Path, agents: Path) -> None:
@@ -1117,7 +1117,9 @@ def test_a_hook_that_meets_garbage_fails_open_even_in_block_mode(
     code, out, err = guard(_private_home, agents, payload)
     assert code == 0 and "deny" not in out and err == ""
     assert "SAFO routing guard degraded" in out
-    assert read_log(_private_home)[-1]["diagnostic"] == "input"
+    assert read_log(_private_home)[-1]["diagnostic"] == (
+        "input-oversize" if len(payload) > 1_048_576 else "input-parse"
+    )
 
 
 def test_wrong_types_in_the_input_are_treated_as_a_missing_model_and_brief(_private_home: Path, agents: Path) -> None:
@@ -1806,7 +1808,9 @@ def test_hostile_events_fail_open_visibly_in_block_mode_with_clean_output(
     code, out, err = guard(_private_home, agents, payload)
     assert code == 0 and err == "" and "deny" not in out
     assert "SAFO routing guard degraded" in out
-    assert read_log(_private_home)[-1]["diagnostic"] == "input"
+    assert read_log(_private_home)[-1]["diagnostic"] == (
+        "input-oversize" if len(payload) > 1_048_576 else "input-parse"
+    )
     one_json_line_or_nothing(out)
     leftovers = [
         p.name for p in state_folder(_private_home).iterdir() if not p.name.startswith(("log.jsonl", "probe-"))

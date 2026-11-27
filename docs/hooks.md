@@ -745,9 +745,22 @@ identifier or `unknown`, booleans, rule names, health, diagnostic enum; at most 
 and per-session probe files named by a hash of the session id and the merged configuration, holding a completion time,
 booleans and role flags. A shell command denied by the model-service rules (#364) is logged as `decision: deny`,
 `diagnostic: gemini-deny`, `health: healthy`; `safo hooks status` counts those as `model-service denials` and the real
-unparseable-input errors (`diagnostic: input`) as `input parse failures`, on separate lines. A command the check could
-not finish is still a degraded `error` with `input`. A log row with `gemini-deny` is not valid to a safo from before
-this change, which skips it and reports the log as degraded. No prompt, description, address, endpoint name or loaded-model name is stored. Probe files
+unparseable-input errors as `input parse failures`, on separate lines. A log row with `gemini-deny` is not valid to a
+safo from before this change, which skips it and reports the log as degraded.
+
+The old `input` diagnostic covered three different failures (#615), so it is split; each is a degraded `error` row:
+
+| Diagnostic | Cause | `safo hooks status` line |
+| --- | --- | --- |
+| `input-parse` | the hook's event (or a probe's) could not be parsed, or was invalid | `input parse failures` |
+| `input-args` | the hook's own command line could not be parsed | `input parse failures` |
+| `input-oversize` | the event was over the size cap (1 MiB), or too large or slow to check whole | `oversized events` |
+| `input-shell` | the shell vendor check (#209) did not finish inside its time budget, so the command was denied (fail closed) | `shell checks not finished`, with the longest duration |
+
+Rows written before the split carry `input` and are still read; status counts them as `input parse failures`. An
+`input-shell` row also carries `check_ms`, the whole milliseconds the check ran (an integer from 0 to 600000); no other
+row has that key. A safo from before #615 does not know the new codes or the key: it skips such a row and reports the
+log as degraded, the same as for `gemini-deny`. No prompt, description, address, endpoint name or loaded-model name is stored. Probe files
 untouched for a week are removed when a session starts. The mode lives in `~/.config/safo/mode`.
 
 SAFO creates its own state and config directories mode 0700. Before it uses one, the directory must be owned by the

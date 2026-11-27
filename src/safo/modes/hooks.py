@@ -43,6 +43,7 @@ from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.guardlog import (
     APPEND_LOCK_TIMEOUT,
+    CHECK_MS_CAP,
     MODES,
     WARNING,
     bounded_read,
@@ -175,10 +176,15 @@ SERVICE_DENIAL = "gemini-deny"  # the diagnostic and decision code of a denial b
 class GeminiEventDeny(Exception):
     """The Gemini rules deny a dispatch whose event or agents file could not be used. `code` is the diagnostic."""
 
-    def __init__(self, code: str, reason: str) -> None:
+    def __init__(self, code: str, reason: str, check_ms: int | None = None) -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
+        self.check_ms = check_ms  # how long the shell check ran (#615), only for a check that did not finish
+
+
+class OversizeEvent(ValueError):
+    """The hook event is over the size cap and was read to the end without a marker: logged as `input-oversize`."""
 
 
 def _json_unescape(m: re.Match[str]) -> str:
@@ -438,6 +444,7 @@ def diagnostic(
     run: Run | None = None,
     shown: str | None = None,
     deny: str = "",
+    check_ms: int | None = None,
 ) -> None:
     """Fixed visible warning plus a bounded enum-only record; no exception text or input values. The warning is written
     first; the record is best effort (see emit_then_persist). `shown` replaces the enum in the visible line only."""
@@ -454,12 +461,13 @@ def diagnostic(
         }
         emit_then_persist(ctx, run, {"hookSpecificOutput": denial}, folder, record)
         return
-    record = log_record(when, "error", read_mode(ctx.env), None, False, "degraded", code)
+    record = log_record(when, "error", read_mode(ctx.env), None, False, "degraded", code, check_ms)
+    warning = WARNING
     data: dict[str, Any] = {
-        "systemMessage": WARNING,
+        "systemMessage": warning,
         "hookSpecificOutput": {
             "hookEventName": event,
-            "additionalContext": WARNING + " " + json.dumps({"health": "degraded", "diagnostic": shown or code}),
+            "additionalContext": warning + " " + json.dumps({"health": "degraded", "diagnostic": shown or code}),
         },
     }
     if deny:  # the Gemini rules deny even when the rest is degraded; the diagnostic stays in the same answer
@@ -1086,7 +1094,7 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
     if terminal_without_event(ctx):
         ctx.say(PROBE_USAGE)  # a usage line, not a fault: no log entry, so it cannot count toward degraded health
         return EXIT_OK
-    code = "input"
+    code = "input-parse"
     try:
         payload = event_input(ctx)
         session = session_id(payload)
@@ -1118,7 +1126,7 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
         prune_state(folder, ctx.now.timestamp())
         ctx.say(session_output(session_message(doc, state, runner_status(ctx.env))))
     except TimeoutError:
-        diagnostic(ctx, "timeout" if code == "input" else code, "SessionStart")
+        diagnostic(ctx, "timeout" if code == "input-parse" else code, "SessionStart")
     except Exception:
         diagnostic(ctx, code, "SessionStart")
     return EXIT_OK
@@ -1187,15 +1195,18 @@ def shell_vendor_check(payload: dict[str, Any]) -> None:
     from safo import geminibrief  # deferred: it loads the Gemini mode, which the entry must not at import
 
     # its own short budget, like the isolated Gemini check, so a late guard deadline never denies a clean command
+    started = time.monotonic()
     try:
-        found = geminibrief.shell_command_class(command, time.monotonic() + ISOLATED_CHECK_SECONDS)
+        found = geminibrief.shell_command_class(command, started + ISOLATED_CHECK_SECONDS)
     except Exception:  # fail closed: any error in the check is "could not be checked"; no exception text is kept
         found = geminibrief.SHELL_UNVERIFIED
     if found:
-        # a rule hit is a denial of its own (#364); a command that could not be checked stays the degraded input error
-        raise GeminiEventDeny(
-            "input" if found == geminibrief.SHELL_UNVERIFIED else SERVICE_DENIAL, SHELL_DENIAL.format(found)
-        )
+        # a rule hit is a denial of its own (#364); a command that could not be checked stays a degraded error, now
+        # with its own code and how long the check ran (#615)
+        if found == geminibrief.SHELL_UNVERIFIED:
+            ms = min(CHECK_MS_CAP, max(0, int((time.monotonic() - started) * 1000)))
+            raise GeminiEventDeny("input-shell", SHELL_DENIAL.format(found), ms)
+        raise GeminiEventDeny(SERVICE_DENIAL, SHELL_DENIAL.format(found))
 
 
 def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None, run: Run | None = None) -> None:
@@ -1219,7 +1230,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     try:
         raw, oversize = read_event(source, deadline)
         if oversize:
-            raise ValueError("oversized event")
+            raise OversizeEvent("oversized event")
         payload = loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("invalid event")
@@ -1232,11 +1243,11 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         # Never decided from a prefix: an oversized event is read to the end (up to the hard limit) and checked whole.
         found = scan_event(source if len(raw) > MAX_BYTES else None, raw)
         if found == "marker":
-            raise GeminiEventDeny("input", _UNREADABLE) from None
+            raise GeminiEventDeny("input-parse", _UNREADABLE) from None
         if found == "limit":
-            raise GeminiEventDeny("input", _TOO_LARGE) from None
+            raise GeminiEventDeny("input-oversize", _TOO_LARGE) from None
         if found == "slow":
-            raise GeminiEventDeny("input", _UNVERIFIABLE) from None
+            raise GeminiEventDeny("input-oversize", _UNVERIFIABLE) from None
         raise
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
@@ -1471,14 +1482,17 @@ def run_guard(ctx: LocalContext, args: argparse.Namespace, begun: float | None =
     run.limit = limit_point(begun)
     code = ""
     deny = ""
+    check_ms: int | None = None
     try:
         guard(ctx, args, begun, run)
     except GeminiEventDeny as err:
-        code, deny = err.code, err.reason
+        code, deny, check_ms = err.code, err.reason, err.check_ms
     except TimeoutError:
         code = "timeout"
+    except OversizeEvent:
+        code = "input-oversize"
     except (ValueError, UnicodeError):
-        code = "input"
+        code = "input-parse"
     except Exception:
         code = "unexpected"
     if code and not run.attempted:  # once any byte of a decision was attempted, nothing else is ever written
@@ -1486,7 +1500,7 @@ def run_guard(ctx: LocalContext, args: argparse.Namespace, begun: float | None =
             run.failed = True  # a denial was computed but cannot be delivered: block on the exit code, say nothing else
         else:
             try:
-                diagnostic(ctx, code, run=run, deny=deny)
+                diagnostic(ctx, code, run=run, deny=deny, check_ms=check_ms)
             except Exception:
                 run.failed = True
     return exit_code(run)
