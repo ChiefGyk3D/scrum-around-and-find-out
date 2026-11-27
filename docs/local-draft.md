@@ -13,6 +13,7 @@ safo-draft comment --repo o/r --number N [--facts FILE] [--yes] [PROMPT]
 safo-draft digest ci-log [FILE|-]
 safo-draft digest board-drift [FILE|-]
 safo-draft --report
+safo-draft --outcome ID fact-error
 ```
 
 Example, as the lead would use it:
@@ -178,9 +179,35 @@ safo audit | safo-draft digest board-drift -
 ## Metrics
 
 Every call appends one JSON line to `~/.local/state/safo/local-share.jsonl` (`$XDG_STATE_HOME/safo/`):
-`ts`, `subcommand`, `model`, `exit`, `chars_in`, `chars_out`. No content is stored. An existing file is set to mode
-0600 and the state directory to 0700 on every write. A symlinked state directory, or one not owned by you, is skipped: nothing is logged and nothing is chmodded. A symlinked log file is never written through. `safo-draft --report` prints calls
-and failures per ISO week, per subcommand.
+`ts`, `subcommand`, `model`, `exit`, `chars_in`, `chars_out`, `call_id`, `project`, and for drafts (`issue`, `pr`,
+`comment`) `outcome` and `outcome_recorded`. No content is stored: no prompt, draft, title or facts. An existing file
+is set to mode 0600 and the state directory to 0700 on every write. A symlinked state directory, or one not owned by
+you, is skipped: nothing is logged and nothing is chmodded. A symlinked log file is never written through.
+
+- `call_id` is the id from the `llm-local: call id ID` line on stderr of the call that produced the text. After an exit
+  75 retry it is the id of the attempt that succeeded. When the line is absent it is `none` and the run carries on.
+- `project` is `owner/name` from `--repo`; for `digest` it comes from the `origin` remote of the current directory
+  (`PWD`), else `none`.
+
+## Outcomes
+
+Each draft ends in one outcome, written to `llm-local --outcome ID VALUE` and into the row:
+
+| outcome | when |
+| --- | --- |
+| `accepted` | filed with `gh` and the filed text equals the model output after the wrapper's own edits (the footer, the epic line) |
+| `rewritten` | filed after you edited it (answer `e` at the prompt: it opens `$VISUAL` or `$EDITOR`, then the checks run again) |
+| `discarded` | you declined, or a check refused the draft |
+| `fact-error` | never automatic: `safo-draft --outcome ID fact-error` marks a filed draft later; it calls `llm-local --outcome` and appends a row |
+
+The outcome is recorded after the filing, and it is best effort. If `llm-local --outcome` fails, or there is no call id,
+the filing and the exit code are unchanged, stderr gets a one-line count note ("outcome not recorded (1 draft)") and the
+row says `outcome_recorded: false`. A `gh` failure records no outcome (`none`). Nothing about the draft text is sent or
+stored.
+
+`safo-draft --report` prints calls and failures per ISO week, per subcommand. For drafts it adds, per week, the counts
+and rates of accepted, rewritten, discarded, fact-error and none, the share whose outcome could not be recorded, and the
+same counts per project. A `fact-error` mark replaces the earlier outcome of the same call id. Counts only.
 
 ## Exit codes
 

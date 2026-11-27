@@ -7,6 +7,7 @@
     safo-draft digest ci-log [FILE|-]
     safo-draft digest board-drift [FILE|-]
     safo-draft --report
+    safo-draft --outcome ID fact-error
 
 `issue`, `pr` and `comment` write a draft with `llm-local` (stdin is /dev/null, since llm-local hangs on an open
 stdin), print it, run the checks in `check_text`, and file it with `gh` only after a yes (`--yes` for non-interactive
@@ -14,7 +15,9 @@ use; the draft is still printed). A draft that fails a check is printed with the
 `--yes`. `digest` groups and counts in code and sends only the grouped lines to the model for a five-line summary.
 
 Every call appends one JSON line (no content) to `$XDG_STATE_HOME/safo/local-share.jsonl` (default
-`~/.local/state/safo/`); `--report` prints counts per ISO week. Exit 75 from llm-local (queue busy) is retried with
+`~/.local/state/safo/`) with the llm-local call id, the project and, for drafts, the outcome (accepted, rewritten,
+discarded; best effort via `llm-local --outcome`, issue #505); `--report` prints counts and outcome rates per ISO week.
+Exit 75 from llm-local (queue busy) is retried with
 backoff, then passed on. Any other failure exits non-zero, prints the failure, and says Twingate and the local server
 were NOT verified; there is never a silent fallback to a Claude model.
 
@@ -29,6 +32,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import collections
+import contextlib
 import dataclasses
 import datetime as dt
 import ipaddress
@@ -36,10 +40,12 @@ import itertools
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -62,6 +68,14 @@ PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 EM_DASHES = "".join(chr(c) for c in (0x2014, 0xFE58, 0xFE31, 0x2E3A, 0x2E3B))
 MAX_TITLE_CHARS = 300  # a title from argv is bounded like the body, so no checked field can be unbounded
 MAX_CHECK_CHARS = 20_000  # model output longer than this is refused, not checked
+NO_ID = "none"
+OUTCOMES = ("accepted", "rewritten", "discarded", "fact-error")
+DRAFT_SUBS = ("issue", "pr", "comment")
+OUTCOME_TIMEOUT = 30
+_CALL_ID = re.compile(r"^llm-local: call id ([A-Za-z0-9][A-Za-z0-9_.-]{0,63})[ \t]*$", re.MULTILINE)
+_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_.-]{1,100}")
+_REMOTE = re.compile(r"[:/]([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/([A-Za-z0-9_.-]{1,100}?)(?:\.git)?/?$")
 NOT_VERIFIED = "Twingate and the local server were NOT verified; nothing was sent to a Claude model."
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_DECLINED, EXIT_TIMEOUT, EXIT_INTERNAL, EXIT_GH_FAILED, EXIT_BUSY = (
@@ -1023,9 +1037,26 @@ def _state_path(env: Mapping[str, str]) -> Path:
     return Path(base) / "safo" / "local-share.jsonl"
 
 
-def _log_call(env: Mapping[str, str], now: dt.datetime, sub: str, model: str, code: int, n_in: int, n_out: int) -> None:
+def _log_call(
+    env: Mapping[str, str],
+    now: dt.datetime,
+    sub: str,
+    model: str,
+    code: int,
+    n_in: int,
+    n_out: int,
+    extra: Mapping[str, object] | None = None,
+) -> None:
     path = _state_path(env)
-    row = {"ts": now.isoformat(), "subcommand": sub, "model": model, "exit": code, "chars_in": n_in, "chars_out": n_out}
+    row: dict[str, object] = {
+        "ts": now.isoformat(),
+        "subcommand": sub,
+        "model": model,
+        "exit": code,
+        "chars_in": n_in,
+        "chars_out": n_out,
+    }
+    row.update(extra or {})
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=stat.S_IRWXU)
         info = path.parent.lstat()
@@ -1040,18 +1071,48 @@ def _log_call(env: Mapping[str, str], now: dt.datetime, sub: str, model: str, co
         pass  # metrics must never block the work
 
 
+def _pct(n: int, total: int) -> str:
+    return f"{round(100 * n / total)}%" if total else "0%"
+
+
+def _rates(counts: collections.Counter[str]) -> str:
+    total = sum(counts[k] for k in (*OUTCOMES, NO_ID))
+    return ", ".join(f"{k}={counts[k]} ({_pct(counts[k], total)})" for k in (*OUTCOMES, NO_ID))
+
+
 def report(env: Mapping[str, str], out: TextIO) -> int:
     path = _state_path(env)
-    weeks: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+    rows: list[dict[str, object]] = []
     if path.is_file():
         for raw in path.read_text().splitlines():
             try:
                 row = bounded.loads(raw)
-                year, wk, _ = dt.datetime.fromisoformat(row["ts"]).isocalendar()
-                weeks[f"{year}-W{wk:02d}"][str(row["subcommand"])] += 1
-                weeks[f"{year}-W{wk:02d}"]["_failed"] += 1 if row.get("exit") != 0 else 0
+                dt.datetime.fromisoformat(row["ts"]).isocalendar()
+                str(row["subcommand"])
             except (ValueError, KeyError, TypeError):
                 continue
+            rows.append(row)
+    marked = {str(r["call_id"]): str(r["outcome"]) for r in rows if r["subcommand"] == "outcome" and "call_id" in r}
+    weeks: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+    results: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+    projects: dict[str, dict[str, collections.Counter[str]]] = collections.defaultdict(
+        lambda: collections.defaultdict(collections.Counter)
+    )
+    unrecorded: collections.Counter[str] = collections.Counter()
+    for row in rows:
+        if row["subcommand"] == "outcome":
+            continue  # a later human mark, applied to its draft below; not a model call
+        year, wk, _ = dt.datetime.fromisoformat(str(row["ts"])).isocalendar()
+        key = f"{year}-W{wk:02d}"
+        weeks[key][str(row["subcommand"])] += 1
+        weeks[key]["_failed"] += 1 if row.get("exit") != 0 else 0
+        if "outcome" not in row:
+            continue
+        outcome = marked.get(str(row.get("call_id")), str(row["outcome"]))
+        outcome = outcome if outcome in OUTCOMES else NO_ID
+        results[key][outcome] += 1
+        projects[key][str(row.get("project", NO_ID))][outcome] += 1
+        unrecorded[key] += 1 if row.get("outcome_recorded") is False else 0
     if not weeks:
         out.write("no local calls recorded\n")
         return EXIT_OK
@@ -1060,6 +1121,12 @@ def report(env: Mapping[str, str], out: TextIO) -> int:
         failed = counts.pop("_failed", 0)
         detail = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         out.write(f"{week}: {sum(counts.values())} calls, {failed} failed ({detail})\n")
+        if results[week]:
+            drafts = sum(results[week].values())
+            out.write(f"  outcomes of {drafts} drafts: {_rates(results[week])}\n")
+            out.write(f"  outcome not recorded: {unrecorded[week]} of {drafts} ({_pct(unrecorded[week], drafts)})\n")
+            for name in sorted(projects[week]):
+                out.write(f"  project {name}: {_rates(projects[week][name])}\n")
     return EXIT_OK
 
 
@@ -1070,7 +1137,53 @@ def _which(env: Mapping[str, str], name: str) -> str:
     return found
 
 
-def call_local(env: Mapping[str, str], sleep: Callable[[float], None], task: str, model: str, prompt: str) -> str:
+def _spawn(
+    argv: list[str], env: Mapping[str, str], timeout: float | None, body: str | None = None, *, tty: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """The one place a child process is started: an argv list, no shell; stdin closed, a body, or the terminal."""
+    return subprocess.run(  # noqa: S603 - argv list, absolute path from PATH lookup, no shell
+        argv,
+        input=body,
+        stdin=None if body is not None or tty else subprocess.DEVNULL,
+        capture_output=not tty,
+        text=True,
+        env=dict(env),
+        check=False,
+        timeout=timeout,
+    )
+
+
+def record_outcome(env: Mapping[str, str], call_id: str, outcome: str) -> bool:
+    """Best effort `llm-local --outcome ID VALUE`. True only when llm-local exits 0; never raises."""
+    if call_id == NO_ID or not _ID.fullmatch(call_id) or outcome not in OUTCOMES:
+        return False
+    try:
+        return _spawn([_which(env, "llm-local"), "--outcome", call_id, outcome], env, OUTCOME_TIMEOUT).returncode == 0
+    except (Failure, OSError, subprocess.SubprocessError):
+        return False
+
+
+def project_of(env: Mapping[str, str], repo: str | None) -> str:
+    """owner/name from --repo, else from the cwd git remote; `none` when neither resolves. Never a path or URL."""
+    if repo is not None:
+        return repo if _REPO.fullmatch(repo) else NO_ID
+    try:
+        done = _spawn([_which(env, "git"), "-C", env.get("PWD") or os.getcwd(), "remote", "get-url", "origin"], env, 10)
+    except (Failure, OSError, subprocess.SubprocessError):
+        return NO_ID
+    found = _REMOTE.search(done.stdout.strip()) if done.returncode == 0 else None
+    return f"{found.group(1)}/{found.group(2)}" if found else NO_ID
+
+
+def call_local(
+    env: Mapping[str, str],
+    sleep: Callable[[float], None],
+    task: str,
+    model: str,
+    prompt: str,
+    ids: list[str] | None = None,
+) -> str:
+    """Run llm-local. `ids` receives the call id of the attempt that produced the returned text (retries replace it)."""
     size = len(prompt.encode())
     if size > MAX_PROMPT_BYTES:
         raise Failure(
@@ -1083,18 +1196,13 @@ def call_local(env: Mapping[str, str], sleep: Callable[[float], None], task: str
     last = ""
     for attempt in range(RETRIES):
         try:
-            done = subprocess.run(  # noqa: S603 - argv list, absolute path from PATH lookup, no shell
-                argv,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                env=dict(env),
-                check=False,
-                timeout=LLM_TIMEOUT,
-            )
+            done = _spawn(argv, env, LLM_TIMEOUT)
         except subprocess.TimeoutExpired:
             raise Failure(f"llm-local timed out after {LLM_TIMEOUT} s. {NOT_VERIFIED}", EXIT_TIMEOUT) from None
         if done.returncode == 0:
+            found = _CALL_ID.findall(done.stderr or "")
+            if ids is not None:
+                ids[:] = [found[-1]] if found else []
             return done.stdout.strip()
         last = (done.stderr or done.stdout).strip()
         if done.returncode != EXIT_BUSY:
@@ -1106,15 +1214,7 @@ def call_local(env: Mapping[str, str], sleep: Callable[[float], None], task: str
 
 def _gh(env: Mapping[str, str], args: list[str], body: str) -> str:
     try:
-        done = subprocess.run(  # noqa: S603 - argv list, absolute path from PATH lookup, no shell
-            [_which(env, "gh"), *args, "--body-file", "-"],
-            input=body,
-            capture_output=True,
-            text=True,
-            env=dict(env),
-            check=False,
-            timeout=GH_TIMEOUT,
-        )
+        done = _spawn([_which(env, "gh"), *args, "--body-file", "-"], env, GH_TIMEOUT, body)
     except subprocess.TimeoutExpired:
         raise Failure(
             f"gh timed out after {GH_TIMEOUT} s. Whether the item was filed is unknown: check with gh "
@@ -1142,12 +1242,35 @@ def _read_facts(path: str | None, stdin: TextIO) -> str:
         return handle.read(MAX_PROMPT_BYTES + 1).decode("utf-8", errors="replace")
 
 
-def _confirm(args: argparse.Namespace, stdin: TextIO, out: TextIO) -> bool:
+def _answer(args: argparse.Namespace, stdin: TextIO, out: TextIO) -> str:
+    """`y` to file, `e` to edit first, anything else declines. `--yes` files without asking."""
     if args.yes:
-        return True
-    out.write("File this? [y/N] ")
+        return "y"
+    out.write("File this? [y/N/e to edit] ")
     out.flush()
-    return stdin.readline().strip().lower() in {"y", "yes"}
+    said = stdin.readline().strip().lower()
+    return "y" if said in {"y", "yes"} else "e" if said in {"e", "edit"} else "n"
+
+
+def _edit(body: str, ctx: Ctx) -> str:
+    """Edit the draft in $VISUAL or $EDITOR; the temp copy is removed with its directory. Unchanged on failure."""
+    editor = shlex.split(ctx.env.get("VISUAL") or ctx.env.get("EDITOR") or "")
+    if not editor:
+        ctx.err.write("safo-draft: note: no VISUAL or EDITOR set; nothing was edited\n")
+        return body
+    with tempfile.TemporaryDirectory(prefix="safo-draft-") as scratch:
+        path = Path(scratch) / "draft.txt"
+        path.write_text(body)
+        try:
+            done = _spawn([*editor, str(path)], ctx.env, None, tty=True)
+        except OSError:
+            ctx.err.write("safo-draft: note: the editor could not start; nothing was edited\n")
+            return body
+        if done.returncode != 0:
+            ctx.err.write("safo-draft: note: the editor failed; nothing was edited\n")
+            return body
+        with open(path, "rb") as handle:  # bounded: check_draft refuses anything past its cap
+            return handle.read(MAX_CHECK_CHARS * 4 + 1).decode("utf-8", errors="replace")
 
 
 def _with_footer(body: str) -> str:
@@ -1173,8 +1296,9 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
             "This is a local input error; use a shorter title. Nothing was filed.",
             EXIT_ERROR,
         )
-    body = call_local(ctx.env, ctx.sleep, f"draft-{kind}", model, prompt)
-    ctx.chars_out = len(body)
+    ctx.project = project_of(ctx.env, args.repo)
+    body = call_local(ctx.env, ctx.sleep, f"draft-{kind}", model, prompt, ctx.ids)
+    ctx.drafted, ctx.chars_out = True, len(body)
     if len(body) > MAX_CHECK_CHARS:
         raise Failure(
             f"draft too long to check safely: {len(body)} characters, the limit is {MAX_CHECK_CHARS}. "
@@ -1185,21 +1309,30 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
         body = _with_footer(body)
     if kind == "issue" and args.epic and not _EPIC.search(body):
         body = f"{body.rstrip()}\n\nPart of epic #{args.epic}"
-    why = check_draft(kind, None if kind == "comment" else args.title, body, deny, allow)
-    unchecked = any(_UNCHECKED in x for x in why)
-    if unchecked:  # fail closed: a draft that could not be fully checked is never echoed, nor any line number
-        ctx.out.write(f"--- draft {kind} withheld: it could not be fully checked ---\n")
-        why = [_reason_class(x) for x in why if _UNCHECKED in x or _DENY_MARK in x]
-    elif any(_DENY_MARK in x for x in why):
-        ctx.out.write(f"--- draft {kind} withheld: it matched a private deny entry ---\n")  # never echo the value
-    else:
-        ctx.out.write(f"--- draft {kind} ---\n{body}\n--- end draft ---\n")
-    if why:
-        ctx.out.write("NOT FILED. The draft failed these checks:\n" + "".join(f"  - {x}\n" for x in why))
-        return EXIT_REFUSED
-    if not _confirm(args, ctx.stdin, ctx.out):
-        ctx.out.write("not filed\n")
-        return EXIT_DECLINED
+    baseline = body  # the model output after the wrapper's own mechanical edits (footer, epic line)
+    while True:
+        why = check_draft(kind, None if kind == "comment" else args.title, body, deny, allow)
+        unchecked = any(_UNCHECKED in x for x in why)
+        if unchecked:  # fail closed: a draft that could not be fully checked is never echoed, nor any line number
+            ctx.out.write(f"--- draft {kind} withheld: it could not be fully checked ---\n")
+            why = [_reason_class(x) for x in why if _UNCHECKED in x or _DENY_MARK in x]
+        elif any(_DENY_MARK in x for x in why):
+            ctx.out.write(f"--- draft {kind} withheld: it matched a private deny entry ---\n")  # never echo the value
+        else:
+            ctx.out.write(f"--- draft {kind} ---\n{body}\n--- end draft ---\n")
+        if why:
+            ctx.out.write("NOT FILED. The draft failed these checks:\n" + "".join(f"  - {x}\n" for x in why))
+            ctx.settle("discarded")
+            return EXIT_REFUSED
+        answer = _answer(args, ctx.stdin, ctx.out)
+        if answer == "e":
+            body = _edit(body, ctx)
+            continue
+        if answer != "y":
+            ctx.out.write("not filed\n")
+            ctx.settle("discarded")
+            return EXIT_DECLINED
+        break
     if kind == "issue":
         cmd = ["issue", "create", "--repo", args.repo, "--title", args.title]
     elif kind == "pr":
@@ -1210,6 +1343,7 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
     else:
         cmd = ["issue", "comment", str(args.number), "--repo", args.repo]
     ctx.out.write(_gh(ctx.env, cmd, body) + "\n")
+    ctx.settle("accepted" if body == baseline else "rewritten")  # only after gh succeeded; never changes the exit code
     return EXIT_OK
 
 
@@ -1229,7 +1363,8 @@ def _digest(args: argparse.Namespace, ctx: Ctx) -> int:
         f"regroup or invent items. No em dashes.\n\n{grouped}"
     )
     ctx.model, ctx.chars_in = SHORT_MODEL, len(prompt)
-    summary = call_local(ctx.env, ctx.sleep, ctx.sub, SHORT_MODEL, prompt)
+    ctx.project = project_of(ctx.env, None)
+    summary = call_local(ctx.env, ctx.sleep, ctx.sub, SHORT_MODEL, prompt, ctx.ids)
     ctx.chars_out = len(summary)
     ctx.out.write(f"--- summary (local model) ---\n{summary}\n")
     return EXIT_OK
@@ -1241,6 +1376,27 @@ class Ctx:
     ) -> None:
         self.env, self.out, self.err, self.stdin, self.sleep, self.sub = env, out, err, stdin, sleep, sub
         self.model, self.chars_in, self.chars_out = "", 0, 0
+        self.ids: list[str] = []
+        self.project = NO_ID
+        self.drafted = False
+        self.outcome, self.recorded = NO_ID, False
+
+    @property
+    def call_id(self) -> str:
+        return self.ids[0] if self.ids else NO_ID
+
+    def settle(self, outcome: str) -> None:
+        """Record what happened to the draft. Best effort: a failure adds a counts-only note and nothing else."""
+        self.outcome = outcome
+        self.recorded = record_outcome(self.env, self.call_id, outcome)
+        if not self.recorded:
+            self.err.write("safo-draft: note: outcome not recorded (1 draft); the filing is unaffected\n")
+
+    def row(self) -> dict[str, object]:
+        extra: dict[str, object] = {"call_id": self.call_id, "project": self.project}
+        if self.drafted:
+            extra |= {"outcome": self.outcome, "outcome_recorded": self.recorded}
+        return extra
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1248,6 +1404,9 @@ def parser() -> argparse.ArgumentParser:
         prog="safo-draft", description="local-first drafts and digests (llm-local)", epilog=EXIT_TABLE
     )
     p.add_argument("--report", action="store_true", help="print local-call counts per ISO week")
+    p.add_argument(
+        "--outcome", nargs=2, metavar=("ID", "fact-error"), help="mark a filed draft as having a fact error, later"
+    )
     sub = p.add_subparsers(dest="cmd")
     for name in ("issue", "pr", "comment"):
         s = sub.add_parser(name, help=f"draft a {name} locally, check it, file it after a yes")
@@ -1273,6 +1432,27 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def _mark(call_id: str, outcome: str, env: Mapping[str, str], err: TextIO, now: dt.datetime) -> int:
+    """`safo-draft --outcome ID fact-error`: the one outcome only a human can set, after reading the filed text."""
+    if outcome != "fact-error" or not _ID.fullmatch(call_id):
+        err.write("safo-draft: --outcome takes a call id and the word fact-error (the others are set automatically)\n")
+        return EXIT_ERROR
+    ok = record_outcome(env, call_id, outcome)
+    _log_call(
+        env,
+        now,
+        "outcome",
+        NO_ID,
+        EXIT_OK if ok else EXIT_ERROR,
+        0,
+        0,
+        {"call_id": call_id, "outcome": outcome, "outcome_recorded": ok},
+    )
+    if not ok:
+        err.write("safo-draft: outcome not recorded by llm-local; the mark is kept in the local metrics file\n")
+    return EXIT_OK if ok else EXIT_ERROR
+
+
 def main(
     argv: Sequence[str],
     *,
@@ -1284,11 +1464,15 @@ def main(
     now: dt.datetime | None = None,
 ) -> int:
     try:
-        args = parser().parse_args(list(argv))
+        # argparse prints its usage and errors to the process streams; route them to the caller's streams.
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            args = parser().parse_args(list(argv))
     except SystemExit as stop:
         return int(stop.code) if isinstance(stop.code, int) else EXIT_ERROR
     if args.report:
         return report(env, out)
+    if args.outcome:
+        return _mark(args.outcome[0], args.outcome[1], env, err, now or dt.datetime.now(dt.UTC))
     if not args.cmd:
         err.write("safo-draft: give a subcommand (issue, pr, comment, digest) or --report\n")
         return EXIT_ERROR
@@ -1306,7 +1490,7 @@ def main(
         err.write(f"safo-draft: unexpected {type(problem).__name__}: {problem}\n")
         code = EXIT_INTERNAL
     if ctx.model:
-        _log_call(env, now or dt.datetime.now(dt.UTC), ctx.sub, ctx.model, code, ctx.chars_in, ctx.chars_out)
+        _log_call(env, now or dt.datetime.now(dt.UTC), ctx.sub, ctx.model, code, ctx.chars_in, ctx.chars_out, ctx.row())
     return code
 
 
