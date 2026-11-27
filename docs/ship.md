@@ -104,10 +104,30 @@ that does not parse or has an odd shape, or a word `uses` outside comments that 
 scalar, a flow mapping, a duplicate key), is `NEEDS-HUMAN` ("too many references or nesting too deep to verify" when a cap
 is hit); a comment that says "uses" is ignored, a name or string that says it stops the tool and a human reads the file.
 
-What this does not prove: an author with push access can still change inputs the gate workflow trusts without touching a
-workflow file or a referenced action: scripts, configuration, test inventories or dependencies the workflow runs. Only
-`--protect-path` for each such path (or a ruleset with required workflows) covers them; the tool cannot know them. `path`
-equality is a name match, not a signature. The real control is branch
+The `run:` steps are read too (`safo.shipscan`), as a best-effort derivation of the repository files they execute or
+source: the command word when it is a path (`./ci/gate.sh`), the script after an interpreter (`bash ci/x.sh`,
+`python ci/x.py`, `node x.mjs`, `source x`), a repository module after `python -m` (well-known tools such as pytest, pip,
+mypy and ruff are skipped), the Makefile after `make`, and each shell script's own text in turn (three levels, 40 files).
+`${{ github.workspace }}`, `$GITHUB_WORKSPACE`, `github.action_path`, a step's `working-directory` and a plain `cd` are
+followed. The steps of local composite actions are read the same way. Each file found is compared between the base and
+the pinned head (by content sha); a difference is `NEEDS-HUMAN` naming the first file. A file missing at both refs is a
+generated one and is left alone. Anything it cannot name is `NEEDS-HUMAN` too: command substitution, `eval`, heredocs,
+`xargs`, `find -exec`, a path built from a variable or a `${{ }}` expression, a pipe into an interpreter (`curl | bash`),
+`python -c`, `bash -c`, a `cd` it cannot follow, a path outside the repository, a shell other than bash or sh. Files that
+are only arguments (a test directory handed to pytest) are not listed.
+
+What this does not prove, stated plainly: this is a best-effort derivation, not a proof. Makefile targets, configuration
+files, test inventories, installed dependencies and whatever a Python or Node program imports stay outside it, as does
+anything a script reaches through a path it builds. `--protect-path` adds paths by hand, and `path` equality of the
+workflow run is a name match, not a signature. The real controls are rulesets with required workflows and CODEOWNERS on
+the files the gate relies on; this tool narrows the gap and does not replace them.
+
+The base is pinned too. Its tip is read before any check and compared again right before the merge; when it moved, or
+the merge call answers "Base branch was modified", nothing is merged on the old checks: the whole chain (required
+checks, gate path, workflow and file comparisons, run binding, threads, protection) runs again against the new base, once,
+on the same head, and a second movement is `MERGE-REFUSED`. The gate's check runs are read once more right before the
+merge, and branch protection is read again for every pull request, never remembered from the one before. One merge call
+is made per pass. The real control is branch
 protection with required workflows (rulesets) and CODEOWNERS on `.github/`; this tool narrows the gap and does not
 replace them. A protected context with no `app_id` is accepted from any source; pin it. Other pinned contexts are checked
 by app and name only, not by workflow.
@@ -136,7 +156,8 @@ positive. Differences from the plain mode:
 - `--timeout` is one deadline per PR, shared by the head wait, update-branch, CI, the review wait and the thread read; no
   sleep goes past it, each `gh` call gets at most the time left (min of the per-PR time, the total time and 60 s), no call
   is started once it has passed (`TIMEOUT`, exit 5), and no merge retry starts after it. A merge call that was already
-  sent is followed by its read-back. `--total-timeout`
+  sent is followed by its read-back, which may use up to 30 seconds past the deadline (`RECOVERY_SECONDS`) because it only
+  settles what the call did; no second merge call starts after the deadline. `--total-timeout`
   (default 7200, at most 28800) bounds the whole run: the PR it cuts off prints `TIMEOUT` and the rest `SKIPPED`.
 
 ### The thread check needs branch protection

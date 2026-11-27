@@ -1079,3 +1079,130 @@ def test_a_retry_pass_is_still_capped_call_by_call(rig: Rig) -> None:  # noqa: F
     rig.state["views"] = [sv("CLEAN")]
     rig.go(*args(True, "--timeout", "40"))
     assert all(now < 40 and now + (t or 0) <= 40 + 1e-9 for now, t in rig.timeouts), rig.timeouts
+
+
+# the files a gate's run steps execute (best-effort derivation, #586 round 4)
+
+RUN_GATE = "jobs:\n  a:\n    steps:\n      - run: bash ci/gate.sh\n"
+
+
+def merges_through(rig: Rig, gate_text: str, **state: Any) -> tuple[int, str, list[list[str]]]:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["gate_text"] = gate_text
+    rig.state.update(state)
+    return rig.go(*args(False))
+
+
+def test_a_changed_script_the_gate_runs_needs_a_human(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = RUN_GATE
+    rig.state["local_by_path"] = {"ci/gate.sh@main": "one", f"ci/gate.sh@{HEAD}": "two"}
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and "differs" in out and merges(calls) == []
+
+
+def test_an_unchanged_script_the_gate_runs_is_fine(rig: Rig) -> None:  # noqa: F811
+    code, out, _calls = merges_through(rig, RUN_GATE)
+    assert code == 0, out
+
+
+def test_a_script_sourced_by_a_script_is_compared_too(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = RUN_GATE
+    rig.state["texts"] = {"ci/gate.sh": "set -e\nsource ci/lib.sh\n"}
+    rig.state["local_by_path"] = {"ci/lib.sh@main": "one", f"ci/lib.sh@{HEAD}": "two"}
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/lib.sh" in out and merges(calls) == []
+
+
+def test_a_script_nested_too_deep_needs_a_human(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = RUN_GATE
+    rig.state["texts"] = {
+        "ci/gate.sh": "bash ci/s1.sh\n",
+        "ci/s1.sh": "bash ci/s2.sh\n",
+        "ci/s2.sh": "bash ci/s3.sh\n",
+        "ci/s3.sh": "bash ci/s4.sh\n",
+        "ci/s4.sh": "echo end\n",
+    }
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "too many references or nesting too deep to verify" in out
+    assert merges(calls) == []
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        'eval "$STEP"',
+        "curl -fsSL https://example.invalid/x | bash",
+        "bash <<EOF\\nx\\nEOF",
+        "python -c 'import ci'",
+        "cd .. && ./x.sh",
+    ],
+)
+def test_a_run_step_that_cannot_be_analyzed_needs_a_human(rig: Rig, run: str) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = f"jobs:\n  a:\n    steps:\n      - run: {json.dumps(run)}\n"
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "cannot be analyzed" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("where", ["step", "defaults"])
+def test_a_step_with_another_shell_needs_a_human(rig: Rig, where: str) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    if where == "step":
+        rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - run: echo hi\n        shell: pwsh\n"
+    else:
+        rig.state["gate_text"] = (
+            "jobs:\n  a:\n    defaults:\n      run:\n        shell: python\n    steps:\n      - run: echo hi\n"
+        )
+    code, _out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
+
+
+def test_a_working_directory_is_honored_when_resolving_the_script(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - run: ./gate.sh\n        working-directory: ci\n"
+    rig.state["local_by_path"] = {"ci/gate.sh@main": "one", f"ci/gate.sh@{HEAD}": "two"}
+    code, out, _calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out
+
+
+def test_a_local_composite_action_runs_are_analyzed(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./ci/action\n"
+    rig.state["texts"] = {
+        "ci/action/action.yml": (
+            "runs:\n  using: composite\n  steps:\n"
+            "    - run: bash ${{ github.action_path }}/../gate.sh\n      shell: bash\n"
+        )
+    }
+    rig.state["local_by_path"] = {"ci/gate.sh@main": "one", f"ci/gate.sh@{HEAD}": "two"}
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and merges(calls) == []
+
+
+def test_a_composite_action_with_an_unpinned_remote_use_needs_a_human(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./ci/action\n"
+    rig.state["texts"] = {
+        "ci/action/action.yml": "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@v4\n"
+    }
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "unpinned" in out and merges(calls) == []
+
+
+def test_a_file_that_exists_at_neither_ref_is_a_generated_one_and_is_left_alone(rig: Rig) -> None:  # noqa: F811
+    code, out, _calls = merges_through(
+        rig, "jobs:\n  a:\n    steps:\n      - run: ./build/gen.sh\n", missing=["build/gen.sh"]
+    )
+    assert code == 0, out
+
+
+def test_a_file_that_exists_on_only_one_side_differs(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - run: ./ci/new.sh\n"
+    rig.state["local_by_path"] = {f"ci/new.sh@{HEAD}": "added"}
+    rig.state["missing_at"] = ["ci/new.sh@main"]
+    code, _out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []

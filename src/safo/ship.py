@@ -49,7 +49,7 @@ from urllib.parse import quote
 
 import yaml
 
-from safo import bounded, output
+from safo import bounded, output, shipscan
 from safo.credentials import find_executable, find_gh
 
 EXIT_MERGED = 0
@@ -67,7 +67,8 @@ GATE_RUN_EVENTS = ("pull_request", "push")  # events a trusted gate run may come
 USES_TOKEN = re.compile(r"(?<![\w-])uses(?![\w-])")  # the simple second scan: every word `uses`, comments left out
 COMMENT = re.compile(r"(?:^|[ \t])#.*$", re.MULTILINE)
 MAX_WORKFLOW_BYTES = 262144  # a workflow file larger than this is not read
-MAX_FILES = 20  # workflow files read for one gate
+MAX_FILES = 20  # workflow, action and script files read for one gate
+MAX_EXEC_FILES = 40  # repository files a gate runs that are compared
 RECOVERY_SECONDS = 30.0  # the read that settles what a merge call did may run this long past the deadline
 TOO_MANY = "too many references or nesting too deep to verify"
 PINNED_REF = re.compile(r"[^@\s]+@[0-9a-f]{40}")
@@ -325,8 +326,24 @@ def contents_args(repo: str, path: str, ref: str) -> list[str]:
     return ["api", "-X", "GET", f"repos/{repo}/contents/{quoted}", "-f", f"ref={ref}"]
 
 
-def workflow_refs(text: str) -> tuple[list[str], str]:
-    """(the `uses:` references of jobs.*.uses and jobs.*.steps[*].uses, "") or ([], why the file cannot be trusted).
+def _run_steps(steps: list[Any], workdir: str, shell: Any) -> tuple[list[tuple[str, str]], str]:
+    """The `run:` texts (with their working directories) of a list of steps, or why a step cannot be read."""
+    out: list[tuple[str, str]] = []
+    for step in steps:
+        if "run" not in step:
+            continue
+        text, wd, sh = step["run"], step.get("working-directory", workdir), step.get("shell", shell)
+        if not isinstance(text, str) or not isinstance(wd, str) or sh not in (None, "bash", "sh"):
+            return [], "a run step with a shell or working directory it cannot read"
+        if "$" in wd:
+            return [], "a run step whose working directory is built at run time"
+        out.append((text, wd.strip("/") if wd not in ("", ".") else ""))
+    return out, ""
+
+
+def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[tuple[str, str]], str]:
+    """(the `uses:` references, the `run:` texts, "") of a workflow (jobs.*) or a composite action (runs.steps), or
+    ([], [], why the file cannot be trusted).
 
     Fail closed, never open: a file that is too large, does not parse, uses an anchor or alias, has a shape other than
     mappings and lists where `jobs`, a job or `steps` should be, or has more than MAX_REFS references is refused; and
@@ -335,41 +352,65 @@ def workflow_refs(text: str) -> tuple[list[str], str]:
     that merely says "uses" therefore also stops it: a human reads that file."""
     bad = "cannot be verified (too large, unparsable or an unexpected shape)"
     if len(text.encode("utf-8", "replace")) > MAX_WORKFLOW_BYTES:
-        return [], bad
+        return [], [], bad
     try:
         if any(isinstance(e, yaml.AliasEvent) or getattr(e, "anchor", None) for e in yaml.parse(text)):
-            return [], bad
+            return [], [], bad
         data = yaml.safe_load(text)
     except (yaml.YAMLError, RecursionError, ValueError):
-        return [], bad
+        return [], [], bad
     if not isinstance(data, dict):
-        return [], bad
-    jobs = data.get("jobs")
-    if jobs is None:
-        jobs = {}
-    if not isinstance(jobs, dict):
-        return [], bad
+        return [], [], bad
+    units: list[dict[str, Any]] = []  # jobs, or the one composite action
+    defaults: list[tuple[str, Any]] = []
+    if action:
+        section = data.get("runs")
+        if section is not None and not isinstance(section, dict):
+            return [], [], bad
+        if isinstance(section, dict) and section.get("using") == "composite":
+            units.append(section)
+            defaults.append(("", None))
+        elif isinstance(section, dict) and isinstance(section.get("image"), str):
+            units.append({"uses": section["image"]} if section["image"].startswith("docker://") else {})
+            defaults.append(("", None))
+    else:
+        jobs = data.get("jobs")
+        if jobs is None:
+            jobs = {}
+        if not isinstance(jobs, dict):
+            return [], [], bad
+        for job in jobs.values():
+            if not isinstance(job, dict):
+                return [], [], bad
+            run_defaults = (job.get("defaults") or {}).get("run") or {} if isinstance(job.get("defaults"), dict) else {}
+            if not isinstance(run_defaults, dict):
+                return [], [], bad
+            units.append(job)
+            defaults.append((str(run_defaults.get("working-directory") or ""), run_defaults.get("shell")))
     refs: list[str] = []
-    for job in jobs.values():
-        if not isinstance(job, dict):
-            return [], bad
-        found: list[Any] = [job["uses"]] if "uses" in job else []
-        steps = job.get("steps")
+    runs: list[tuple[str, str]] = []
+    for unit, (workdir, shell) in zip(units, defaults, strict=True):
+        found: list[Any] = [unit["uses"]] if "uses" in unit else []
+        steps = unit.get("steps")
         if steps is not None and not isinstance(steps, list):
-            return [], bad
+            return [], [], bad
         for step in steps or []:
             if not isinstance(step, dict):
-                return [], bad
+                return [], [], bad
             if "uses" in step:
                 found.append(step["uses"])
         if not all(isinstance(ref, str) and ref.strip() for ref in found):
-            return [], bad
+            return [], [], bad
         refs += [ref.strip() for ref in found]
+        texts, problem = _run_steps(steps or [], workdir, shell)
+        if problem:
+            return [], [], problem
+        runs += texts
     if len(refs) > MAX_REFS:
-        return [], TOO_MANY
+        return [], [], TOO_MANY
     if len(USES_TOKEN.findall(COMMENT.sub("", text))) != len(refs):
-        return [], "has a `uses` the parse did not account for; " + bad
-    return refs, ""
+        return [], [], "has a `uses` the parse did not account for; " + bad
+    return refs, runs, ""
 
 
 def name_ok(context: str, name: str) -> bool:
@@ -626,26 +667,75 @@ class Watcher:
         return out.strip()
 
     def gate_refs(self, repo: str, gate: str, base: str, pin: str) -> Result | None:
-        """NEEDS-HUMAN unless every `uses:` the gate workflow (and each local workflow it calls) names is safe: a remote
-        reference pinned by a 40-hex commit (a docker one by digest), or a local workflow or action that is the same on
-        `base` and `pin`. Code the gate runs through plain scripts is not covered: that is --protect-path's job."""
-        seen: set[str] = set()
-        queue = [(gate, 0)]
+        """NEEDS-HUMAN unless everything the gate workflow executes is the same on `base` and `pin`, or pinned:
+        - every `uses:` (of the workflow, of each local workflow and of each local composite action, followed) is a
+          remote reference pinned by a 40-hex commit (a docker one by digest) or a local path identical on both;
+        - every repository file that a `run:` step executes or sources (found by shipscan, shell scripts read in turn)
+          is identical on both, and a `run:` text that cannot be analyzed is itself a stop.
+        It is a derivation, not a proof: Makefile targets, configuration, installed dependencies and what a program
+        imports stay outside it; --protect-path and rulesets with required workflows are the other controls."""
+        seen: set[tuple[str, str]] = set()
+        compared: set[str] = set()
+        queue: list[tuple[str, int, str]] = [(gate, 0, "workflow")]
         while queue:
-            path, depth = queue.pop(0)
-            if path in seen:
+            path, depth, kind = queue.pop(0)
+            if (kind, path) in seen:
                 continue
             if len(seen) >= MAX_FILES:
                 return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-            seen.add(path)
-            code, text, err = self.gh.gh_call(
-                *contents_args(repo, path, pin), "-H", "Accept: application/vnd.github.raw"
-            )
-            if code != 0:
-                raise ShipError(EXIT_ERROR, f"cannot read {clean(path, 200)[0]}: {err.strip()[:200]}")
-            refs, problem = workflow_refs(text)
-            if problem:
-                return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{clean(path, 200)[0]}: {problem}")
+            seen.add((kind, path))
+            where = clean(path, 200)[0]
+            if kind == "action":
+                text = None
+                for name in ("action.yml", "action.yaml"):
+                    code, got, _err = self.gh.gh_call(
+                        *contents_args(repo, f"{path}/{name}", pin), "-H", "Accept: application/vnd.github.raw"
+                    )
+                    if code == 0:
+                        text = got
+                        break
+                if text is None:
+                    continue  # a directory without an action file: it was compared as a whole already
+            else:
+                code, text, err = self.gh.gh_call(
+                    *contents_args(repo, path, pin), "-H", "Accept: application/vnd.github.raw"
+                )
+                if code != 0:
+                    raise ShipError(EXIT_ERROR, f"cannot read {where}: {err.strip()[:200]}")
+            if kind == "script":
+                refs: list[str] = []
+                runs = [(text, "")]
+            else:
+                refs, runs, problem = workflow_refs(text, action=kind == "action")
+                if problem:
+                    return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: {problem}")
+            for run_text, workdir in runs:
+                facts = shipscan.analyze(run_text, action_dir=path if kind == "action" else "", workdir=workdir)
+                if facts.problem:
+                    return Result(
+                        EXIT_NEEDS_HUMAN,
+                        "NEEDS-HUMAN",
+                        f"{where}: a run step cannot be analyzed ({clean(facts.problem, 160)[0]})",
+                    )
+                for file in facts.files:
+                    if file in compared:
+                        continue
+                    if len(compared) >= MAX_EXEC_FILES:
+                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+                    compared.add(file)
+                    if not safe_repo_path(file):
+                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: an unusual path in a run step")
+                    before, after = self.local_state(repo, file, base), self.local_state(repo, file, pin)
+                    if before != after:
+                        return Result(
+                            EXIT_NEEDS_HUMAN,
+                            "NEEDS-HUMAN",
+                            f"{clean(file, 200)[0]} (run by {where}) differs between {base} and the pin",
+                        )
+                for script in facts.scripts:
+                    if depth >= MAX_DEPTH:
+                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+                    queue.append((script, depth + 1, "script"))
             for ref in refs:
                 if ref.startswith("./"):
                     local = ref[2:].rstrip("/")
@@ -660,10 +750,9 @@ class Watcher:
                         return Result(
                             EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{clean(ref, 200)[0]} differs between {base} and the pin"
                         )
-                    if local.endswith((".yml", ".yaml")):
-                        if depth >= MAX_DEPTH:
-                            return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-                        queue.append((local, depth + 1))
+                    if depth >= MAX_DEPTH:
+                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+                    queue.append((local, depth + 1, "workflow" if local.endswith((".yml", ".yaml")) else "action"))
                 elif ref.startswith("docker://"):
                     if not DOCKER_DIGEST.search(ref):
                         return Result(

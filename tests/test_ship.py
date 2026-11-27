@@ -103,7 +103,8 @@ STUB = textwrap.dedent(
         cpath = unquote(url.split("/contents/")[1])
         shown = state.get("path_override", {{}}).get(cpath, cpath)  # a test can make an answer be about another path
         jq = rest[rest.index("--jq") + 1] if "--jq" in rest else ""
-        if cpath in state.get("missing", []) and "-H" not in rest and cpath != ".github/workflows":
+        gone = cpath in state.get("missing", []) or cpath + "@" + fref in state.get("missing_at", [])
+        if gone and "-H" not in rest and cpath != ".github/workflows":
             reply({{"rc": 1, "err": "Not Found"}})  # the file does not exist at either ref
         if "-H" in rest:  # the raw text of a file
             default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: x\\n")
