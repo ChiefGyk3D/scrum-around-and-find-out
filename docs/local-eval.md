@@ -208,7 +208,7 @@ A busy queue (`llm-local` exit 75) is retried by the runner and then, if a model
 model is retried `--busy-retries` times (default 3) with a doubling wait; busy runs never count as failures. Any other
 `llm-local` failure except exit 3 or 4 (the model's own truncated or over-cap runs, which count as not passed) makes
 that model unreachable for the run. The baseline is read with a size cap (64 KiB), no symlink, regular file only,
-duplicate keys and non-finite numbers refused, and scores must be numbers from 0 to 1. `--update-baseline` writes a
+duplicate keys and non-finite numbers refused, and scores must be numbers from 0 to 1. The baseline also stores a digest of the exact fixtures it was measured on; a run on a different `--tasks` selection or an edited fixture set is refused (exit 2) until the baseline is updated. `--update-baseline` writes a
 new file at mode 0600 by replace, never through a symlink, and only when every model produced a score.
 
 It is a separate entry point (`safo-eval-canary`), not `safo eval-canary`: a new `safo` subcommand needs a line in the

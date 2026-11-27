@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+import hashlib
 import json
 import math
 import os
@@ -40,7 +41,7 @@ DEFAULT_THRESHOLD = 0.10  # an absolute drop in pass rate (0.10 = ten points)
 DEFAULT_BASELINE = Path.home() / ".local/share/safo/eval-canary-baseline.json"
 MAX_BASELINE_BYTES = 64 * 1024
 MAX_MODELS = 16
-BASELINE_VERSION = 1
+BASELINE_VERSION = 2
 BUSY_SLEEP = 30.0
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}")
 _MODEL_FAILURE = re.compile(r"exit [34]:.*", re.DOTALL)  # the model's own failure (truncated, over the cap): not passed
@@ -108,7 +109,20 @@ def _read_at(dir_fd: int, name: str) -> bytes:
         os.close(fd)
 
 
+def population_id(fixtures: Sequence[Any]) -> str:
+    """A digest of the exact fixtures scored (task, id and content), so a score is only compared with its own kind."""
+    digest = hashlib.sha256()
+    for text in sorted(repr(fx) for fx in fixtures):
+        digest.update(text.encode("utf-8") + b"\0")
+    return digest.hexdigest()
+
+
 def read_baseline(path: Path) -> dict[str, float]:
+    """The stored scores (see read_baseline_doc for the population they were measured on)."""
+    return read_baseline_doc(path)[0]
+
+
+def read_baseline_doc(path: Path) -> tuple[dict[str, float], str]:
     try:
         dir_fd = _open_dir(path.parent, create=False)
         try:
@@ -125,9 +139,16 @@ def read_baseline(path: Path) -> dict[str, float]:
         doc = bounded.loads(raw, MAX_BASELINE_BYTES)
     except ValueError as exc:  # includes duplicate keys, bad constants, bad UTF-8, depth
         raise CanaryError("baseline is not valid JSON") from exc
-    if not isinstance(doc, dict) or doc.get("version") != BASELINE_VERSION or set(doc) != {"version", "scores"}:
+    if (
+        not isinstance(doc, dict)
+        or doc.get("version") != BASELINE_VERSION
+        or set(doc) != {"version", "scores", "population"}
+    ):
         raise CanaryError("baseline has the wrong shape or version")
     scores = doc["scores"]
+    pop = doc["population"]
+    if not isinstance(pop, str) or not re.fullmatch(r"[0-9a-f]{64}", pop):
+        raise CanaryError("baseline has a bad population id")
     if not isinstance(scores, dict) or not 0 < len(scores) <= MAX_MODELS:
         raise CanaryError("baseline scores are not a small object")
     out: dict[str, float] = {}
@@ -135,16 +156,19 @@ def read_baseline(path: Path) -> dict[str, float]:
         if not isinstance(name, str) or not _MODEL.fullmatch(name) or ".." in name:
             raise CanaryError("baseline holds a bad model name")
         out[name] = _score_value(value)
-    return out
+    return out, pop
 
 
-def write_baseline(path: Path, scores: dict[str, float]) -> None:
+def write_baseline(path: Path, scores: dict[str, float], population: str) -> None:
     """Replace the baseline atomically with mode 0600, all relative to one folder descriptor.
 
     No symlink is followed in any component, a non-regular file is never replaced, and the temporary file and the
     rename both go through the descriptor, so the folder cannot be swapped between the check and the write.
     """
-    text = json.dumps({"version": BASELINE_VERSION, "scores": scores}, indent=1, sort_keys=True) + "\n"
+    text = (
+        json.dumps({"version": BASELINE_VERSION, "scores": scores, "population": population}, indent=1, sort_keys=True)
+        + "\n"
+    )
     tmp = f".{path.name}.{os.getpid()}.tmp"
     try:
         dir_fd = _open_dir(path.parent, create=True)
@@ -253,7 +277,7 @@ def entry(argv: Sequence[str] | None = None, *, runner: Runner | None = None, sl
         bad = [t for t in tasks or [] if t not in le.TASKS]
         if bad:
             raise CanaryError("unknown task name")
-        baseline = {} if args.update_baseline else read_baseline(args.baseline)
+        baseline, stored_pop = ({}, "") if args.update_baseline else read_baseline_doc(args.baseline)
         models = canary_models()
         if not args.update_baseline and not set(models) <= set(baseline):
             raise CanaryError("baseline has no score for a configured model; run with --update-baseline")
@@ -261,6 +285,9 @@ def entry(argv: Sequence[str] | None = None, *, runner: Runner | None = None, sl
             fixtures = le.load_fixtures(args.fixtures, tasks)
         except le.EvalError as exc:
             raise CanaryError(str(exc)) from exc
+        pop = population_id(fixtures)
+        if not args.update_baseline and pop != stored_pop:
+            raise CanaryError("baseline was made from a different task or fixture set; run with --update-baseline")
         call = runner or _default_runner(args.wait)
         results = {m: measure(m, fixtures, args.repeats, call, args.busy_retries, sleep) for m in models}
         unreachable = [m for m, (s, _) in results.items() if s == "unreachable"]
@@ -269,7 +296,7 @@ def entry(argv: Sequence[str] | None = None, *, runner: Runner | None = None, sl
             if unreachable or busy:
                 output.write(sys.stderr, _problem_line(unreachable, busy) + " (baseline not written)")
                 return EXIT_UNREACHABLE if unreachable else EXIT_BUSY
-            write_baseline(args.baseline, {m: round(float(results[m][1] or 0.0), 4) for m in models})
+            write_baseline(args.baseline, {m: round(float(results[m][1] or 0.0), 4) for m in models}, pop)
             output.write(sys.stdout, "eval-canary: baseline written for " + ", ".join(models))
             return EXIT_OK
         if unreachable or busy:  # an incomplete run never turns into a verdict, in either direction

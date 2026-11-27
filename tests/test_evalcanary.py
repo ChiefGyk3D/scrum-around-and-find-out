@@ -61,9 +61,14 @@ def run(tmp: Path, plan: dict[str, Any], *extra: str) -> tuple[int, FakeClient]:
     return code, client
 
 
-def write_base(tmp: Path, scores: dict[str, float]) -> Path:
+def population(tasks: list[str] | None = None) -> str:
+    return ec.population_id(le.load_fixtures(FIXTURES, tasks or ["commit-message"]))
+
+
+def write_base(tmp: Path, scores: dict[str, float], pop: str | None = None) -> Path:
     path = tmp / "base.json"
-    path.write_text(json.dumps({"version": 1, "scores": scores}), encoding="utf-8")
+    doc = {"version": ec.BASELINE_VERSION, "scores": scores, "population": pop or population()}
+    path.write_text(json.dumps(doc), encoding="utf-8")
     return path
 
 
@@ -218,7 +223,7 @@ def test_update_replaces_a_malformed_regular_file(tmp_path: Path) -> None:
     hostile(tmp_path, "malformed")
     code, _ = run(tmp_path, {m: 0.9 for m in MODELS}, "--update-baseline")
     assert code == 0
-    assert json.loads((tmp_path / "base.json").read_text())["version"] == 1
+    assert json.loads((tmp_path / "base.json").read_text())["version"] == ec.BASELINE_VERSION
 
 
 def test_guard_negative_the_hostile_list_is_collected_and_a_good_file_passes(tmp_path: Path) -> None:
@@ -260,7 +265,7 @@ def _ancestor_link(tmp: Path) -> tuple[Path, Path]:
 def test_write_refuses_a_symlink_in_any_ancestor(tmp_path: Path) -> None:
     via, real = _ancestor_link(tmp_path)
     with pytest.raises(ec.CanaryError):
-        ec.write_baseline(via, {m: 0.9 for m in MODELS})
+        ec.write_baseline(via, {m: 0.9 for m in MODELS}, population())
     assert not real.exists()
     assert list(real.parent.iterdir()) == []
 
@@ -277,7 +282,7 @@ def test_read_refuses_a_symlink_in_any_ancestor(tmp_path: Path) -> None:
 
 def test_write_creates_missing_folders_privately_and_reads_back(tmp_path: Path) -> None:
     path = tmp_path / "a" / "b" / "base.json"
-    ec.write_baseline(path, {m: 0.5 for m in MODELS})
+    ec.write_baseline(path, {m: 0.5 for m in MODELS}, population())
     assert ec.read_baseline(path) == {m: 0.5 for m in MODELS}
     assert (path.parent.stat().st_mode & 0o777) == 0o700
     assert (path.stat().st_mode & 0o777) == 0o600
@@ -336,7 +341,7 @@ def test_an_overlong_baseline_name_is_exit_2_not_a_traceback(tmp_path: Path) -> 
     code, _ = run(tmp_path, {m: 0.9 for m in MODELS}, "--update-baseline")
     assert code == 0
     with pytest.raises(ec.CanaryError):
-        ec.write_baseline(long, {m: 0.9 for m in MODELS})
+        ec.write_baseline(long, {m: 0.9 for m in MODELS}, population())
     assert (
         ec.entry(
             ["--baseline", str(long), "--update-baseline", "--tasks", "commit-message"],
@@ -362,5 +367,35 @@ def test_the_baseline_file_and_folder_are_fsynced(tmp_path: Path, monkeypatch: p
         real(fd)
 
     monkeypatch.setattr(os, "fsync", spy)
-    ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS})
+    ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS}, population())
     assert kinds == ["file", "dir"]
+
+
+def test_a_baseline_from_another_task_set_is_exit_2_before_any_call(tmp_path: Path) -> None:
+    write_base(tmp_path, {m: 0.9 for m in MODELS}, pop=population(["pr-summary"]))
+    client = FakeClient({m: 0.9 for m in MODELS})
+    code = ec.entry(args(tmp_path), runner=client, sleep=lambda _s: None)
+    assert code == 2 and client.calls == []
+
+
+def test_a_baseline_without_a_population_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "base.json"
+    path.write_text(json.dumps({"version": 1, "scores": {m: 0.9 for m in MODELS}}))
+    assert run(tmp_path, {m: 0.9 for m in MODELS})[0] == 2
+
+
+def test_the_population_changes_with_the_fixture_set_and_content() -> None:
+    one = le.load_fixtures(FIXTURES, ["commit-message"])
+    both = le.load_fixtures(FIXTURES, ["commit-message", "pr-summary"])
+    assert ec.population_id(one) != ec.population_id(both)
+    assert ec.population_id(one) == ec.population_id(list(reversed(one)))
+    import dataclasses
+
+    edited = [dataclasses.replace(one[0], input=one[0].input + "x"), *one[1:]]
+    assert ec.population_id(one) != ec.population_id(edited)
+
+
+def test_update_stores_the_population_and_compare_accepts_it(tmp_path: Path) -> None:
+    assert run(tmp_path, {m: 0.9 for m in MODELS}, "--update-baseline")[0] == 0
+    assert json.loads((tmp_path / "base.json").read_text())["population"] == population()
+    assert run(tmp_path, {m: 0.9 for m in MODELS})[0] == 0
