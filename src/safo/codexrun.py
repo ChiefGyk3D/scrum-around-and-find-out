@@ -33,10 +33,11 @@ What it does, in order, and stops at the first refusal with NO codex call (exit 
    owned by this user or root and not writable by group or other (a sticky folder such as /tmp passes when root or
    we own it). The config file itself must be ours and not group or world writable.
    Git runs (worktree checks) with the global and system config and attributes switched off, `core.hooksPath` at
-   /dev/null, `core.fsmonitor` off, `protocol.allow` never (a default; the repository's own `protocol.*` keys are refused) and no optional locks. The worktree's `.git` file must name
+   /dev/null, `core.fsmonitor` off, `protocol.allow` never and no optional locks. The worktree's `.git` file must name
    a `<main>/.git/worktrees/<name>` folder outside the worktree, below the home, ours, that names the worktree back.
-   A repository whose own config sets a filter, textconv, include, alias, URL rewrite or similar program key is
-   refused. Then it starts codex by an absolute path, no shell, with an allow-list environment (a fixed PATH plus the
+   A repository whose own config sets a filter, textconv, include, alias, URL rewrite, `protocol.*` or similar key is
+   refused (the `protocol.allow` setting is a default, not absolute). Then it starts codex by an absolute path, no
+   shell, with an allow-list environment (a fixed PATH plus the
    directories of codex and node, HOME from the account database, CODEX_HOME, locale, a private TMPDIR; no `GH_*`,
    no tokens, no `*_API_KEY`, no secret-manager variables), `--ignore-user-config` and `--ignore-rules` (so
    `config.toml` cannot
@@ -356,6 +357,17 @@ GIT_HARDENING = (
     "-c",
     "submodule.recurse=false",
 )
+# The command-scope settings above as git lists them (key lower case): the only ones the config check may skip.
+WRAPPER_COMMAND_SETTINGS = frozenset(
+    {
+        ("core.hookspath", os.devnull),
+        ("core.fsmonitor", "false"),
+        ("protocol.allow", "never"),
+        ("core.attributesfile", os.devnull),
+        ("submodule.recurse", "false"),
+    }
+)
+CONFIG_SCOPES = frozenset({"system", "global", "local", "worktree", "command", "submodule"})
 # Keys of the repository's own config that can start a program or redirect git in ways the options above do not cover
 # (a content filter named by an attributes file, a textconv, an include of another file, a URL rewrite, an alias).
 DANGEROUS_CONFIG_PREFIXES = ("filter.", "include.", "includeif.", "alias.", "url.", "credential.", "protocol.")
@@ -440,9 +452,21 @@ MAX_SUBMODULE_DEPTH = 4
 
 
 def _check_config_keys(git: str, home: str, folder: str) -> None:
-    listing = _git(git, home, folder, "config", "--list", "-z")
-    for entry in listing.split("\0"):
-        key = entry.split("\n", 1)[0].lower()
+    """Git prints `scope NUL key [NEWLINE value] NUL` per setting. Anything that does not fit that shape is refused, and
+    only the wrapper's own command-scope settings are skipped."""
+    listing = _git(git, home, folder, "config", "--list", "--show-scope", "-z")
+    tokens = listing.split("\0")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
+    if not tokens or len(tokens) % 2:
+        raise CodexRunError("the repository config listing is not in the expected form; nothing was run")
+    for scope, record in zip(tokens[0::2], tokens[1::2], strict=True):
+        key, _, value = record.partition("\n")
+        key = key.lower()
+        if scope not in CONFIG_SCOPES or not key:
+            raise CodexRunError("the repository config listing is not in the expected form; nothing was run")
+        if scope == "command" and (key, value) in WRAPPER_COMMAND_SETTINGS:
+            continue
         if (
             key.startswith(DANGEROUS_CONFIG_PREFIXES)
             or key.endswith(DANGEROUS_CONFIG_SUFFIXES)
@@ -731,8 +755,9 @@ def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch:
     config, and command-scope settings (they beat the repository's config) that turn off fsmonitor and hooks and forbid
     network and `ext::` transports. A per-transport `protocol.<name>.allow` key in the repository config would beat
     the general `protocol.allow` setting, so the pre-run check refuses every repository `protocol.*` key; this is not
-    absolute for a config written after that check. RESIDUAL, not closed: the repository config is read by that git at run time, and a
-    `filter.*` / `diff.*.textconv` program cannot be forbidden by name in advance. A process that can write the
+    absolute for a config written after that check. RESIDUAL, not closed: the repository config is read by that git
+    at run time, and a `filter.*` / `diff.*.textconv` program cannot be forbidden by name in advance. A process
+    that can write the
     repository config WHILE codex runs can therefore still get a program started. The checks before the run cover the
     config as it was then (see docs/codex-run.md)."""
     env = {
