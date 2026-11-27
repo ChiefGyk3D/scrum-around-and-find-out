@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-protect-threads` (#541, epic #527): turns on required conversation resolution on a repository's default branch by one GraphQL field (`updateBranchProtectionRule`), dry run by default, `--apply --backup-dir DIR` saves the rule (0600), writes, reads back and verifies every other field is unchanged (else prints the rollback, exit 6); refuses on rulesets, no or several covering rules, or an unreadable field. Separate entry point, no `TOP_LEVEL_COMMANDS` change. Docs: `docs/protect-threads.md`. Tests: `tests/test_protect_threads.py`.
 - `safo-cards` (#591, epic #518): sets Kind, Epic, Effort (and Area and Priority defaults) on project cards from a strict-JSON table, validated against board.yaml option names, REST only (add with POST, one PATCH, a `fields=` read-back that must match), `plan` writes nothing; separate entry point, no `TOP_LEVEL_COMMANDS` change. Docs: `docs/cards.md`. Tests: `tests/test_cards.py`.
 - `safo protection --all` (#541, epic #527): audits the default branch of every repository in the board file (less
   `rules.gate_exempt_repos`) against the standard: `CI green` and every security job the repository's pull-request

@@ -35,6 +35,7 @@ safo-draft = "safo.localdraft:entry"
 safo-eval = "safo.localeval:run"
 safo-eval-canary = "safo.evalcanary:run"
 safo-threads = "safo.threads:run"
+safo-protect-threads = "safo.protect_threads:run"
 safo-runner-check = "safo.runner_check:run"
 
 [tool.setuptools.dynamic]
