@@ -19,6 +19,23 @@
 - `safo-eval-canary --truncation-probe` / `--probe-only` (#569, epic #518): sends one long prompt to the digest model through `llm-local` and alerts (exit 1) when the server's reported cut is no longer `--expected-cap` (default 4098); unreachable 3 over busy 75 over drop 1. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
 - `safo-idle-check` (#578): a separate Stop hook that blocks the end of a turn when fewer than 6 workers run and ready work exists (PRs failing or conflicting with no agent on them, unstarted QUEUE.md items); counts workers from the subagent registry and process table, fails open loudly, caches the PR scan 60 s, logs blocks per day. Not installed by this change. Docs: `docs/idle-check.md`. Tests: `tests/test_idlecheck.py`.
 - `safo-eval-canary` (#540, epic #527): runs the safo-eval fixtures on the two configured local models (read from `safo.localdraft`), compares each pass rate with a stored baseline and exits 1 with one `ALERT` line when a score drops by more than `--threshold` (default 0.10). A busy queue is retried (exit 75 if it stays busy), an unreachable server is reported (exit 3) and never scored as zero, a hostile baseline (symlink, FIFO, oversized, malformed, wrong types) is exit 2, and the baseline is written only with `--update-baseline`. Separate entry point because a `safo` subcommand needs the guard's `TOP_LEVEL_COMMANDS`. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
+- `safo-codex-run` and the shared git config check (`safo.gitconfig`): git now runs with `GIT_NO_LAZY_FETCH=1`, so a
+  partial clone is refused and a missing object is never fetched on demand. A behavior change, documented in
+  `docs/codex-run.md`; test in `tests/test_codexrun.py`.
+- `safo-digest` (#531, child of #518): runs `git` or `gh` (nothing else is supported; only `log`, `show`, `rev-parse`, `ls-files` and a `diff` of resolved revisions or the index, never the working tree; gh options come from a fixed list per subcommand) and prints a capped digest in a
+  fixed untrusted-data frame, saving the full output to a private file. The executable must be a native program,
+  root-owned under root-owned directories, opened without following symlinks and started from the verified descriptor.
+  Only a short list of read-only git subcommands and gh subcommand pairs may be listed; every argument is validated
+  against a per-entry option allowlist with typed values and no control characters. The repository's own config (and every submodule's)
+  must be on a shared allowlist of inert keys, the same one `safo-codex-run` uses (now in `safo.gitconfig`), and
+  program-running git settings are forced off at command scope. The command
+  gets a minimal environment, an empty private home (recreated each run) and only inert pass-through variables from
+  a fixed list. Process containment (child subreaper, `/proc`, pidfds) is mandatory: a timeout, a normal exit or a
+  SIGTERM, SIGHUP or SIGINT kills the command and every descendant, and without containment nothing starts. The output
+  directory and every parent are checked and re-verified before the path is printed; the path is labelled advisory.
+  Digest lines are cleaned and prefixed, header fields are cleaned, and user, host, home, callsign and grid text is
+  replaced (best effort, the saved file is raw). Exit 124 timeout, 125 refused. Docs: `docs/digest.md`. Tests:
+  `tests/test_digest.py`, `tests/digest_driver.py`.
 - `safo-codex-run` (#557): harden git config handling. The repository config check is now an allowlist and the child git environment forces more settings off. Docs: `docs/codex-run.md`. Tests: `tests/test_codexrun.py`.
 - Update the sister-project rule now that the portable edition is public (#573)
 - Add CLAUDE.md and AGENTS.md stating the sister-project rule (#565)
