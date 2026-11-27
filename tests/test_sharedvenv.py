@@ -623,27 +623,6 @@ def test_lock_timeout_must_be_finite(tmp_path: Path, wheels: Path, lock: Path) -
     assert cli(*build_args(lock, tmp_path / "root", wheels), "--lock-timeout", "nan").returncode == 2
 
 
-def test_redact_removes_userinfo_and_query_values() -> None:
-    text = "see https://user:tok3n@example.invalid/simple?token=abc123&x=1 and http://bob@h/p"
-    out = sharedvenv.redact(text)
-    assert "tok3n" not in out and "abc123" not in out and "bob" not in out and "example.invalid" in out
-
-
-def test_index_url_with_credentials_is_refused_and_never_printed(tmp_path: Path, wheels: Path, lock: Path) -> None:
-    done = cli(lock, "--root", tmp_path / "root", "--index-url", "https://user:tok3n@example.invalid/simple")
-    assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
-    assert "credentials" in done.stderr
-    done = cli(lock, "--root", tmp_path / "root", "--find-links", "https://example.invalid/x?token=tok3n")
-    assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
-
-
-def test_build_error_never_shows_url_credentials_even_when_allowed(tmp_path: Path, lock: Path) -> None:
-    url = "http://user:tok3n@127.0.0.1:9/simple"
-    done = cli(lock, "--root", tmp_path / "root", "--index-url", url, "--allow-url-credentials")
-    assert done.returncode == 1
-    assert "tok3n" not in done.stdout + done.stderr
-
-
 def test_writable_entry_fails_reuse_validation(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root, venv = build_in(tmp_path, wheels, lock)
     venv.chmod(0o755)
@@ -752,58 +731,6 @@ def test_numeric_parameters_are_validated_at_the_function_boundary(
     assert not root.exists()
 
 
-SECRET_URLS = [
-    "https://user:tok3n@example.invalid/simple",
-    "https://user:p%40ss-tok3n@example.invalid/simple",
-    "https://user:p@ss-tok3n@example.invalid:8443/simple",
-    "https://user:tok3n@[2001:db8::1]:8443/simple",
-    "HTTPS://USER:tok3n@EXAMPLE.invalid/Simple",
-    "https://example.invalid/simple?token=tok3n",
-    "https://example.invalid/simple#tok3n",
-    "//user:tok3n@example.invalid/simple",
-    "tok3n@example.invalid:wheels",
-    "user:tok3n@example.invalid/simple",
-]
-
-
-@pytest.mark.parametrize("url", SECRET_URLS)
-def test_url_forms_with_secrets_are_detected_and_rebuilt_without_them(url: str) -> None:
-    assert sharedvenv.url_has_secret(url)
-    assert "tok3n" not in sharedvenv.safe_url(url)
-    assert "@" not in sharedvenv.safe_url(url) and "?" not in sharedvenv.safe_url(url)
-
-
-@pytest.mark.parametrize(
-    "value", ["/tmp/wheels", "relative/dir", "/home/a@b/wheels", "https://example.invalid:8443/simple", "./x@y"]
-)
-def test_non_secret_values_pass_through_unchanged(value: str) -> None:
-    assert not sharedvenv.url_has_secret(value)
-    assert sharedvenv.safe_url(value) == value
-
-
-@pytest.mark.parametrize("value", ["https://example.invalid/a b", "https://example.invalid/\tx", "https://[::1/x", ""])
-def test_unusual_url_values_are_refused(value: str) -> None:
-    with pytest.raises(sharedvenv.Refused):
-        sharedvenv.url_has_secret(value)
-
-
-@pytest.mark.parametrize("url", SECRET_URLS)
-def test_redaction_removes_the_supplied_values_wherever_they_appear(url: str) -> None:
-    sharedvenv.register_secrets(["--index-url", url, "--find-links", url])
-    out = sharedvenv.redact(f"Looking in indexes: {url}\nretry {url}/pkg and done")
-    assert "tok3n" not in out
-
-
-def test_unusual_credential_forms_never_reach_output(tmp_path: Path, wheels: Path, lock: Path) -> None:
-    for flag in ("--index-url", "--find-links"):
-        for url in ("https://user:p@ss-tok3n@example.invalid/s", "HTTPS://u:tok3n@h/x", "u:tok3n@h/x"):
-            done = cli(lock, "--root", tmp_path / "root", flag, url)
-            assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
-    args = ["--index-url", "https://user:tok3n@example.invalid/s"]
-    with pytest.raises(sharedvenv.Refused):
-        sharedvenv.ensure(tmp_path / "root2", lock, sys.executable, args, 5)  # a direct caller cannot skip the refusal
-
-
 def test_pip_arguments_outside_the_allowed_grammar_are_refused(tmp_path: Path, lock: Path) -> None:
     for args in (
         ["--extra-index-url", "https://example.invalid"],
@@ -858,28 +785,6 @@ def test_ancestor_made_writable_while_the_root_is_created_is_caught_before_retur
 
 
 @pytest.mark.parametrize(
-    "value",
-    ["https:token", "https:?token=tok3n", "file:///tmp/wheels", "file:/tmp/wheels", "https:", "ftp:///x?token=tok3n"],
-)
-def test_a_scheme_without_a_host_is_refused(value: str) -> None:
-    with pytest.raises(sharedvenv.Refused):
-        sharedvenv.url_has_secret(value)
-
-
-@pytest.mark.parametrize("value", ["/tmp/wheels?token=tok3n", "relative/w#tok3n", "./w?x=tok3n", "~/w?a=b#tok3n"])
-def test_a_query_or_fragment_is_secret_with_or_without_a_host(value: str) -> None:
-    assert sharedvenv.url_has_secret(value)
-    safe = sharedvenv.safe_url(value)
-    assert "tok3n" not in safe and "?" not in safe and "#" not in safe
-
-
-def test_command_line_refuses_odd_forms_without_echoing_them(tmp_path: Path, lock: Path) -> None:
-    for value in ("file:///tmp/wheels", "https:tok3n", "/tmp/w?token=tok3n"):
-        done = cli(lock, "--root", tmp_path / "root", "--find-links", value)
-        assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
-
-
-@pytest.mark.parametrize(
     "token", ["https://[::1/x?token=tok3n", "ftp:///x?token=tok3n", "file:///tok3n/w", "https://h:notaport/tok3n"]
 )
 def test_an_unparsable_url_like_token_is_masked_whole(token: str) -> None:
@@ -892,3 +797,159 @@ def test_a_clean_url_token_without_secrets_is_left_alone() -> None:
         sharedvenv.redact("Looking in indexes: https://example.invalid/simple")
         == "Looking in indexes: https://example.invalid/simple"
     )
+
+
+# ---- round 6: whitelist grammar for index and links values ----
+
+VALID_SOURCES = [
+    "https://example.invalid/simple",
+    "https://example.invalid:8443/simple/",
+    "https://127.0.0.1/",
+    "https://127.0.0.1:65535/a",
+    "https://pypi.example/simple/a+b/c_d~e",
+    "https://a.b-c.example/",
+    "https://xn--bcher-kva.example/x",
+    "/tmp/wheels",
+    "/home/u/my-wheels_1.0+x",
+    "/",
+]
+
+HOSTILE_SOURCES = [
+    # userinfo and credentials
+    "https://user:tok3n@example.invalid/simple",
+    "https://tok3n@example.invalid/",
+    "https://example.invalid@evil.invalid/x",
+    "https://:@example.invalid/",
+    "user:tok3n@example.invalid/simple",
+    "tok3n@example.invalid:wheels",
+    # at sign in a path
+    "https://example.invalid/a@b",
+    "/tmp/a@b",
+    # query and fragment
+    "https://example.invalid/simple?token=tok3n",
+    "https://example.invalid/?",
+    "/tmp/w?x=1",
+    "https://example.invalid/simple#tok3n",
+    "/tmp/w#x",
+    # whitespace and control characters
+    "https://example.invalid/a\tb",
+    "https://example.invalid/a\nb",
+    "https://example.invalid/a b",
+    " https://example.invalid/",
+    "https://example.invalid/ ",
+    "https://example.invalid/a" + chr(0),
+    "https://example.invalid/a" + chr(127),
+    # backslash
+    "https://example.invalid\\@evil.invalid/x",
+    "https://example.invalid/a\\b",
+    "/tmp/a\\b",
+    # percent-encoding
+    "https://example.invalid/a%2Fb",
+    "https://example.invalid/%40",
+    "https://exa%6Dple.invalid/",
+    "https://example.invalid%2f@x/",
+    "/tmp/a%20b",
+    # non-ASCII and IDNA
+    "https://bücher.example/x",
+    "https://example.invalid/xé",
+    "https://☃.example/",
+    # IPv6 and zone ids
+    "https://[::1]/simple",
+    "https://[2001:db8::1]:8443/x",
+    "https://[fe80::1%25eth0]/x",
+    "https://[fe80::1%eth0]/",
+    # scp-like, bare and relative
+    "git@example.invalid:wheels",
+    "example.invalid:/wheels",
+    "relative/dir",
+    "./w",
+    "~/w",
+    "../w",
+    "",
+    # scheme without a host, other schemes
+    "https:token",
+    "https:/example.invalid/x",
+    "https:example.invalid/x",
+    "file:///tmp/wheels",
+    "file:/tmp/w",
+    "https:",
+    "https://",
+    "https:///x",
+    "https://example.invalid",
+    "http://example.invalid/simple",
+    "ftp://example.invalid/",
+    "ssh://example.invalid/x",
+    # case
+    "HTTPS://example.invalid/simple",
+    "Https://example.invalid/",
+    "https://Example.invalid/simple",
+    # trailing and leading dots
+    "https://example.invalid./simple",
+    "https://example.invalid../x",
+    "https://.example.invalid/",
+    # dot segments and double slashes
+    "https://example.invalid/../x",
+    "https://example.invalid/a/../b",
+    "/tmp/../etc",
+    "/tmp/a/..",
+    "https://example.invalid//x",
+    "//tmp/w",
+    # ports
+    "https://example.invalid:0/x",
+    "https://example.invalid:99999/x",
+    "https://example.invalid:/x",
+    "https://example.invalid:80a/x",
+    # host shapes
+    "https://-bad.example/",
+    "https://bad-.example/",
+    "https://under_score.example/",
+    "https://exa mple/",
+    # colon in a local path, length
+    "/tmp/a:b",
+    "https://example.invalid/" + "a" * 2000,
+    "/" + "a" * 2000,
+    "https://" + "a" * 64 + ".example/",
+    "https://" + ".".join(["a" * 50] * 6) + "/",
+]
+
+
+FIXED_REFUSAL = "an index or links value must be https://HOST[:PORT]/PATH or an absolute local directory path"
+
+
+def test_the_hostile_table_is_large_enough() -> None:
+    assert len(HOSTILE_SOURCES) >= 40 and len(set(HOSTILE_SOURCES)) == len(HOSTILE_SOURCES)
+
+
+@pytest.mark.parametrize("value", VALID_SOURCES)
+def test_the_two_valid_forms_are_accepted(value: str) -> None:
+    for flag in ("--index-url", "--find-links"):
+        assert sharedvenv.parse_pip_args([flag, value]) == [value]
+
+
+@pytest.mark.parametrize("value", HOSTILE_SOURCES, ids=lambda v: repr(v)[:50])
+def test_every_hostile_or_odd_value_is_refused_without_being_echoed(value: str) -> None:
+    for flag in ("--index-url", "--find-links"):
+        with pytest.raises(sharedvenv.Refused) as caught:
+            sharedvenv.parse_pip_args([flag, value])
+        assert str(caught.value) == FIXED_REFUSAL  # one fixed text: the value is never echoed
+
+
+def test_command_line_refuses_odd_values_and_has_no_credentials_flag(tmp_path: Path, lock: Path) -> None:
+    for value in ("https://user:tok3n@example.invalid/s", "file:///tmp/wheels", "/tmp/w?token=tok3n", "HTTPS://h/x"):
+        for flag in ("--index-url", "--find-links"):
+            done = cli(lock, "--root", tmp_path / "root", flag, value)
+            assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
+    done = cli(lock, "--root", tmp_path / "root", "--index-url", "https://example.invalid/s", "--allow-url-credentials")
+    assert done.returncode == 2  # the option no longer exists (argparse usage error)
+
+
+def test_ensure_refuses_odd_values_for_direct_callers(tmp_path: Path, lock: Path) -> None:
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.ensure(tmp_path / "root", lock, sys.executable, ["--index-url", "https://u:tok3n@h/x"], 5)
+    assert not (tmp_path / "root").exists()
+
+
+@pytest.mark.parametrize("args", [["--extra-index-url"], ["--trusted-host"], ["--index-url"], ["--no-binary"], ["-i"]])
+def test_a_bare_unknown_or_incomplete_pip_argument_is_refused(args: list[str]) -> None:
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.parse_pip_args(args)

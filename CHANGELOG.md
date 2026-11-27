@@ -7,7 +7,7 @@
   place) and keyed by the lockfile hash, the interpreter identity and the acquisition policy. Prints the interpreter
   path. Strict lockfile grammar, a private copy read through a descriptor, an allowlisted child environment, isolated
   pip, owner, mode and manifest checks on reuse, root ancestor checks, interpreter binding (resolved
-  once, trusted chain, re-verified on every use), parsed and redacted acquisition URLs, validated numeric parameters
+  once, trusted chain, re-verified on every use), whitelisted acquisition values (https URL or absolute local path, never credentials), validated numeric parameters
   and a stated trust boundary. `--gc --max-age-days N` lists old
   venvs it built, `--delete` removes them. Docs: `docs/shared-venv.md`. Tests: `tests/test_sharedvenv.py`.
 - Add CLAUDE.md and AGENTS.md stating the sister-project rule (#565)

@@ -59,15 +59,17 @@ safo-shared-venv --gc --max-age-days 30 --delete
   a valid marker, manifest and layout are deleted; anything else (and any link) is reported as skipped and left alone.
   Leftover build directories are removed only when their name matches the random build-name pattern and they carry this
   tool's build marker.
-- Credentials: acquisition arguments are limited to `--no-index`, `--index-url URL` and `--find-links URL`, each URL
-  parsed with urllib (scp-like and bare `user@host` forms included; whitespace, control characters and unparsable
-  values refused; a value with a scheme but no host, such as `https:x` or `file:///x`, is refused too, so a local
-  wheel directory is given as a plain path). Userinfo, the whole query and the fragment are secret, with or without
-  a host, so a path such as `wheels?x=1` is refused too: such a URL is refused unless
-  `--allow-url-credentials` is given, at the function boundary as well as on the command line (the value is then
-  visible in the process list while pip runs). The exact values supplied, and the secret parts of any other URL in the
-  text, are replaced in every message and in pip's captured output. A URL-looking token that cannot be parsed cleanly is masked whole
-  (`<redacted-url>`) rather than left as it was.
+- Acquisition values: the only arguments accepted are `--no-index`, `--index-url SOURCE` and `--find-links SOURCE`, and
+  a SOURCE must match one of two whitelisted forms or it is refused before anything is used or printed (nothing is
+  parsed or rewritten): (a) `https://HOST[:PORT]/PATH` with HOST a lowercase DNS name or IPv4 address, PORT 1 to
+  65535 and PATH from `[A-Za-z0-9._~/+-]`; (b) an absolute local directory path from `[A-Za-z0-9._/+-]`. Neither may
+  hold a `..` segment or `//`, and no value may exceed 1024 characters. So no userinfo, `@`, query, fragment,
+  percent-encoding, backslash, whitespace, control character, non-ASCII name, IPv6 address, zone id, trailing dot,
+  uppercase scheme or host, other scheme (`http`, `file`, `ssh`), scp-like form, relative path or colon in a path. The
+  refusal text is fixed and never echoes the value. Credentials are never accepted in any form: an index that needs
+  them needs a different mechanism than a command-line URL (the old `--allow-url-credentials` option is gone). As
+  defense in depth, any other text holding `://` that is not an allowed SOURCE is masked whole as `<redacted-url>`
+  in every message and in pip's captured output.
 - Age and timeout: `--max-age-days` must be finite, from 0 to 36500, and `--lock-timeout` finite, from 0 to 7 days, checked in `ensure`, `gc` and `Lock` themselves, not only on the command line;
   anything else (nan, inf, negative, absurd) is refused and nothing is deleted. GC also never selects an entry whose
   age does not compare as at least the threshold.

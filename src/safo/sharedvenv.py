@@ -30,7 +30,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.parse
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -128,68 +127,46 @@ def check_hashes(data: bytes) -> int:
     return count
 
 
-def _analyze(value: str) -> tuple[str, list[str]]:
-    """Parse one index or links value with urllib: the safe form (scheme, host and path only) and its secret parts.
-
-    Userinfo, the whole query and the fragment are secret, with or without a host. Scp-like (`user@host:path`) and
-    bare (`user:pw@host/p`) forms are treated as carrying userinfo. A plain local path has no other secret. A value with
-    a scheme but no host (`https:token`, `file:///x`) is refused, as are whitespace, control characters, an empty value
-    and an unparsable URL: tools disagree on how to read those, so none is guessed.
-    """
-    if not value or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
-        raise Refused("an index or links value is empty or holds whitespace or control characters")
-    try:
-        parts = urllib.parse.urlsplit(value)
-        parts.port  # noqa: B018 - reading the port validates it (a bad port raises ValueError)
-    except ValueError as exc:
-        raise Refused("an index or links value is not a valid URL") from exc
-    secrets: list[str] = []
-
-    def userinfo_parts(userinfo: str) -> None:
-        secrets.append(userinfo)
-        password = userinfo.partition(":")[2]
-        if password:
-            secrets.extend([password, urllib.parse.unquote(password)])
-        secrets.append(urllib.parse.unquote(userinfo))
-
-    def query_parts() -> None:
-        if parts.query:
-            secrets.append(parts.query)
-            secrets.extend(v for _, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if v)
-        if parts.fragment:
-            secrets.append(parts.fragment)
-
-    if parts.netloc:
-        userinfo, at, host = parts.netloc.rpartition("@")
-        if at:
-            userinfo_parts(userinfo)
-        query_parts()
-        return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", "")), [x for x in secrets if x]
-    if "@" in value and not value.startswith(("/", ".", "~")):
-        userinfo, _, rest = value.rpartition("@")
-        userinfo_parts(userinfo)
-        return rest, [x for x in secrets if x]
-    if parts.scheme:
-        raise Refused("an index or links value has a scheme but no host (a plain local path or a full URL is required)")
-    query_parts()
-    return parts.path, [x for x in secrets if x]
-
-
-def url_has_secret(value: str) -> bool:
-    return bool(_analyze(value)[1])
-
-
-def safe_url(value: str) -> str:
-    return _analyze(value)[0]
-
-
-_REGISTERED: list[tuple[str, str, list[str]]] = []
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HTTPS = re.compile(
+    rf"https://(?P<host>{_LABEL}(?:\.{_LABEL})*)(?::(?P<port>[0-9]{{1,5}}))?(?P<path>/[A-Za-z0-9._~/+-]*)"
+)
+_LOCAL = re.compile(r"/[A-Za-z0-9._/+-]*")
+MAX_SOURCE = 1024
 REDACTED_URL = "<redacted-url>"
 _PIP_FLAGS = ("--index-url", "--find-links")
 
 
+def source_is_allowed(value: str) -> bool:
+    """True only for the two whitelisted forms; nothing is parsed, anything else is simply not allowed.
+
+    (a) `https://HOST[:PORT]/PATH`: HOST a lowercase DNS name or IPv4 address, PORT 1 to 65535, PATH from
+        `[A-Za-z0-9._~/+-]`; (b) an absolute local directory path from `[A-Za-z0-9._/+-]`. Neither may hold a `..`
+        segment or `//`. No userinfo, query, fragment, percent-encoding, IPv6, other scheme or relative path.
+    """
+    if not isinstance(value, str) or not value or len(value) > MAX_SOURCE:
+        return False
+    match = _HTTPS.fullmatch(value)
+    if match:
+        host, port, path = match["host"], match["port"], match["path"]
+        if len(host) > 253 or (port is not None and not 1 <= int(port) <= 65535):
+            return False
+    elif _LOCAL.fullmatch(value):
+        path = value
+    else:
+        return False
+    return "//" not in path and ".." not in path.split("/")
+
+
+def check_source(value: str) -> str:
+    if not source_is_allowed(value):
+        # the value is never echoed: it may carry a secret
+        raise Refused("an index or links value must be https://HOST[:PORT]/PATH or an absolute local directory path")
+    return value
+
+
 def parse_pip_args(pip_args: Sequence[str]) -> list[str]:
-    """Accept only `--no-index`, `--index-url URL` and `--find-links URL`; return the URLs."""
+    """Accept only `--no-index`, `--index-url SOURCE` and `--find-links SOURCE`; return the validated sources."""
     urls: list[str] = []
     items = list(pip_args)
     i = 0
@@ -197,47 +174,20 @@ def parse_pip_args(pip_args: Sequence[str]) -> list[str]:
         if items[i] == "--no-index":
             i += 1
         elif items[i] in _PIP_FLAGS and i + 1 < len(items):
-            urls.append(items[i + 1])
+            urls.append(check_source(items[i + 1]))
             i += 2
         else:
-            raise Refused("an acquisition argument outside --no-index, --index-url URL and --find-links URL")
+            raise Refused("an acquisition argument outside --no-index, --index-url SOURCE and --find-links SOURCE")
     return urls
 
 
-def register_secrets(pip_args: Sequence[str]) -> None:
-    """Remember the exact URL values the caller supplied so every later message can be scrubbed of them."""
-    for value in parse_pip_args(pip_args):
-        safe, secrets = _analyze(value)
-        if secrets:
-            _REGISTERED.append((value, safe, secrets))
-
-
 def redact(text: str) -> str:
-    """Remove the registered secret values, and the secret parts of any other URL-looking token, from shown text."""
-    for value, safe, secrets in _REGISTERED:
-        text = text.replace(value, safe)
-        for secret in sorted(secrets, key=len, reverse=True):
-            text = text.replace(secret, "***")
+    """Defense in depth: mask whole any token holding `://` that is not an allowed source, in every shown text."""
     for token in set(text.split()):
         candidate = token.strip("'\"()<>,;")
-        if "://" not in candidate:
-            continue
-        try:
-            safe, secrets = _analyze(candidate)
-        except Refused:
-            text = text.replace(candidate, REDACTED_URL)  # cannot be read cleanly: mask the whole token, fail closed
-            continue
-        if secrets:
-            text = text.replace(candidate, safe)
-            for secret in sorted(secrets, key=len, reverse=True):
-                text = text.replace(secret, "***")
+        if "://" in candidate and not source_is_allowed(candidate):
+            text = text.replace(candidate, REDACTED_URL)
     return text
-
-
-def check_urls(pip_args: Sequence[str], allow: bool) -> None:
-    for value in parse_pip_args(pip_args):
-        if url_has_secret(value) and not allow:
-            raise Refused("an index or links URL carries credentials or a query token (--allow-url-credentials)")
 
 
 def check_timeout(value: float) -> float:
@@ -676,11 +626,9 @@ def ensure(
     python: str,
     pip_args: Sequence[str],
     timeout: float,
-    allow_url_credentials: bool = False,
 ) -> Path:
     check_timeout(timeout)
-    check_urls(pip_args, allow_url_credentials)
-    register_secrets(pip_args)
+    parse_pip_args(pip_args)
     data = read_lockfile(lockfile)
     check_hashes(data)
     key, resolved, signature, base, base_signature = cache_key(hashlib.sha256(data).hexdigest(), python, pip_args)
@@ -793,11 +741,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--lock-timeout", type=_timeout, default=LOCK_TIMEOUT, help="seconds to wait for the build lock"
     )
-    parser.add_argument(
-        "--allow-url-credentials",
-        action="store_true",
-        help="accept userinfo or query tokens in --index-url/--find-links",
-    )
     parser.add_argument("--gc", action="store_true", help="list venvs unused for --max-age-days (no lockfile needed)")
     parser.add_argument("--max-age-days", type=_age, help="age threshold for --gc, required with it")
     parser.add_argument("--delete", action="store_true", help="with --gc: delete what the listing names")
@@ -819,7 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pip_args += ["--index-url", args.index_url]
         if args.find_links:
             pip_args += ["--find-links", args.find_links]
-        print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout, args.allow_url_credentials))
+        print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout))
         return EXIT_OK
     except Refused as exc:
         print(f"safo-shared-venv: refused: {redact(str(exc))}", file=sys.stderr)
