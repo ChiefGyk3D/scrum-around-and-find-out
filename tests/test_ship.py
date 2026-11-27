@@ -52,6 +52,8 @@ STUB = textwrap.dedent(
         reply({{"out": json.dumps(pop("threads"))}})
     if rest[0] == "api" and "update-branch" in rest[1]:
         reply(state.get("update", {{}}))
+    if rest[0] == "api" and "/commits/" in rest[1] and "/pulls" not in rest[1]:
+        reply({{"out": json.dumps({{"parents": [{{"sha": p}} for p in state.get("parents", ["a" * 40])]}})}})
     if rest[0] == "api" and "/reviews" in rest[1]:
         state.setdefault("reviews", [[]])
         reply({{"out": "\\n".join(json.dumps(i) for i in pop("reviews"))}})

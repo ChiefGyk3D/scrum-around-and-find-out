@@ -168,3 +168,37 @@ def test_queue_arguments_are_validated(rig: Rig) -> None:  # noqa: F811
         with pytest.raises(SystemExit) as stop:
             rig.go(*argv, "--repo", REPO)
         assert stop.value.code == 2
+
+
+def test_a_head_change_that_is_not_the_update_commit_is_head_moved(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("BEHIND"), sv("BEHIND", head=NEW)]
+    rig.state["parents"] = [MOVED, "d" * 40]  # a push by someone else: the pin is not a parent
+    code, out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_HEAD_MOVED and NEW in out and merges(calls) == []
+
+
+def test_pr_number_zero_still_stops_the_queue(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("DIRTY", "CONFLICTING")]
+    code, out, calls = rig.go("--queue", "0", "6", "--repo", REPO, "--interval", "1")
+    lines = out.strip().splitlines()
+    assert code == ship.EXIT_CONFLICT and lines[1].startswith("SKIPPED") and merges(calls) == []
+
+
+def test_a_conflict_found_at_merge_time_is_a_conflict_stop(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["merges"] = [{"rc": 1, "err": "Pull request is not mergeable: merge conflict between base and head"}]
+    code, out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_CONFLICT and out.startswith("CONFLICT")
+
+
+def test_update_wait_and_ci_wait_share_one_per_pr_timeout(rig: Rig) -> None:  # noqa: F811
+    pending = [check("CI green", status="IN_PROGRESS")]
+    rig.state["views"] = [
+        sv("BEHIND"),
+        sv("BEHIND"),
+        sv("BEHIND"),
+        sv("BEHIND", head=NEW),
+        sv("CLEAN", head=NEW, rollup=pending),
+    ]
+    code, _out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1", "--timeout", "5")
+    assert code == ship.EXIT_TIMEOUT and sum(rig.slept) <= 5

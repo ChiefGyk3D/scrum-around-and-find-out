@@ -412,7 +412,7 @@ class Watcher:
             return "real"
         return "canary" if self.canary_jobs(repo, check.run_id).get(check.job_id) else "real"
 
-    def wait_ci(self, repo: str, number: int, pin: str) -> Result | None:
+    def wait_ci(self, repo: str, number: int, pin: str, deadline: float | None = None) -> Result | None:
         """None when CI is green on `pin`; otherwise the Result that ends this PR."""
         start = self.clock()
         base = ""
@@ -450,7 +450,11 @@ class Watcher:
                     last = "re-ran a job; waiting"
             else:
                 last = verdict.why
-            if poll == self.max_polls or self.clock() - start >= self.timeout:
+            if (
+                poll == self.max_polls
+                or self.clock() - start >= self.timeout
+                or (deadline is not None and self.clock() >= deadline)
+            ):
                 break
             self.sleep(self.interval)
         return Result(EXIT_TIMEOUT, "TIMEOUT", f"still pending after the wait: {last}")
@@ -523,6 +527,8 @@ class Watcher:
         if head != pin:
             return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
         reason = err.strip().splitlines()[0][:200] if err.strip() else "gh refused"
+        if self.queue and "conflict" in reason.lower():
+            return Result(EXIT_CONFLICT, "CONFLICT", reason)
         if self.queue and any(word in reason.lower() for word in PROTECTED_WORDS):
             return Result(EXIT_PROTECTED, "PROTECTED", reason)
         return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", reason)
@@ -547,7 +553,14 @@ class Watcher:
             return Result(EXIT_CONFLICT, "CONFLICT", "conflicts with the base branch; needs an agent")
         return None
 
-    def update_branch(self, repo: str, number: int, pin: str) -> str | Result:
+    def parents(self, repo: str, sha: str) -> list[str]:
+        data = self.gh.json("api", f"repos/{repo}/commits/{sha}")
+        found = data.get("parents") if isinstance(data, dict) else None
+        if not isinstance(found, list):
+            raise ShipError(EXIT_ERROR, "unreadable commit answer")
+        return [str(p.get("sha")) for p in found if isinstance(p, dict)]
+
+    def update_branch(self, repo: str, number: int, pin: str, deadline: float) -> str | Result:
         """Ask GitHub to merge the base into the branch (once), then return the new head to pin."""
         code, _out, err = self.gh.gh_call(
             "api", f"repos/{repo}/pulls/{number}/update-branch", "-X", "PUT", "-f", f"expected_head_sha={pin}"
@@ -560,10 +573,14 @@ class Watcher:
             data = self.view(repo, number)
             head = str(data["headRefOid"])
             if head != pin:
+                if pin not in self.parents(repo, head):  # someone else pushed: never re-pin to an unreviewed commit
+                    return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
                 self.say(f"  updated the branch: pinned {pin[:12]} -> {head[:12]}")
                 return head
-            if poll < UPDATE_WAIT_POLLS:
-                self.sleep(self.interval)
+            if poll < UPDATE_WAIT_POLLS and self.clock() < deadline:
+                self.sleep(min(self.interval, max(deadline - self.clock(), 0.0)))
+            else:
+                break
         return Result(EXIT_TIMEOUT, "TIMEOUT", f"update-branch accepted but the head stayed {pin[:12]}")
 
     def one_queued(self, repo: str, number: int, expect: str = "") -> Result:
@@ -580,11 +597,11 @@ class Watcher:
                     return stop
                 if data.get("mergeStateStatus") == "BEHIND" and not updated and data.get("state") == "OPEN":
                     updated = True
-                    new = self.update_branch(repo, number, pin)
+                    new = self.update_branch(repo, number, pin, started + self.timeout)
                     if isinstance(new, Result):
                         return new
                     pin = new
-                ended = self.wait_ci(repo, number, pin)
+                ended = self.wait_ci(repo, number, pin, started + self.timeout)
                 if ended is not None:
                     return ended
                 data = self.view(repo, number)
@@ -790,9 +807,9 @@ def main(
     except ShipError as error:
         output.write(out, f"ERROR {error}")
         return error.code
-    stopped = 0
+    stopped: int | None = None
     for number, expect in targets:
-        if stopped:
+        if stopped is not None:
             output.write(out, f"SKIPPED {repo}#{number} queue stopped at #{stopped}")
             continue
         result = watcher.one(repo, number, expect)
