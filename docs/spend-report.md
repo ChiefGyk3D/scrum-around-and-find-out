@@ -1,0 +1,78 @@
+# Spend report
+
+`safo spend` is the yardstick for every token-savings change: one weekly report of weighted Claude spend, with a stored
+baseline so a later week prints the change per line. It is read-only and prints counts and sums only: no prompt text,
+no titles, no paths and no labels from a file.
+
+```sh
+safo spend --week 2026-W48                       # one ISO week (default: this week); `all` for every week found
+safo spend --week 2026-W48 --merges merges.txt   # add the per merged PR line
+safo spend --baseline ~/spend-baseline.json      # first run writes it; later runs print the change
+safo spend --json week.json                      # the same numbers in a new file (mode 0600)
+```
+
+## Inputs
+
+Every input is a flag with a default, and is checked like the other local modes: a path under `GITHUB_WORKSPACE` is
+refused under Actions, a symlink or a file that is not regular is refused (the open does not follow a link and does not
+wait on a FIFO), and a missing default is reported as not found while a missing path you gave is an error.
+
+| Flag | Default | Holds |
+|---|---|---|
+| `--claude` | `~/.claude/projects` | Claude transcripts: the lead is a main session file, an agent is `subagents/agent-*.jsonl` with its `.meta.json` |
+| `--codex` | `~/.codex/sessions` | Codex sessions, counted apart and never added to the Claude numbers |
+| `--llm-local` | `~/.local/share/llm-local/calls.jsonl` | the `llm-local` calls and outcome rows |
+| `--hook-log` | `~/.local/state/safo/hooks/log.jsonl` | one row per dispatch: local step, marked n/a, and the n/a reason class when the log carries one |
+| `--share-log` | `~/.local/state/safo/local-share.jsonl` | the `safo-draft` calls |
+| `--merges` | none | a plain text list of merge dates, one `YYYY-MM-DD` per line (`#` comments and blank lines are skipped) |
+
+## Weights
+
+Weighted tokens are input tokens x1, output x5, cache read x0.1 and cache write (creation) x1.25. They are the constants
+`WEIGHT_INPUT`, `WEIGHT_OUTPUT`, `WEIGHT_CACHE_READ` and `WEIGHT_CACHE_WRITE` in `src/safo/modes/spend.py`. The ratios
+are inferred from published price ratios and are the same for every model, so the numbers rank patterns inside one
+meter; they are not dollars. Codex has no cache write: its uncached input counts x1 and its cached input x0.1.
+
+A transcript writes one row per content block, so rows are de-duplicated by message id and the row with the largest
+output count wins. A message belongs to the ISO week (UTC) of its own timestamp.
+
+## What the report holds
+
+1. Weighted spend by pool: the lead, and agents by type (`implementer`, `general-purpose`, `reviewer` including
+   `adversarial-reviewer`, and `other`, which also takes an agent whose `.meta.json` is missing or unreadable).
+2. The cache-read share of lead and of agents, as a share of weighted spend and as a share of all tokens, and the output
+   share of weighted spend.
+3. Weighted tokens per lead turn, and the share of lead turns past turn 200 and past turn 400 (by count and by weighted
+   spend). Turns are numbered from the start of the session file, not from the start of the week.
+4. Weighted tokens per merged PR: the week's Claude weighted spend divided by the merge dates in the week from `--merges`,
+   or "not given".
+5. Local use: real `llm-local` calls (a task starting with `eval-` is counted apart), calls with project none, failed or
+   busy calls, outcome rows by outcome, the share of dispatches with a local step and with an n/a reason class, and the
+   `safo-draft` calls.
+6. The first-turn context of agents: the median in tokens, and the median share taken by the instruction files and the
+   skill listing where the transcript shows them (sizes in characters, divided by 3.5 characters per token, an estimate).
+7. Codex sessions of the week, counted apart.
+
+The hook log written by `safo hooks` has no n/a reason class today; the dispatch guard log does. Point `--hook-log` at
+the dispatch guard log to see the class split.
+
+## Baseline
+
+`--baseline PATH`: when the file does not exist, the run writes the report's numbers there (created exclusively, mode
+0600) and says so. When it exists, it is read with the bounded JSON loader and never rewritten; the report ends with one
+line per number: the value now, the baseline value, the change and the percent. A number the baseline lacks is marked.
+`--json PATH` writes a new file the same way and refuses an existing one before it reads anything. To start a new
+baseline, delete the old file yourself.
+
+## Bounds
+
+The run stops with a message, and prints no report, when it meets a bound: 50,000 transcript files, folders nested more
+than 8 levels, 512 MiB in one file, 64 MiB in one log, 1,000,000 log lines, or 900 seconds. A line over 8 MiB, a line
+that is not valid JSON (including a repeated key), a usage count that is not a bounded non-negative integer, and a
+symlink or special file inside a folder are skipped and counted at the foot of the report. Files last written before the
+week began are not opened. A full `--week all` over several gigabytes of transcripts takes minutes.
+
+## What it does not show
+
+No dollars, no per-model price, no quality measure, and no brief text: whether a brief named a local step comes from the
+hook log, never from reading the brief.

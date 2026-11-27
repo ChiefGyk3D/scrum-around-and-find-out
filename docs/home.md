@@ -10,6 +10,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Personas](personas.md): the four roles (implementer, reviewer, adversarial reviewer, transcriber) and six packs defined in the Department of Internal Arguments, how SAFO relates to them, and how to install and update them.
 - [Agent profiles](profiles.md): how to brief each agent, with every claim tied to a pointer at a measurement (the loader, the evidence check and the rendering into `examples/harness/` are built).
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
+- [Spend report](spend-report.md): `safo spend`, the weekly weighted token-spend report and stored baseline every token-savings change is measured by.
 - [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit.
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
@@ -38,6 +39,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Local LLM evaluation](local-eval.md): how well the local models do on the work SAFO routes to them, scored by code only, and the routing table.
 - [Runner-first](runner-first.md): `safo-runner-check`, which keeps heavy work on a public repo for the runner and prints the ra-remote command.
 - [Shared GitHub API budget and card edits](ratebudget.md): `ghw`, `safo-ratebudget` and `safo-card`: one budget view for every session, one REST call per card edit.
+- [Kind for open cards and a reconcile write cap](board-kind.md): `safo kind` writes Kind from rules and an approved map; `reconcile --max-writes` stops cleanly.
 - [The idea gate and cross-project line](file.md): `safo-file` matches an idea against the tracked repos, `gh repo list` and memory, requires one answer, and counts cross-project issues.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
