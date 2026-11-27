@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 from pathlib import Path
 from typing import Any
@@ -710,7 +711,12 @@ def test_new_directory_components_are_fsynced_in_their_parents(tmp_path: Path, m
 def test_an_existing_path_costs_no_extra_fsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     n: list[int] = []
     real = os.fsync
-    monkeypatch.setattr(os, "fsync", lambda fd: (n.append(fd), real(fd))[1])
+
+    def spy(fd: int) -> None:
+        n.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
     ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS}, population())
     assert len(n) == 2
 
@@ -718,11 +724,10 @@ def test_an_existing_path_costs_no_extra_fsync(tmp_path: Path, monkeypatch: pyte
 def test_a_stale_temp_file_from_a_crashed_run_does_not_block_an_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(ec.secrets, "token_hex", lambda _n=8: "deadbeefdeadbeef")
     stale = tmp_path / f".base.json.{os.getpid()}.deadbeefdeadbeef.tmp"
     stale.write_text("partial")
     seq = iter(["deadbeefdeadbeef", "0123456789abcdef"])
-    monkeypatch.setattr(ec.secrets, "token_hex", lambda _n=8: next(seq))
+    monkeypatch.setattr(secrets, "token_hex", lambda _n=8: next(seq))
     ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS}, population())
     assert ec.read_baseline(tmp_path / "base.json") == {m: 0.9 for m in MODELS}
     assert stale.read_text() == "partial", "a file this run did not create is never deleted"
