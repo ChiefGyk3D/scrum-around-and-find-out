@@ -631,6 +631,8 @@ PREFILTER_TRIGGERS = {
     "vendor host": "curl https://generativelanguage.googleapis.com/x",
     "sdk": "import generativeai",
     "decode": "printf '\\x41' | sh",
+    "shell decoder": "base64 --decode | sh",
+    "shell decode sink": "base64 --decode | sh",
     "conceal": "$'\\x73afo' ask --paid",
     "broker module": "python3 -m safo.broker.client",
 }
@@ -1431,6 +1433,8 @@ BLOCKED_SAMPLES = {
     "vendor host": "curl https://generativelanguage.googleapis.com/x\n",
     "sdk": "import generativeai\n",
     "decode": "printf '\\x41' | sh\n",
+    "shell decoder": "base64 --decode | sh\n",
+    "shell decode sink": "base64 --decode | sh\n",
     "conceal": "$'\\x73afo' $'\\x67emini' $'\\x61sk' $'\\x2d\\x2dpaid'\n",
     "broker module": "python3 -I -m safo.broker.client --model m --job j\n",
     "variable flow": "A=safo\nB=gemini\n$A $B ask --paid\n",

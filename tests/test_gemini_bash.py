@@ -117,26 +117,31 @@ def test_the_classifier_leaves_ordinary_commands_alone(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "printf %s cGF5bG9hZA== | base64 -d | sh",
-        "printf %s cGF5bG9hZA== | openssl base64 -d | bash",
-        "printf %s 7061796c6f6164 | xxd -r -p | zsh",
-        r"printf '\x70\x61\x79\x6c\x6f\x61\x64' | dash",
-        r"echo -e '\160\141\171\154\157\141\144' | ksh",
-        "printf %s cGF5bG9hZA== | basenc --base64 --decode | env sh",
-        "printf %s payload | uudecode | xargs sh",
-        "python -c 'import base64; print(base64.b64decode(\"cGF5bG9hZA==\"))' | ruby",
-        'perl -e \'print pack("H*", "7061796c6f6164")\' | node',
-        'sh -c "$(printf %s cGF5bG9hZA== | base64 --decode)"',
-        "source <(printf %s 7061796c6f6164 | xxd -r -p)",
-        'python <<< "$(printf %s cGF5bG9hZA== | base64 -d)"',
-        "printf %s cGF5bG9hZA== | base64 -d > /tmp/payload; sh /tmp/payload",
-    ],
-)
+DECODE_TO_INTERPRETER = [
+    "printf %s cGF5bG9hZA== | base64 -d | sh",
+    "printf %s cGF5bG9hZA== | openssl base64 -d | bash",
+    "printf %s 7061796c6f6164 | xxd -r -p | zsh",
+    r"printf '\x70\x61\x79\x6c\x6f\x61\x64' | dash",
+    r"echo -e '\160\141\171\154\157\141\144' | ksh",
+    "printf %s cGF5bG9hZA== | basenc --base64 --decode | env sh",
+    "printf %s payload | uudecode | xargs sh",
+    "python -c 'import base64; print(base64.b64decode(\"cGF5bG9hZA==\"))' | ruby",
+    'perl -e \'print pack("H*", "7061796c6f6164")\' | node',
+    'sh -c "$(printf %s cGF5bG9hZA== | base64 --decode)"',
+    "source <(printf %s 7061796c6f6164 | xxd -r -p)",
+    'python <<< "$(printf %s cGF5bG9hZA== | base64 -d)"',
+    "printf %s cGF5bG9hZA== | base64 -d > /tmp/payload; sh /tmp/payload",
+]
+
+
+@pytest.mark.parametrize("command", DECODE_TO_INTERPRETER)
 def test_the_classifier_denies_decoded_output_that_reaches_an_interpreter(command: str) -> None:
     assert geminibrief.shell_command_class(command) is not None, command
+
+
+@pytest.mark.parametrize("command", DECODE_TO_INTERPRETER)
+def test_the_prefilter_selects_every_decode_to_interpreter_shape(command: str) -> None:
+    assert geminibrief.relevant(command), command
 
 
 @pytest.mark.parametrize(
@@ -152,6 +157,29 @@ def test_the_classifier_denies_decoded_output_that_reaches_an_interpreter(comman
 )
 def test_the_classifier_allows_decode_lookalikes_that_do_not_reach_an_interpreter(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "printf '\\x41' | base64 -d | xargs " + "-n 1 " * 10_000,
+        "printf '\\x41' | base64 -d " + "> " * 20_000,
+        "printf '\\x41' | base64 -d | sh '" + "x" * 60_000,
+    ],
+)
+def test_decode_classification_is_bounded_on_pathological_input(hostile: str) -> None:
+    command = hostile[: geminibrief.SHELL_CAP]
+    start = time.process_time()
+    try:
+        geminibrief.shell_command_class(command)
+    except Exception as err:  # pragma: no cover - the assertion records the hostile case if the guard ever raises
+        pytest.fail(f"classification raised {type(err).__name__}: {err}")
+    assert time.process_time() - start < 2.0
+
+
+def test_more_than_the_decoder_processing_cap_is_denied() -> None:
+    command = "; ".join(["base64 -d input"] * (geminibrief.MAX_SHELL_DECODERS + 1) + ["sh"])
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
 
 
 def test_the_classifier_allows_a_plain_path_to_carry_issue_text() -> None:

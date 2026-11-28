@@ -79,7 +79,7 @@ VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
 # must be added here (a test fails otherwise); the second field names it.
 # words built with escapes, printf -v, ANSI-C quoting: a brief that has them is read even without a Gemini word
 CONCEAL = re.compile(r"\$'[^']*\\|printf\s+-v\b|\\x[0-9a-fA-F]{2}|\\[0-7]{3}|\\u[0-9a-fA-F]{4}")
-PREFILTER = (
+PREFILTER: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("safo", re.compile("safo")),
     ("gemini", re.compile("gemini")),
     ("paid config", PAID_CONFIG),
@@ -267,6 +267,8 @@ def relevant(text: str) -> bool:
     lower case text. Words built with escapes (ANSI-C quoting, `printf -v`, hex or octal escapes) make a brief relevant
     on their own, since the words and the options may both be what the escapes hide."""
     concealed = False
+    shell_decoder = False
+    shell_sink = False
     for line in _join(text).splitlines():
         norm, _, low, pre_low, pre_raw = _views(line)
         raw = norm.lower()
@@ -277,6 +279,14 @@ def relevant(text: str) -> bool:
                 concealed = concealed or bool(pattern.search(raw) or pattern.search(pre_raw))
             elif name == "decode":
                 if pattern.search(raw) or pattern.search(pre_raw):
+                    return True
+            elif name == "shell decoder":
+                shell_decoder = shell_decoder or bool(pattern.search(raw) or pattern.search(pre_raw))
+                if shell_decoder and shell_sink:
+                    return True
+            elif name == "shell decode sink":
+                shell_sink = shell_sink or bool(pattern.search(low) or pattern.search(pre_low))
+                if shell_decoder and shell_sink:
                     return True
             elif pattern.search(low) or pattern.search(pre_low):
                 return True
@@ -1220,50 +1230,138 @@ _NETWORK_TOOL = re.compile(
     r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
 )
 _SHELL_DECODER = re.compile(
-    r"(?:\bbase64\b[^|;&\n]{0,80}(?:-d\b|-D\b|--decode\b)"
-    r"|\bopenssl\b[^|;&\n]{0,80}(?:-d\b|--decode\b)"
-    r"|\bxxd\b[^|;&\n]{0,80}(?:-r\b|--revert\b)"
-    r"|\bbasenc\b[^|;&\n]{0,80}(?:-d\b|--decode\b)"
-    r"|\buudecode\b"
-    r"|\bprintf\b[^|;&\n]{0,160}\\(?:x[0-9a-f]{2}|[0-7]{3})"
-    r"|\becho\b[^|;&\n]{0,40}(?:-e\b|-[a-df-z]*e[a-z]*\b)[^|;&\n]{0,160}\\(?:x[0-9a-f]{2}|[0-7]{3})"
-    r"|\bpython[\d.]*\b[^|;&\n]{0,40}(?:-c\b|-[a-z]*c[a-z]*\b)"
-    r"|\bperl\b[^|;&\n]{0,40}(?:-e\b|-[a-z]*e[a-z]*\b))",
+    r"\b(?:base64|openssl|xxd|basenc|uudecode|printf|echo|python[\d.]*|perl)\b",
     re.IGNORECASE,
 )
 _SHELL_DECODE_SINK = re.compile(
-    r"(?:\b(?:env\s+)?(?:sh|bash|zsh|dash|ksh)\b|\bxargs\s+(?:-[^|;&\n]+\s+)*(?:sh|bash|zsh|dash|ksh)\b"
-    r"|\b(?:eval|source)\b|(?<!\S)\.(?=\s)|\b(?:python[\d.]*|perl|ruby|node|nodejs)\b)",
+    r"(?:\b(?:sh|bash|zsh|dash|ksh|eval|source|python[\d.]*|perl|ruby|node|nodejs)\b|(?<!\S)\.(?=\s))",
     re.IGNORECASE,
 )
+MAX_SHELL_DECODERS = 32
+_DECODE_SINKS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "eval", "source", ".", "perl", "ruby", "node", "nodejs"})
+_DECODE_WRAPPERS = frozenset({"env", "xargs"})
+_XARGS_VALUE_OPTIONS = frozenset({"-I", "-n", "-P", "-d", "-L", "-s", "-E", "-a"})
+PREFILTER += (("shell decoder", _SHELL_DECODER), ("shell decode sink", _SHELL_DECODE_SINK))
+
+
+def _shell_unit_command(unit: shellunits.Unit, tick: Callable[[], None]) -> tuple[str, list[str]]:
+    """Return the static command word and arguments needed by the decode guard; unknown dynamic words stay empty."""
+    words: list[str | None] = []
+    for shell_word in unit.words:
+        tick()
+        words.append(shell_word.value)
+    i = 0
+    while i < len(words):
+        tick()
+        value = words[i]
+        if value is None:
+            return "", []
+        if "=" in value and not value.startswith("=") and i == 0:
+            i += 1
+            continue
+        command = value.rsplit("/", 1)[-1].lower()
+        i += 1
+        if command not in _DECODE_WRAPPERS:
+            args: list[str] = []
+            while i < len(words):
+                tick()
+                arg = words[i]
+                if arg is not None:
+                    args.append(arg)
+                i += 1
+            return command, args
+        while i < len(words):
+            tick()
+            option = words[i]
+            if option is None:
+                return "", []
+            if option == "--":
+                i += 1
+                break
+            if command == "env" and "=" in option and not option.startswith("="):
+                i += 1
+                continue
+            if not option.startswith("-") or option == "-":
+                break
+            i += 1
+            if option in _XARGS_VALUE_OPTIONS or (command == "env" and option in {"-u", "-C", "-S"}):
+                i += 1
+    return "", []
+
+
+def _option_has(options: set[str], letter: str, tick: Callable[[], None]) -> bool:
+    for option in options:
+        tick()
+        if not option.startswith("--") and letter in option[1:]:
+            return True
+    return False
+
+
+def _decoder_unit(unit: shellunits.Unit, tick: Callable[[], None]) -> bool:
+    command, args = _shell_unit_command(unit, tick)
+    options: set[str] = set()
+    for arg in args:
+        tick()
+        if arg.startswith("-"):
+            options.add(arg)
+    if command in {"base64", "basenc"}:
+        return bool(options & {"-d", "-D", "--decode"})
+    if command == "openssl":
+        return bool(options & {"-d", "--decode"})
+    if command == "xxd":
+        return bool(options & {"-r", "--revert"})
+    if command == "uudecode":
+        return True
+    raw_parts: list[str] = []
+    for word in unit.words:
+        tick()
+        raw_parts.append(word.raw)
+    raw = " ".join(raw_parts)
+    escaped = re.search(r"\\(?:x[0-9a-fA-F]{2}|[0-7]{3})", raw) is not None
+    if command == "printf":
+        return escaped
+    if command == "echo":
+        return escaped and _option_has(options, "e", tick)
+    if command.startswith("python"):
+        return _option_has(options, "c", tick)
+    return command == "perl" and _option_has(options, "e", tick)
 
 
 def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
     """True when a decoder's output is connected to a shell or interpreter in the submitted command."""
     joined = _join(command)
-    tick()
-    decoders = list(_SHELL_DECODER.finditer(joined))
-    if not decoders or _SHELL_DECODE_SINK.search(joined) is None:
+    if _SHELL_DECODER.search(joined) is None or _SHELL_DECODE_SINK.search(joined) is None:
         return False
+    try:
+        units = shellunits.parse(joined, shellunits._Counter(), tick)
+    except shellunits.Unreadable:
+        return True  # both candidate classes are present, but the shell tokenizer cannot prove their connection safe
+    decoders: list[int] = []
+    commands: list[tuple[str, list[str]]] = []
+    for index, unit in enumerate(units):
+        tick()
+        commands.append(_shell_unit_command(unit, tick))
+        if _decoder_unit(unit, tick):
+            decoders.append(index)
+            if len(decoders) > MAX_SHELL_DECODERS:
+                return True
     for decoder in decoders:
         tick()
-        tail = joined[decoder.end() :]
-        if re.search(r"\|\s*" + _SHELL_DECODE_SINK.pattern, tail, re.IGNORECASE):
-            return True
-    for decoder in decoders:
-        for marker in ("$(", "<(", ">("):
-            opened = joined.rfind(marker, 0, decoder.start())
-            if opened < 0 or ")" not in joined[decoder.end() :]:
+        unit = units[decoder]
+        written: set[str] = set()
+        for operator, word in unit.redirs:
+            tick()
+            if operator.startswith(">") and word.value is not None:
+                written.add(word.value)
+        for later in range(decoder + 1, len(units)):
+            tick()
+            sink, args = commands[later]
+            if sink not in _DECODE_SINKS and not sink.startswith("python"):
                 continue
-            command_start = max(joined.rfind(";", 0, opened), joined.rfind("\n", 0, opened)) + 1
-            prefix = joined[command_start:opened]
-            if _SHELL_DECODE_SINK.search(prefix) is not None:
+            if units[later].pipe == unit.pipe:
                 return True
-    temporary = re.compile(r">\s*(?P<path>[^\s;&|]+)[^;&\n]*(?:;|&&|\n)(?P<run>.*)", re.DOTALL)
-    for decoder in decoders:
-        written = temporary.search(joined, decoder.end())
-        if written is not None and written.group("path") in written.group("run"):
-            return _SHELL_DECODE_SINK.search(written.group("run")) is not None
+            if written.intersection(args):
+                return True
     return False
 
 
