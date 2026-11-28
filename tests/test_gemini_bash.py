@@ -142,6 +142,43 @@ def test_the_classifier_denies_decoded_output_that_reaches_an_interpreter(comman
 @pytest.mark.parametrize(
     "command",
     [
+        r"printf %b '\0'164'\0'162'\0'165'\0'145 | sh",
+        r"printf %b '\0'164'\0'162 | sh",
+        r"printf %b $'\0'164$'\0'162$'\0'165$'\0'145 | sh",
+        r'printf %b "\\0"164"\\0"162"\\0"165"\\0"145 | sh',
+        r"printf %b '\0145\' '\0143' | sh",
+        r"""printf %b '\0'164""'\0'162'\0'165'\0'145 | sh""",
+        r"echo -e '\0'164'\0'162'\0'165'\0'145 | sh",
+        r"printf %b '\0'164'\0'162'\0'165'\0'145; sh",
+        r"printf %b '\0'164'\0'162; sh",
+        r"printf %b $'\0'164$'\0'162$'\0'165$'\0'145; sh",
+        r'printf %b "\\0"164"\\0"162"\\0"165"\\0"145; sh',
+        r"printf %b '\0145\' '\0143'; sh",
+        r"""printf %b '\0'164""'\0'162'\0'165'\0'145; sh""",
+        r"echo -e '\0'164'\0'162'\0'165'\0'145; sh",
+    ],
+)
+def test_quoted_word_fragments_cannot_hide_an_escape_decoder_from_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hello",
+        r'''printf '%s\n' "$a"''',
+        "python3 -c 'print(1)'",
+        "cat file | wc -l",
+        r"printf 'a\n' | wc -l",
+    ],
+)
+def test_escape_prefilter_controls_without_a_decoder_sink_pair_are_allowed(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "base64 -d input > payload; sh < payload",
         "base64 -d input; sh",
         "sh; base64 -d input",

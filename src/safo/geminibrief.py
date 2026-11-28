@@ -1257,6 +1257,7 @@ _SHELL_DECODER = re.compile(
 )
 MAX_SHELL_DECODERS = 32
 _DECODE_COMMANDS = frozenset({"base64", "basenc", "openssl", "xxd", "uudecode", "printf", "echo"})
+_SHELL_DECODER_NAME = rf"\b(?:{'|'.join(sorted(map(re.escape, _DECODE_COMMANDS)))})\b"
 _INLINE_INTERPRETERS = frozenset({"python", "perl", "ruby", "node", "nodejs", "php"})
 _INLINE_DECODER_PREFILTER = re.compile(
     r"(?:^|[;&|()\n]\s*)(?:[^\s;&|()]+/)?(?:python[\d.]*\s+[^;&|()\n]*-[^-\s]*c"
@@ -1379,12 +1380,10 @@ def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -
             flags = word.value[1:].lower()
             has_c = has_c or "c" in flags
             has_e = has_e or "e" in flags
-    raw_parts: list[str] = []
-    for word in unit.words:
+    escaped = False
+    for word in unit.words[index + 1 :]:
         tick()
-        raw_parts.append(word.raw)
-    raw = " ".join(raw_parts)
-    escaped = re.search(r"\\(?:x[0-9a-fA-F]{2}|[0-7]{3})", raw) is not None
+        escaped = escaped or ("\\" in word.value if word.value is not None else "\\" in word.raw)
     if command == "printf":
         return escaped
     if command == "echo":
@@ -1431,9 +1430,21 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
         or _SHELL_DECODER.search(stripped) is not None
         or _INLINE_DECODER_PREFILTER.search(stripped) is not None
     )
-    prefilter_sink = _SHELL_DECODE_SINK.search(joined) is not None
+    prefilter_sink = _SHELL_DECODE_SINK.search(joined) is not None or _SHELL_DECODE_SINK.search(stripped) is not None
+    quoted_decoder_with_sink = (
+        any(marker in joined for marker in "'\"\\")
+        and prefilter_sink
+        and (
+            re.search(_SHELL_DECODER_NAME, joined, re.IGNORECASE)
+            or re.search(_SHELL_DECODER_NAME, stripped, re.IGNORECASE)
+        )
+    )
     dynamic = _DYNAMIC_SHELL_MARKER.search(joined) is not None
-    if not decoder_prefilter and not (has_continuation and (prefilter_sink or dynamic)):
+    if (
+        not decoder_prefilter
+        and not quoted_decoder_with_sink
+        and not (has_continuation and (prefilter_sink or dynamic))
+    ):
         return False
     try:
         counter = shellunits._Counter()
