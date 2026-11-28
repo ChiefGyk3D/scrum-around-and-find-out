@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -145,9 +146,19 @@ def test_gh_endless_output_is_capped(box: Box) -> None:
 
 def alive(pid: int) -> bool:
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in {"Z", "X", "x"}  # dead states
     except OSError:
         return False
+
+
+def describe(pid: int) -> str:
+    """What /proc says about a process that should be gone, so a failure on a runner names its cause."""
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError as problem:
+        return f"/proc/{pid}/stat unreadable: {problem}"
+    fields = stat_text.rsplit(")", 1)[1].split()
+    return f"state={fields[0]} ppid={fields[1]} pgrp={fields[2]} session={fields[3]}"
 
 
 def test_gh_descendant_holding_the_pipes_is_killed(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,7 +174,36 @@ def test_gh_descendant_holding_the_pipes_is_killed(box: Box, monkeypatch: pytest
         if not alive(pid):
             break
         time.sleep(0.1)
-    assert not alive(pid)
+    assert not alive(pid), describe(pid)
+
+
+def test_a_group_kill_that_misses_a_descendant_is_repeated(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first group signal is swallowed, as if a descendant had been forked past it: the kill is sent again."""
+    pidfile = box.log / "pid"
+    script(box.bin / "gh", f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\necho url\n")
+    monkeypatch.setattr(idea_gate, "CALL_TIMEOUT", 0.5)
+    real_killpg = os.killpg
+    sent: list[int] = []
+
+    def killpg_(pgid: int, sig: int) -> None:
+        sent.append(pgid)
+        if len(sent) > 1:
+            real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", killpg_)
+    with pytest.raises(SafoError, match="timed out"):
+        box.deps().create_issue("o/r", "t", "b")
+    pid = int(pidfile.read_text())
+    try:
+        for _ in range(30):
+            if not alive(pid):
+                break
+            time.sleep(0.1)
+        assert not alive(pid), describe(pid)
+        assert len(sent) > 1
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(pid, 9)  # the test's own sleep, by exact pid
 
 
 # ---- 3 and 5. the ledger -----------------------------------------------------------------------------------------
