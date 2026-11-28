@@ -39,7 +39,10 @@ visible degraded allow).
 exist). `--agents` and `--agents-local` follow as before. A rerun of `install` replaces an existing legacy
 `safo hooks guard` line with the new one, in place, and touches no other hook; a legacy line with a different launcher
 is still a "migrate by hand" refusal. `safo hooks status` shows the installed form: `new`, `legacy`, `mixed` (both), `absent`, or `unknown` (the file cannot be
-read as settings). It counts an entry as the guard by the SAME rule `install` accepts one (one function,
+read as settings). The wrapped command `command -v safo-guard >/dev/null 2>&1 && exec safo-guard || exit 0` (which
+lets a session start when the entry point is missing) is read as the `new` form (#615); only that exact shape counts,
+with the direct form after `exec` (`--agents` tails as for the plain form), and `install` neither writes it nor treats
+it as its own. It counts an entry as the guard by the SAME rule `install` accepts one (one function,
 `entry_problems` in the hooks module of the safo package): the type is `command` and the matcher is `Agent|Task|Bash` (or the older
 `Agent|Task` that `install` migrates). A guard-shaped command under another matcher (`Read`, empty, a regex that
 leaves out Agent) or another type (`prompt`, `agent`, none) would never run, so status says `ineffective (wrong
@@ -488,6 +491,17 @@ nothing, and the shorter ones are checked against the deadline line by line. The
 denial names the rule (`gemini-material`) and a fixed phrase class, such as "the vendor API host or SDK", and points at the
 wrapper; it never repeats the command. A command that cannot be checked before the deadline is denied.
 
+**The check's time budget (#615).** The deadline is not fixed. It starts at 3 s (it was 1.5 s) and grows with the
+one-minute load average per core, `3 s x load / cores` when that is above 3 s, up to a cap of 5 s, half the 10 s hook
+timeout, so the decision is still written in time. A load that cannot be read, or is not a number, gives the 3 s floor
+(a load that is infinite gives the cap). The budget never exceeds what is left of the hook's own: the check's deadline is the lesser of the load-aware value and
+the guard's pre-decision deadline, and when none is left the command is denied at once, unchecked, as `input-shell`
+(fail closed). Nothing else changes: a check that still runs out is denied as above and logged
+as `input-shell` with its duration. The tradeoff: the check itself is slowed by a busy machine, and a fixed budget turned
+that load into denials of clean commands. A longer budget costs at most the cap in added wait on a command that is slow
+to check, and it never lets a command through that was not checked. Nothing here is a new measurement; the floor and the
+cap are chosen limits (`SHELL_CHECK_FLOOR_SECONDS`, `SHELL_CHECK_CAP_SECONDS` in `safo.modes.hooks`), not measured values.
+
 Not covered, by design: names built from variables (`a=generative; b=language; curl https://$a$b...` with no
 `doppler`), names decoded (`base64 -d | xargs curl`) or read from a file or the environment, a script or program the
 command merely runs, a shadowed Python module defined outside the command (a file named like an installed module on the
@@ -745,9 +759,26 @@ identifier or `unknown`, booleans, rule names, health, diagnostic enum; at most 
 and per-session probe files named by a hash of the session id and the merged configuration, holding a completion time,
 booleans and role flags. A shell command denied by the model-service rules (#364) is logged as `decision: deny`,
 `diagnostic: gemini-deny`, `health: healthy`; `safo hooks status` counts those as `model-service denials` and the real
-unparseable-input errors (`diagnostic: input`) as `input parse failures`, on separate lines. A command the check could
-not finish is still a degraded `error` with `input`. A log row with `gemini-deny` is not valid to a safo from before
-this change, which skips it and reports the log as degraded. No prompt, description, address, endpoint name or loaded-model name is stored. Probe files
+unparseable-input errors as `input parse failures`, on separate lines. A log row with `gemini-deny` is not valid to a
+safo from before this change, which skips it and reports the log as degraded.
+
+The old `input` diagnostic covered three different failures (#615), so it is split; each is a degraded `error` row:
+
+| Diagnostic | Cause | `safo hooks status` line |
+| --- | --- | --- |
+| `input-parse` | the hook's event (or a probe's) could not be parsed, or was invalid | `input parse failures` |
+| `input-args` | the hook's own command line could not be parsed | `input parse failures` |
+| `input-oversize` | the event (the guard's or the probe's) was over the size cap (1 MiB), or too large or slow to check whole | `oversized events` |
+| `input-shell` | the shell vendor check (#209) did not finish inside its time budget, so the command was denied (fail closed) | `shell checks not finished`, with the longest duration |
+
+Rows written before the split carry `input` and are still read; status counts them as `input parse failures`. An
+`input-shell` row also carries `check_ms`, the whole milliseconds the check ran (an integer from 0 to 600000); no other
+row has that key, and a row that has it with any other diagnostic, or with `health: healthy`, is not valid. The visible warning names the cause too (fixed text, no command or input value): `input-shell` says a
+shell command could not be checked in time and was denied, `input-oversize` says the event was too large to check, and a
+failure of the SessionStart probe is its own notice, `SAFO routing guard degraded: the session probe could not finish (cause)`, which says the
+local-model status is unknown and that nothing was denied, so it never reads like a guard denial. Every other code keeps
+the generic degraded line. A safo from before #615 does not know the new codes or the key: it skips such a row and reports the
+log as degraded, the same as for `gemini-deny`. No prompt, description, address, endpoint name or loaded-model name is stored. Probe files
 untouched for a week are removed when a session starts. The mode lives in `~/.config/safo/mode`.
 
 SAFO creates its own state and config directories mode 0700. Before it uses one, the directory must be owned by the

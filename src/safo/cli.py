@@ -123,7 +123,7 @@ def _run(
         event = hooks.hook_event(sys.argv[1:] if argv is None else argv)
         if event is None or not stop.code:
             raise
-        hooks.diagnostic(LocalContext(out, env, clock), "input", event)
+        hooks.diagnostic(LocalContext(out, env, clock), "input-args", event)
         return 0
     mode = load_all()[args.mode]
     if args.gh_user:
