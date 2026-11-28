@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Test fix (#616): `tests/test_sharedvenv.py` no longer compares inode numbers of a freed and a rebuilt entry (ext4 reuses a freed number at once; failed in CI on PRs 610 and 620). The rebuild test holds the old entry open so both inodes stay live and proves the rebuild by a sentinel file only the old entry had; the reuse test holds the entry open too. Tests: `tests/test_sharedvenv.py`.
 - `safo-protect-threads` (#541, epic #527): turns on required conversation resolution on a repository's default branch by one GraphQL field (`updateBranchProtectionRule`), dry run by default, `--apply --backup-dir DIR` saves the rule (0600), writes, reads back and verifies every other field is unchanged (else prints the rollback, exit 6); refuses on rulesets, no or several covering rules, or an unreadable field. Separate entry point, no `TOP_LEVEL_COMMANDS` change. Docs: `docs/protect-threads.md`. Tests: `tests/test_protect_threads.py`.
 - `safo-shared-venv` (#534, epic #518): one shared, read-only, hash-locked venv per lockfile, built once under a file
   lock (`pip install --require-hashes --no-deps --only-binary=:all:`, never system site-packages, atomic rename into
