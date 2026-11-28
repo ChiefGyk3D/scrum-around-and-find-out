@@ -248,6 +248,15 @@ like any other line (they can be run by a shell), which can false-block shell ex
 that holds is in the code: `ask` raises on a paid request before any request, and the only paid path is the broker, which
 verifies a fresh signature for every call.
 
+**Passing protected text as data (#486).** Do not put text that mentions a protected word inline in a Bash command: the
+guard cannot prove that inline text is data rather than shell syntax. Write an issue body or brief with the editor or
+Write tool, then pass only its path and plain options to the consuming tool. For example, use `gh issue create --title
+update --body-file PATH` (the title itself carries no protected word), or the equivalent `-F PATH`; use editing tools
+instead of an interpreter here-document. This does not relax the guard. Inline bodies and titles, interpreter
+here-documents, substitutions, decoded output handed to a shell or interpreter, and any command the guard cannot
+classify remain denied when the protected-word rule applies, because the guard cannot establish that their inline text
+will stay data.
+
 ## What is not built or not verified
 
 - Image generation is paid-only, and the free tier refuses a model listed under `image_models` in `gemini.yaml`; image

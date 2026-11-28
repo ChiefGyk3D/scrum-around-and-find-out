@@ -117,6 +117,47 @@ def test_the_classifier_leaves_ordinary_commands_alone(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf %s cGF5bG9hZA== | base64 -d | sh",
+        "printf %s cGF5bG9hZA== | openssl base64 -d | bash",
+        "printf %s 7061796c6f6164 | xxd -r -p | zsh",
+        r"printf '\x70\x61\x79\x6c\x6f\x61\x64' | dash",
+        r"echo -e '\160\141\171\154\157\141\144' | ksh",
+        "printf %s cGF5bG9hZA== | basenc --base64 --decode | env sh",
+        "printf %s payload | uudecode | xargs sh",
+        "python -c 'import base64; print(base64.b64decode(\"cGF5bG9hZA==\"))' | ruby",
+        'perl -e \'print pack("H*", "7061796c6f6164")\' | node',
+        'sh -c "$(printf %s cGF5bG9hZA== | base64 --decode)"',
+        "source <(printf %s 7061796c6f6164 | xxd -r -p)",
+        'python <<< "$(printf %s cGF5bG9hZA== | base64 -d)"',
+        "printf %s cGF5bG9hZA== | base64 -d > /tmp/payload; sh /tmp/payload",
+    ],
+)
+def test_the_classifier_denies_decoded_output_that_reaches_an_interpreter(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf %s cGF5bG9hZA== | base64 -d > /tmp/payload",
+        "printf %s cGF5bG9hZA== | base64 -d | wc -c",
+        "printf %s cGF5bG9hZA== | base64 -d | cat",
+        "printf '%s' payload",
+        "echo payload",
+        "base64 -d input > /tmp/payload; echo $(date); python report.py",
+    ],
+)
+def test_the_classifier_allows_decode_lookalikes_that_do_not_reach_an_interpreter(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+def test_the_classifier_allows_a_plain_path_to_carry_issue_text() -> None:
+    assert geminibrief.shell_command_class("gh issue create --title update --body-file notes.md") is None
+
+
 def test_the_wrapper_is_not_exempt_when_it_carries_a_name() -> None:
     assert (
         geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is not None

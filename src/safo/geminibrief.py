@@ -1206,6 +1206,7 @@ SHELL_VENDOR = "the vendor API host or SDK"
 SHELL_KEY = "the key variable name"
 SHELL_STORE = "the secret-store project or config name"
 SHELL_BUILT = "a word built from escapes beside a network or secret tool"
+SHELL_DECODED = "decoded output handed to a shell or interpreter"
 SHELL_TOOL = "a secret tool run with a shell expansion"
 SHELL_BROKER_MODULE = "the broker client module run directly"
 SHELL_UNVERIFIED = "a command that could not be checked in time"
@@ -1218,12 +1219,59 @@ _NETWORK_TOOL = re.compile(
     r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|openssl|ssh|telnet|python[\d.]*|node|nodejs|perl|ruby|php|go|deno|bun"
     r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
 )
+_SHELL_DECODER = re.compile(
+    r"(?:\bbase64\b[^|;&\n]{0,80}(?:-d\b|-D\b|--decode\b)"
+    r"|\bopenssl\b[^|;&\n]{0,80}(?:-d\b|--decode\b)"
+    r"|\bxxd\b[^|;&\n]{0,80}(?:-r\b|--revert\b)"
+    r"|\bbasenc\b[^|;&\n]{0,80}(?:-d\b|--decode\b)"
+    r"|\buudecode\b"
+    r"|\bprintf\b[^|;&\n]{0,160}\\(?:x[0-9a-f]{2}|[0-7]{3})"
+    r"|\becho\b[^|;&\n]{0,40}(?:-e\b|-[a-df-z]*e[a-z]*\b)[^|;&\n]{0,160}\\(?:x[0-9a-f]{2}|[0-7]{3})"
+    r"|\bpython[\d.]*\b[^|;&\n]{0,40}(?:-c\b|-[a-z]*c[a-z]*\b)"
+    r"|\bperl\b[^|;&\n]{0,40}(?:-e\b|-[a-z]*e[a-z]*\b))",
+    re.IGNORECASE,
+)
+_SHELL_DECODE_SINK = re.compile(
+    r"(?:\b(?:env\s+)?(?:sh|bash|zsh|dash|ksh)\b|\bxargs\s+(?:-[^|;&\n]+\s+)*(?:sh|bash|zsh|dash|ksh)\b"
+    r"|\b(?:eval|source)\b|(?<!\S)\.(?=\s)|\b(?:python[\d.]*|perl|ruby|node|nodejs)\b)",
+    re.IGNORECASE,
+)
+
+
+def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
+    """True when a decoder's output is connected to a shell or interpreter in the submitted command."""
+    joined = _join(command)
+    tick()
+    decoders = list(_SHELL_DECODER.finditer(joined))
+    if not decoders or _SHELL_DECODE_SINK.search(joined) is None:
+        return False
+    for decoder in decoders:
+        tick()
+        tail = joined[decoder.end() :]
+        if re.search(r"\|\s*" + _SHELL_DECODE_SINK.pattern, tail, re.IGNORECASE):
+            return True
+    for decoder in decoders:
+        for marker in ("$(", "<(", ">("):
+            opened = joined.rfind(marker, 0, decoder.start())
+            if opened < 0 or ")" not in joined[decoder.end() :]:
+                continue
+            command_start = max(joined.rfind(";", 0, opened), joined.rfind("\n", 0, opened)) + 1
+            prefix = joined[command_start:opened]
+            if _SHELL_DECODE_SINK.search(prefix) is not None:
+                return True
+    temporary = re.compile(r">\s*(?P<path>[^\s;&|]+)[^;&\n]*(?:;|&&|\n)(?P<run>.*)", re.DOTALL)
+    for decoder in decoders:
+        written = temporary.search(joined, decoder.end())
+        if written is not None and written.group("path") in written.group("run"):
+            return _SHELL_DECODE_SINK.search(written.group("run")) is not None
+    return False
 
 
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
     it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED.
 
+    Decoded output connected to a shell or interpreter is always SHELL_DECODED, independent of protected words.
     The default is the old denial (#388): the secret tool with a project or config name, an expansion or a backtick, a
     word built from escapes, or a project or config name by itself, anywhere in the command. It is relaxed only on a
     positive proof from `safo.shellproof`: the protected words sit in comments, or the whole command is made of
@@ -1238,6 +1286,8 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         return SHELL_UNVERIFIED  # before any normalization: the cost of the check never depends on a hostile length
     try:
         tick()
+        if _decoded_to_shell(command, tick):
+            return SHELL_DECODED
         found = _classify(command, tick, soft=True)
         if found is None or _classify(command, tick, soft=False) is not None:
             return found
