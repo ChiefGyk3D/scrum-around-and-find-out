@@ -11,11 +11,13 @@ given, and passes exactly one: `requiresConversationResolution`.
     safo-protect-threads OWNER/NAME --apply --backup-dir DIR     performs the mutation, then reads back and verifies
 
 Before `--apply` writes anything the whole rule is saved to a new file (mode 0600) in DIR. After it, the rule is read
-again and every field must equal what was read before, except the flag, which must be true; if not, the exact rollback
+again (GraphQL, then REST `branches/BRANCH/protection`) and every field must equal what was read before, except the
+flag, which must be true; if not, the exact rollback
 (the same mutation with false, and the saved file) is printed and the exit code is 6.
 
 Refused with exit 3, changing nothing: a ruleset applies to the default branch (a different API; not guessed at), no
-rule or more than one rule covers the default branch, more rules than one page holds, or the rule cannot be read in
+rule or more than one rule covers the default branch, more rules (or more matching branches)
+than one page holds, or the rule cannot be read in
 full. No token is read or printed: `gh` holds the credential. Separate entry point, so the guard's
 `TOP_LEVEL_COMMANDS` stays as it is.
 
@@ -88,7 +90,7 @@ QUERY = (
         f"{c}(first:100){{totalCount pageInfo{{hasNextPage}} nodes{{actor{{__typename ... on Node{{id}}}}}}}}"
         for c in COUNTS
     )
-    + " matchingRefs(first:100,query:$q){nodes{name}}}}}}"
+    + " matchingRefs(first:100,query:$q){totalCount pageInfo{hasNextPage} nodes{name}}}}}}"
 )
 MUTATION = (
     "mutation($id:ID!){updateBranchProtectionRule(input:{branchProtectionRuleId:$id,"
@@ -244,6 +246,20 @@ def covering(data: Any, branch: str) -> tuple[dict[str, Any], int]:
         nodes = refs.get("nodes") if isinstance(refs, dict) else None
         if not isinstance(nodes, list):
             raise ProtectError(EXIT_READ, "the rule's matching branches are unreadable")
+        total = refs.get("totalCount") if isinstance(refs, dict) else None
+        page = refs.get("pageInfo") if isinstance(refs, dict) else None
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or not isinstance(page, dict)
+            or page.get("hasNextPage") is not False
+            or total != len(nodes)
+        ):
+            raise ProtectError(
+                EXIT_REFUSED,
+                "a rule's matching branches are not readable in full (more than one page, or a count that does not "
+                "match); not guessing",
+            )
         if any(isinstance(n, dict) and n.get("name") == branch for n in nodes):
             hits.append(rule)
     if not hits:
@@ -297,6 +313,16 @@ def mutate(gh: Gh, rule_id: str, value: bool) -> int:
     return rc
 
 
+def rest_flag_enabled(gh: Gh, repo: str, branch: str) -> bool:
+    """Read the flag back through the REST endpoint (a second path from the GraphQL one); any failure is False."""
+    try:
+        doc = gh.json("the REST read-back", "api", f"repos/{repo}/branches/{branch}/protection")
+    except ProtectError:
+        return False
+    thread = doc.get("required_conversation_resolution") if isinstance(doc, dict) else None
+    return isinstance(thread, dict) and thread.get("enabled") is True
+
+
 def rollback_text(rule_id: str, backup: Path) -> list[str]:
     return [
         f"rollback: the same mutation with false (the full rule as it was is in {backup}):",
@@ -334,6 +360,11 @@ def run_tool(gh: Gh, repo: str, apply: bool, backup_dir: Path | None, now: Calla
         after = None
     if after == old and rc != 0:
         raise ProtectError(EXIT_WRITE, "the write failed and nothing changed")
+    if after == new and not rest_flag_enabled(gh, repo, branch):
+        for line in rollback_text(old["id"], backup):
+            output.write(out, line)
+        output.write(out, "rollback body (the rule as it was): " + json.dumps(old, sort_keys=True))
+        raise ProtectError(EXIT_VERIFY, "the REST read-back does not show required_conversation_resolution enabled")
     if after == new:
         output.write(out, f"applied and verified: {FLAG} is true and every other field equals what was read before")
         return EXIT_OK
