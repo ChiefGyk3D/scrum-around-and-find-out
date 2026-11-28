@@ -248,6 +248,23 @@ def test_wrappers_cannot_hide_a_decoder_or_sink(wrapper: str, wrapped: str) -> N
 
 
 @pytest.mark.parametrize(
+    "wrapped_sink",
+    [
+        "taskset -c 0 sh",
+        "chrt -f 1 sh",
+        "sudo -u x -- sh",
+        "doas -u x sh",
+        "timeout -k 1 5 sh",
+        "busybox sh",
+        "time -p sh",
+    ],
+)
+def test_wrapper_option_parsing_cannot_hide_a_sink_name(wrapped_sink: str) -> None:
+    command = f"base64 -d input; {wrapped_sink}"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "/usr/bin/base64 -d f; sh",
@@ -277,6 +294,70 @@ def test_static_spellings_and_a_dynamic_command_word_are_denied(command: str) ->
 def test_a_decoder_and_any_non_static_command_word_are_denied(command: str) -> None:
     assert geminibrief.relevant(command), command
     assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+def test_a_dynamic_argument_without_a_decoder_is_allowed() -> None:
+    assert geminibrief.shell_command_class("python3 -c 'print(1)' $X") is None
+
+
+def test_an_unreadable_command_with_a_decoder_and_sink_is_denied() -> None:
+    command = 'base64 -d f; sh "'
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+def test_a_newline_is_a_decoder_and_sink_boundary() -> None:
+    command = "base64 -d f\nsh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+def test_an_inline_interpreter_that_decodes_and_executes_is_denied() -> None:
+    command = "python3 -c 'import base64; exec(base64.b64decode(x))'"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+def test_a_plain_inline_interpreter_is_allowed() -> None:
+    assert geminibrief.shell_command_class("python3 -c 'print(1)'") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"find . -exec base64 -d f \; -exec sh \;",
+        r"find . -execdir sh -c x \; -exec base64 -d {} \;",
+        r"find . -ok sh \; -exec base64 -d {} \;",
+        "xargs base64 -d f | xargs sh",
+        "parallel base64 -d ::: f ::: sh",
+        "env -S 'base64 -d f' sh",
+        "env -S 'sh' base64 -d f",
+    ],
+)
+def test_exec_style_carriers_cannot_hide_decoder_or_sink_arguments(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo base64 | sh",
+        "printf '%s' xxd | bash",
+    ],
+)
+def test_decoder_names_in_non_decoder_arguments_are_denied_with_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -name '*.txt'",
+        "xargs wc -l",
+        "base64 -d f > out",
+        "echo hello",
+        "python3 -c 'print(1)'",
+    ],
+)
+def test_carriers_and_decoders_without_a_decoder_sink_pair_are_allowed(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
 
 
 @pytest.mark.parametrize(
