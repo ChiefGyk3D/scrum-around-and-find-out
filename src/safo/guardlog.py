@@ -84,6 +84,40 @@ def config_dir(env: Mapping[str, str]) -> Path | None:
 
 
 WARNING = "SAFO routing guard degraded: enforcement may be incomplete; inspect safo hooks status."
+_CHECK_WARNINGS = {
+    "input-shell": (
+        "SAFO routing guard: a shell command could not be checked in time, so it was denied (fail closed); "
+        "run it again. If this repeats, inspect safo hooks status."
+    ),
+    "input-oversize": (
+        "SAFO routing guard: the hook event was too large to check, so enforcement for this call may be incomplete; "
+        "inspect safo hooks status."
+    ),
+}
+_PROBE_CAUSES = {
+    "input-parse": "its event could not be read",
+    "input-oversize": "its event was too large",
+    "input-args": "its command line could not be read",
+    "config": "agents.yaml could not be loaded",
+    "probe": "the local model did not answer",
+    "state-write": "its result could not be saved",
+    "timeout": "it ran out of time",
+}
+
+
+def warning_for(code: str, event: str = "PreToolUse") -> str:
+    """The fixed visible warning for a diagnostic: it names the cause. A probe notice (the SessionStart hook) says the
+    session probe failed and that nothing was denied; it never reads like a guard denial. Any other code keeps the
+    generic WARNING. Fixed text only: no exception text, command or input value."""
+    if event == "SessionStart":
+        cause = _PROBE_CAUSES.get(code, "it failed")
+        return (
+            f"SAFO routing guard degraded: the session probe could not finish ({cause}); the local-model status is "
+            "unknown for this session. Nothing was denied. Inspect safo hooks status."
+        )
+    return _CHECK_WARNINGS.get(code, WARNING)
+
+
 MODEL_IDS = ("sonnet", "haiku", "opus", "unknown")
 RULE_IDS = (
     "no-model",
@@ -103,7 +137,11 @@ RULE_IDS = (
 DIAGNOSTICS = (
     "mode",
     "config",
-    "input",
+    "input",  # before #615 the one code for three failures; still valid in old rows, no longer written
+    "input-parse",  # the hook's event could not be parsed (or the command line, see input-args)
+    "input-oversize",  # the event was over the size cap
+    "input-shell",  # the shell check ran out of its time budget (or failed) and the command was denied
+    "input-args",  # the hook's own command line could not be parsed
     "timeout",
     "probe",
     "state-write",
@@ -113,6 +151,7 @@ DIAGNOSTICS = (
     "repo-unbound",
     "gemini-deny",  # a model-service rule hit (#364): a denial, not a failure
 )
+CHECK_MS_CAP = 600_000  # a recorded check duration above this is not a measurement
 HEALTH = ("healthy", "degraded", "stale", "unknown")
 RECORD_CAP = 2048
 FILE_CAP = 4 * 1024 * 1024
@@ -240,7 +279,14 @@ def finite_time(value: Any) -> bool:
 
 def valid_record(row: Any) -> bool:
     keys = {"ts", "decision", "mode", "model", "local_reachable", "local_step", "na", "rules", "health", "diagnostic"}
-    if not isinstance(row, dict) or set(row) != keys:
+    if not isinstance(row, dict) or set(row) not in (keys, {*keys, "check_ms"}):
+        return False
+    if "check_ms" in row and not (
+        type(row["check_ms"]) is int
+        and 0 <= row["check_ms"] <= CHECK_MS_CAP
+        and row["diagnostic"] == "input-shell"  # only a shell check that did not finish has a duration
+        and row["health"] != "healthy"
+    ):
         return False
     ts = row["ts"]
     try:
@@ -300,7 +346,10 @@ class GuardCounts:
     marked_na: int
     last_flagged: str
     service_denials: int = 0  # diagnostic gemini-deny: a model-service rule denied the call (#364)
-    parse_failures: int = 0  # diagnostic input: the hook's input could not be parsed
+    parse_failures: int = 0  # diagnostics input and input-parse: the hook's input could not be parsed
+    oversize_events: int = 0  # diagnostic input-oversize (#615)
+    shell_unfinished: int = 0  # diagnostic input-shell: the shell check ran out of time (#615)
+    shell_longest_ms: int | None = None  # the longest check_ms among those rows, None when none carried one
 
 
 def summarise(rows: list[dict[str, Any]]) -> GuardCounts:
@@ -311,6 +360,8 @@ def summarise(rows: list[dict[str, Any]]) -> GuardCounts:
     last = (
         f"{str(flagged[-1].get('ts', ''))[11:16]} {', '.join(str(x) for x in flagged[-1]['rules'])}" if flagged else ""
     )
+    shell = [r for r in rows if r.get("diagnostic") == "input-shell"]
+    durations = [r["check_ms"] for r in shell if "check_ms" in r]
     return GuardCounts(
         len(rows),
         str(rows[0].get("ts", ""))[:10] if rows else "",
@@ -321,7 +372,10 @@ def summarise(rows: list[dict[str, Any]]) -> GuardCounts:
         sum(1 for r in rows if r.get("na") is True),
         last.strip(),
         sum(1 for r in rows if r.get("diagnostic") == "gemini-deny"),
-        sum(1 for r in rows if r.get("diagnostic") == "input"),
+        sum(1 for r in rows if r.get("diagnostic") in ("input", "input-parse", "input-args")),
+        sum(1 for r in rows if r.get("diagnostic") == "input-oversize"),
+        len(shell),
+        max(durations) if durations else None,
     )
 
 
@@ -357,6 +411,11 @@ def guard_lines(env: Mapping[str, str]) -> list[str]:
         lines.append(f"  model-service denials: {counts.service_denials}")
     if counts.parse_failures:
         lines.append(f"  input parse failures: {counts.parse_failures}")
+    if counts.oversize_events:
+        lines.append(f"  oversized events: {counts.oversize_events}")
+    if counts.shell_unfinished:
+        longest = f" (longest {counts.shell_longest_ms} ms)" if counts.shell_longest_ms is not None else ""
+        lines.append(f"  shell checks not finished: {counts.shell_unfinished}{longest}")
     lines.append(
         "  models: "
         + ", ".join(f"{k} {v}" for k, v in counts.models)
