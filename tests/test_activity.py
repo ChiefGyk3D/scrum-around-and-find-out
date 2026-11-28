@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import select
 import signal
 import stat
 import subprocess
@@ -1200,13 +1201,13 @@ def test_a_stop_flag_set_by_a_handler_inside_its_own_wait_ends_that_wait(monkeyp
     # #614: threading.Event.set in a handler deadlocked when the signal landed inside Event.wait's lock window
     flag = activity.StopFlag()
     previous = signal.signal(signal.SIGTERM, flag.set)
-    real_select = activity.select.select
+    real_select = select.select
 
     def land_inside_the_wait(*args: Any) -> Any:
         os.kill(os.getpid(), signal.SIGTERM)  # the handler runs on this thread, while the wait is in progress
         return real_select(*args)
 
-    monkeypatch.setattr(activity.select, "select", land_inside_the_wait)
+    monkeypatch.setattr(select, "select", land_inside_the_wait)
     try:
         started = time.monotonic()
         assert flag.wait(30) is True
