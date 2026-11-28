@@ -99,7 +99,6 @@ call() {
     fi
 }
 
-
 refuse() {
     echo "REFUSED $repo: $*" >&2
     exit 3

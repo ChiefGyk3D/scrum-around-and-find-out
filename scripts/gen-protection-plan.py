@@ -245,6 +245,8 @@ def main(argv: list[str]) -> int:
     fd = os.open(ns.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
+    # 0o700 is owner-only, and a script needs the x bit.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     os.chmod(ns.out, 0o700)
     counts: dict[str, int] = {}
     for a in actions:
