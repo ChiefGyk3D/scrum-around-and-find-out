@@ -30,6 +30,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
 | `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App installation token on the App credential path, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
 | `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built, merged on `main` and released in v0.1.0 |
+| `safo-digest` (run `git` or `gh` only, save the full output to a private file and print a small capped digest in a fixed untrusted-data frame; see [`docs/digest.md`](docs/digest.md)) | Built for #531; in review on a pull request, not yet on `main` |
 | `lead-curve` (a read-only lead-session cost curve and handoff cost; see [`docs/spend-report.md`](docs/spend-report.md)) | Built for #556; in review on a pull request, not yet on `main` |
 | `safo-activity` entry point (a one-line status segment, a table, JSON, a watch view and quiet event monitors for Codex jobs and plan windows, the local spend ledger, the local model and Copilot code review; local and read only; the network providers are opt in; a Claude Code pane ships in `mods/ai-activity/`; see [`docs/activity.md`](docs/activity.md)) | Built for #402; in review on a pull request, not yet on `main` |
 | `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built, merged on `main` and released in v0.1.0 |
@@ -173,6 +174,7 @@ replaced are gone.
 - [Routing](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Routing)
 - [Usage](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Usage)
 - [Spend report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Spend-report)
+- [Digest](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Digest)
 - [Impacted tests](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Impacted-tests)
 - [Remerge](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Remerge): `safo-remerge`, merge `origin/main` into a branch and keep both sides of list conflicts
 - [Port ledger](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Port-ledger)
@@ -198,6 +200,7 @@ replaced are gone.
 - [Codex-run](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Codex-run)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
 - [safo-threads](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threads): list, reply to and resolve review threads from a dispositions file
+- [safo-protect-threads](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Protect-threads): require conversation resolution on a default branch, changing only that field
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
 - [Cards](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Cards): `safo-cards`, Kind, Epic and Effort from a table at issue creation
 - [Board-kind](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-kind): `safo kind` and the reconcile write cap
@@ -211,6 +214,8 @@ replaced are gone.
 - [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
 - [Rmguard](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Rmguard): `safo-rmguard`, the Bash hook that guards shared dev directories
 - [Idle check](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Idle-check): `safo-idle-check`, the Stop hook that blocks the end of a turn while workers are under the floor and ready work exists
+- [Shared venv](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Shared-venv): `safo-shared-venv`, one read-only, hash-locked venv per lockfile shared by every agent, with its trust boundary.
+- [Brief scan](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Brief-scan): `safo-brief-scan`, a standalone check that scans a brief or report for credentials and private data before it leaves the machine.
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
 - [Safo-threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Safo-threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)

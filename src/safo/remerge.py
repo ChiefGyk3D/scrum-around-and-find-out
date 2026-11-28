@@ -106,7 +106,12 @@ def _addable(block: list[str]) -> bool:
 
 
 def merge_additions(
-    base: str, ours: str, theirs: str, *, allowed_at: Callable[[int], bool] | None = None
+    base: str,
+    ours: str,
+    theirs: str,
+    *,
+    allowed_at: Callable[[int], bool] | None = None,
+    accept: Callable[[list[str]], bool] = _addable,
 ) -> str | None:
     """Keep both sides' added list/table lines; None when anything else changed, repeats or sits where it may not."""
     texts = (base, ours, theirs)
@@ -126,7 +131,7 @@ def merge_additions(
         block = mine if mine == other else mine + other
         if block and allowed_at is not None and not allowed_at(i):
             return None
-        if any(side and not _addable(side) for side in (mine, other)):
+        if any(side and not accept(side) for side in (mine, other)):
             return None
         out.extend(block)
         added.extend(block)
@@ -157,10 +162,50 @@ def resolve_table_page(base: str, ours: str, theirs: str) -> str | None:
     return merge_additions(base, ours, theirs)
 
 
+_SCRIPT_LINE = re.compile(r'^([A-Za-z0-9_-]+) = "safo\.[a-z0-9_]+:[a-z_]+"\n$')
+_SCRIPT_KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")  # a bare key, leading space allowed (valid TOML)
+
+
+def _script_block(block: list[str]) -> bool:
+    return bool(block) and all(_SCRIPT_LINE.match(line) for line in block)
+
+
+def resolve_pyproject(base: str, ours: str, theirs: str) -> str | None:
+    """pyproject.toml: `key = "safo.module:function"` lines added to `[project.scripts]` by both sides; nothing else.
+
+    Ours first, then theirs (the table is unsorted). A key that appears twice in the table, an added line that does
+    not match the strict pattern, or any change outside the table goes to an agent.
+    """
+    lines = base.splitlines(keepends=True)
+    starts = [n for n, line in enumerate(lines) if line.strip() == "[project.scripts]"]
+    if len(starts) != 1:
+        return None
+    first = starts[0] + 1
+    stop = next((n for n in range(first, len(lines)) if lines[n].lstrip().startswith("[")), len(lines))
+    last = stop
+    while last > first and not lines[last - 1].strip():
+        last -= 1  # the blank lines that end the table are not inside it
+    merged = merge_additions(base, ours, theirs, allowed_at=lambda i: first <= i <= last, accept=_script_block)
+    if merged is None:
+        return None
+    new = merged.splitlines(keepends=True)
+    end = next((n for n in range(first, len(new)) if new[n].lstrip().startswith("[")), len(new))
+    keys: Counter[str] = Counter()
+    for line in new[first:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _SCRIPT_KEY.match(line)
+        if match is None:  # a quoted key, a dotted key or a continued value: the rule cannot reason about it
+            return None
+        keys[match.group(1)] += 1
+    return None if any(n > 1 for n in keys.values()) else merged
+
+
 RESOLVERS: Mapping[str, Resolver] = {
     "CHANGELOG.md": resolve_changelog,
     "docs/home.md": resolve_table_page,
     "README.md": resolve_table_page,
+    "pyproject.toml": resolve_pyproject,
 }
 
 
