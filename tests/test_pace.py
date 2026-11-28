@@ -8,6 +8,7 @@ passed, so a case reads as "used X percent when Y percent of the week is gone".
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -293,9 +294,7 @@ def write_cache(path: Path, used: float, now: float, **kw: Any) -> None:
     path.write_text(json.dumps(cache(used, now, **kw)), encoding="utf-8")
 
 
-def test_cli_rejects_symlinked_cache_and_writable_state(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cli_rejects_symlinked_cache_and_writable_state(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     now = at(50)
     real_cache = tmp_path / "real.json"
     linked_cache = tmp_path / "linked.json"
@@ -314,7 +313,7 @@ def test_cli_rejects_symlinked_cache_and_writable_state(
 
 def test_save_state_does_not_use_predictable_pid_temp_file(tmp_path: Path) -> None:
     state = tmp_path / "state.json"
-    predictable = tmp_path / f"{state.name}.{pace.os.getpid()}.tmp"
+    predictable = tmp_path / f"{state.name}.{os.getpid()}.tmp"
     victim = tmp_path / "victim.json"
     victim.write_text("leave me alone", encoding="utf-8")
     predictable.symlink_to(victim)
@@ -329,9 +328,7 @@ def test_save_state_does_not_use_predictable_pid_temp_file(tmp_path: Path) -> No
 
 def test_relative_xdg_state_home_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", "relative-state")
-    assert pace.default_state_path() == (
-        Path.home() / ".local" / "state" / "safo" / "pace-mode.json"
-    )
+    assert pace.default_state_path() == (Path.home() / ".local" / "state" / "safo" / "pace-mode.json")
 
 
 def test_cli_prints_one_line_and_exits_0(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
