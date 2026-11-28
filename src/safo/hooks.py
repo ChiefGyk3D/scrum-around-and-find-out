@@ -668,9 +668,11 @@ def log_record(
     reachable: bool,
     health: str = "healthy",
     diagnostic: str = "",
+    check_ms: int | None = None,
 ) -> dict[str, Any]:
-    """One log line. No brief, no description: only the verdict and the model name."""
-    return {
+    """One log line. No brief, no description: only the verdict and the model name. `check_ms` (#615) is the duration of
+    a shell check that did not finish, in whole milliseconds; the key is absent from every other row."""
+    record: dict[str, Any] = {
         "ts": when,
         "decision": decision,
         "mode": mode,
@@ -682,6 +684,9 @@ def log_record(
         "health": health,
         "diagnostic": diagnostic,
     }
+    if check_ms is not None:
+        record["check_ms"] = check_ms
+    return record
 
 
 CORRUPT_KEEP = 5  # corrupt logs kept beside the log; the oldest beyond this are deleted
@@ -768,7 +773,33 @@ def _tail_ok(tail: Sequence[str]) -> bool:
     return len(set(flags)) == len(flags) and all(Path(v).is_absolute() for v in tail[1::2])
 
 
+# The guarded form a dotfiles repo uses so a machine without safo is not blocked:
+#   command -v safo-guard >/dev/null 2>&1 && exec safo-guard || exit 0
+# It runs exactly the command it wraps, so it is recognised as that command (status, install). Only this exact shape,
+# and only when the program probed is the program exec'd, is unwrapped; anything else stays a foreign command.
+_GUARDED = re.compile(r"command -v (?P<probe>\S+) >/dev/null 2>&1 && exec (?P<run>\S.*?) \|\| exit 0")
+
+
+def unwrap_guarded(command: str) -> str | None:
+    """The command inside the `command -v X >/dev/null 2>&1 && exec X ... || exit 0` wrapper, else None."""
+    found = _GUARDED.fullmatch(command)
+    if found is None:
+        return None
+    run = found.group("run")
+    return run if COMMAND.fullmatch(run) and run.split(" ", 1)[0] == found.group("probe") else None
+
+
+def _replace_guarded_run(command: str, run: str) -> str:
+    """Replace the command inside a wrapper already accepted by unwrap_guarded()."""
+    found = _GUARDED.fullmatch(command)
+    if found is None:
+        raise ValueError("not a guarded command")
+    start, end = found.span("run")
+    return f"{command[:start]}{run}{command[end:]}"
+
+
 def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
+    command = unwrap_guarded(command) or command
     try:
         words = shlex.split(command)
     except ValueError:
@@ -789,6 +820,7 @@ def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
 def guard_direct_signature(command: str) -> tuple[str, ...] | None:
     """The launcher of a command in the guard's own form (`safo-guard`, `python3 -m safo.guard`, or the absolute path
     of a safo-guard script) named by the safo launcher it corresponds to, so it compares with a legacy line's."""
+    command = unwrap_guarded(command) or command
     try:
         words = shlex.split(command)
     except ValueError:
@@ -810,9 +842,31 @@ def guard_signature(command: str) -> tuple[str, ...] | None:
     return command_signature(command, "guard") or guard_direct_signature(command)
 
 
+_WRAP_HEAD = ("command", "-v", "safo-guard", ">/dev/null", "2>&1", "&&", "exec")
+_WRAP_TAIL = ("||", "exit", "0")
+
+
+def wrapped_direct_signature(command: str) -> tuple[str, ...] | None:
+    """The launcher of the wrapped guard command a settings file may carry (#615):
+    `command -v safo-guard >/dev/null 2>&1 && exec <direct form> || exit 0`, which keeps a session working when the
+    entry point is not installed. Read only, for `status`: install does not write it, and does not own it. Exactly
+    this shape, nothing else; the inner command must itself be the direct form."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) <= len(_WRAP_HEAD) + len(_WRAP_TAIL):
+        return None
+    if tuple(words[: len(_WRAP_HEAD)]) != _WRAP_HEAD or tuple(words[-len(_WRAP_TAIL) :]) != _WRAP_TAIL:
+        return None
+    inner = words[len(_WRAP_HEAD) : -len(_WRAP_TAIL)]
+    return guard_direct_signature(shlex.join(inner))
+
+
 def guard_form(command: str) -> str | None:
-    """`new` for the direct entry point, `legacy` for `... hooks guard ...`, None for a command that is not ours."""
-    if guard_direct_signature(command) is not None:
+    """`new` for the direct entry point (also in its wrapped form, #615), `legacy` for `... hooks guard ...`, None for a
+    command that is not ours."""
+    if guard_direct_signature(command) is not None or wrapped_direct_signature(command) is not None:
         return "new"
     return "legacy" if command_signature(command, "guard") is not None else None
 
@@ -865,6 +919,7 @@ def _ensure(
         raise ConfigError("settings: invalid hook groups; fix by hand")
     sign = signature or (lambda text: command_signature(text, subcommand))
     expected = sign(entry["command"])
+    kept_entry: dict[str, Any] | None = None
     kept: list[dict[str, Any]] = []
     slot: int | None = None  # where our hook already sits: it is put back there, so a rerun reorders nothing
     for group in groups:
@@ -881,6 +936,12 @@ def _ensure(
                     raise ConfigError("settings: ambiguous SAFO hook event/matcher/type; fix by hand")
                 if sig != expected:
                     raise ConfigError("settings: changed invocation; migrate by hand")
+                if isinstance(command, str) and (wrapped := unwrap_guarded(command)) is not None and kept_entry is None:
+                    kept_entry = (
+                        existing
+                        if wrapped == entry["command"]
+                        else {**existing, "command": _replace_guarded_run(command, entry["command"])}
+                    )
                 # Normalize all owned fields and collapse duplicates, leaving siblings untouched.
                 if slot is None:
                     slot = len(kept)
@@ -888,7 +949,7 @@ def _ensure(
                 remaining.append(existing)
         if remaining:
             kept.append({**group, "hooks": remaining})
-    canonical: dict[str, Any] = {"hooks": [entry]}
+    canonical: dict[str, Any] = {"hooks": [kept_entry if kept_entry is not None else entry]}
     if matcher:
         canonical["matcher"] = matcher
     kept.insert(len(kept) if slot is None else slot, canonical)
