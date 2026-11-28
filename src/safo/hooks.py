@@ -799,7 +799,6 @@ def _replace_guarded_run(command: str, run: str) -> str:
 
 
 def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
-    command = unwrap_guarded(command) or command
     try:
         words = shlex.split(command)
     except ValueError:
@@ -819,8 +818,9 @@ def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
 
 def guard_direct_signature(command: str) -> tuple[str, ...] | None:
     """The launcher of a command in the guard's own form (`safo-guard`, `python3 -m safo.guard`, or the absolute path
-    of a safo-guard script) named by the safo launcher it corresponds to, so it compares with a legacy line's."""
-    command = unwrap_guarded(command) or command
+    of a safo-guard script) named by the safo launcher it corresponds to, so it compares with a legacy line's. A
+    command is taken as written: the guarded wrapper is unwrapped by its callers (guard_form, _ensure), so the
+    signature is never the answer for the wrapper itself."""
     try:
         words = shlex.split(command)
     except ValueError:
@@ -842,33 +842,14 @@ def guard_signature(command: str) -> tuple[str, ...] | None:
     return command_signature(command, "guard") or guard_direct_signature(command)
 
 
-_WRAP_HEAD = ("command", "-v", "safo-guard", ">/dev/null", "2>&1", "&&", "exec")
-_WRAP_TAIL = ("||", "exit", "0")
-
-
-def wrapped_direct_signature(command: str) -> tuple[str, ...] | None:
-    """The launcher of the wrapped guard command a settings file may carry (#615):
-    `command -v safo-guard >/dev/null 2>&1 && exec <direct form> || exit 0`, which keeps a session working when the
-    entry point is not installed. Read only, for `status`: install does not write it, and does not own it. Exactly
-    this shape, nothing else; the inner command must itself be the direct form."""
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        return None
-    if len(words) <= len(_WRAP_HEAD) + len(_WRAP_TAIL):
-        return None
-    if tuple(words[: len(_WRAP_HEAD)]) != _WRAP_HEAD or tuple(words[-len(_WRAP_TAIL) :]) != _WRAP_TAIL:
-        return None
-    inner = words[len(_WRAP_HEAD) : -len(_WRAP_TAIL)]
-    return guard_direct_signature(shlex.join(inner))
-
-
 def guard_form(command: str) -> str | None:
-    """`new` for the direct entry point (also in its wrapped form, #615), `legacy` for `... hooks guard ...`, None for a
-    command that is not ours."""
-    if guard_direct_signature(command) is not None or wrapped_direct_signature(command) is not None:
+    """`new` for the direct entry point, `legacy` for `... hooks guard ...`, None for a command that is not ours. The
+    guarded wrapper (`command -v X >/dev/null 2>&1 && exec X ... || exit 0`, only that exact shape, see unwrap_guarded)
+    is read as the command it runs (#397, #615): status recognises it, install keeps it, and neither writes it."""
+    plain = unwrap_guarded(command) or command
+    if guard_direct_signature(plain) is not None:
         return "new"
-    return "legacy" if command_signature(command, "guard") is not None else None
+    return "legacy" if command_signature(plain, "guard") is not None else None
 
 
 def entry_problems(group: dict[str, Any], entry: Any, matcher: str, legacy_matchers: tuple[str, ...]) -> list[str]:
@@ -929,7 +910,7 @@ def _ensure(
         remaining = []
         for existing in inner:
             command = existing.get("command") if isinstance(existing, dict) else None
-            sig = sign(command) if isinstance(command, str) else None
+            sig = sign(unwrap_guarded(command) or command) if isinstance(command, str) else None
             exact = command == entry["command"]
             if sig is not None or exact:
                 if entry_problems(group, existing, matcher, legacy_matchers):

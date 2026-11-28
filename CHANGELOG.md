@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo hooks` guarded wrapper form (#615, #397): one implementation. `guard_form` reads the wrapper through `unwrap_guarded` (the stricter rule: plain command text, the program probed is the program run); the duplicate looser recognizer added with #617 is removed, and the signature helpers take a command as written. Docs: `docs/hooks.md`. Tests: `tests/test_guard_wrapped_form.py`, `tests/test_hooks.py`.
 - `safo hooks` guard shell check (#615 review): its deadline is bounded by what is left of the hook's budget (the lesser of the load-aware value and the guard's pre-decision deadline); with no time left the command is denied at once as `input-shell`. Docs: `docs/hooks.md`. Tests: `tests/test_guard_check_budget.py`.
 - `safo hooks` visible warning (#615): names the cause per diagnostic (a shell command not checked in time, an event too large to check); a SessionStart probe failure is `SAFO routing guard degraded: the session probe could not finish (cause) ... Nothing was denied` instead of the guard's degraded line. Docs: `docs/hooks.md`. Tests: `tests/test_guard_warning_cause.py`.
 - `safo hooks status` (#615): the wrapped guard command `command -v safo-guard >/dev/null 2>&1 && exec safo-guard || exit 0` is read as the `new` form instead of `absent`; only that exact shape, matcher and type rules unchanged, and `install` writes the same lines as before. Docs: `docs/hooks.md`. Tests: `tests/test_guard_wrapped_form.py`.

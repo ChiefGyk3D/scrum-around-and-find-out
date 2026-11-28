@@ -30,7 +30,6 @@ def test_the_wrapped_form_is_recognised_as_the_guard() -> None:
     "command",
     [
         "command -v safo-guard >/dev/null 2>&1 && exec safo-guard --agents /abs/agents.yaml || exit 0",
-        "command -v safo-guard >/dev/null 2>&1 && exec python3 -m safo.guard || exit 0",
     ],
 )
 def test_the_wrapped_form_with_a_valid_tail_or_launcher_is_recognised(command: str) -> None:
@@ -41,6 +40,8 @@ def test_the_wrapped_form_with_a_valid_tail_or_launcher_is_recognised(command: s
     "command",
     [
         "command -v safo-guard >/dev/null 2>&1 && exec evil || exit 0",
+        # probes one program and runs another (#397's rule, the stricter one): the probe proves nothing about python3
+        "command -v safo-guard >/dev/null 2>&1 && exec python3 -m safo.guard || exit 0",
         "command -v safo-guard >/dev/null 2>&1 && exec safo-guard --agents rel.yaml || exit 0",
         "command -v safo-guard >/dev/null 2>&1 && exec safo-guard; rm -rf x || exit 0",
         "command -v safo-guard >/dev/null 2>&1 && exec safo-guard || exit 1",
