@@ -105,7 +105,21 @@ STUB = textwrap.dedent(
         jq = rest[rest.index("--jq") + 1] if "--jq" in rest else ""
         gone = cpath in state.get("missing", []) or cpath + "@" + fref in state.get("missing_at", [])
         if gone and "-H" not in rest and cpath != ".github/workflows":
-            reply({{"rc": 1, "err": "Not Found"}})  # the file does not exist at either ref
+            if "--jq" in rest:
+                reply({{"rc": 1, "err": "Not Found"}})
+            reply({{"rc": 1, "out": "HTTP/2.0 404 Not Found\\r\\n\\r\\n{{}}", "err": "gh: Not Found (HTTP 404)"}})
+        mode = state.get("shaky", {{}}).get(cpath + "@" + fref) or state.get("shaky", {{}}).get(cpath)
+        if mode and "-H" not in rest and "--jq" not in rest:  # a failing or odd answer for a local-state read
+            if mode in ("500", "403", "429"):
+                reply({{"rc": 1, "out": "HTTP/2.0 " + mode + " X\\r\\n\\r\\n{{}}", "err": "gh: Not Found (HTTP 404)"}})
+            if mode == "fail":
+                reply({{"rc": 1, "err": "boom"}})
+            if mode == "empty":
+                reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n"}})
+            if mode == "json":
+                reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\nnot json"}})
+            if mode == "nostatus":
+                reply({{"out": json.dumps({{"path": shown, "sha": "x"}})}})
         if "-H" in rest:  # the raw text of a file, with the HTTP status line of `gh api -i`
             assert "-i" in rest, rest
             if cpath in state.get("missing_files", []):
@@ -122,13 +136,15 @@ STUB = textwrap.dedent(
             reply({{"out": shown + "|" + state.get("blob_by_ref", {{}}).get(fref, "blobsha")}})
         by_ref = state.get("local_by_ref", {{}}).get(fref, "same")
         sha = state.get("local_by_path", {{}}).get(cpath + "@" + fref, by_ref)
-        reply({{"out": json.dumps({{"file": shown, "sha": sha}})}})
+        reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps({{"path": shown, "sha": sha, "type": "file"}})}})
     if rest[0] == "api" and rest[1].endswith("/protection"):
         on = {{"out": json.dumps({{"required_conversation_resolution": {{"enabled": True}}}})}}
         reply(pop("full_protection_seq") if "full_protection_seq" in state else state.get("full_protection", on))
     if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
         tip = pop("base_tips") if "base_tips" in state else state.get("base_tip", "e" * 40)
-        reply({{"out": json.dumps({{"object": {{"sha": tip}}}})}})
+        asked = unquote(rest[1].split("/git/ref/heads/")[1])
+        named = state.get("ref_override", "refs/heads/" + asked)
+        reply({{"out": json.dumps({{"ref": named, "object": {{"sha": tip}}}})}})
     if rest[0] == "api" and "update-branch" in rest[1]:
         reply(state.get("update", {{}}))
     if rest[0] == "api" and "/commits/" in rest[1] and "/pulls" not in rest[1]:

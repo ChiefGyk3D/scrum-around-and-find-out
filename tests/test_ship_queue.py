@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from typing import Any
 
@@ -1147,7 +1148,7 @@ def test_a_line_outside_the_grammar_needs_a_human_and_is_named(rig: Rig, line: s
 
 
 def test_a_listed_gate_command_is_allowed_but_never_followed_to_a_file(rig: Rig) -> None:  # noqa: F811
-    code, out, _calls = merges_through(rig, gate("make test -j4"), "--gate-command", "make")
+    code, out, _calls = merges_through(rig, gate("make test -j4"), "--gate-command", "make", "--protect-path", "build")
     assert code == 0, out
     code, out, _calls = stops_on(rig, gate("make test"))  # not listed
     assert code == ship.EXIT_NEEDS_HUMAN
@@ -1156,8 +1157,21 @@ def test_a_listed_gate_command_is_allowed_but_never_followed_to_a_file(rig: Rig)
 @pytest.mark.parametrize("name", ["bash", "python3", "/usr/bin/make", "-j", "a b", "$X"])
 def test_a_gate_command_must_be_a_plain_command_name(rig: Rig, name: str) -> None:  # noqa: F811
     with pytest.raises(SystemExit) as stop:
-        rig.go("5", "--repo", REPO, "--gate-command", name)
+        rig.go("5", "--repo", REPO, "--gate-command", name, "--protect-path", "build")
     assert stop.value.code == 2
+
+
+def test_a_gate_command_needs_at_least_one_protect_path(rig: Rig, capsys: pytest.CaptureFixture[str]) -> None:  # noqa: F811
+    with pytest.raises(SystemExit) as stop:
+        rig.go("5", "--repo", REPO, "--gate-command", "make")
+    assert stop.value.code == 2 and "--protect-path" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as stop:
+        rig.go("--queue", "5", "--repo", REPO, "--gate-command", "make", "--gate-command", "pytest")
+    assert stop.value.code == 2
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["gate_text"] = gate("make test")
+    code, out, _calls = rig.go(*args(False, "--gate-command", "make", "--protect-path", "ci"))
+    assert code == 0, out
 
 
 @pytest.mark.parametrize(
@@ -1369,8 +1383,151 @@ def test_a_script_of_another_language_is_held_to_the_shell_grammar_so_a_human_re
     assert code == ship.EXIT_NEEDS_HUMAN and "ci/check.py" in out and merges(calls) == []
 
 
-def test_a_file_that_exists_at_neither_ref_is_a_generated_one_and_is_left_alone(rig: Rig) -> None:  # noqa: F811
-    code, out, _calls = merges_through(rig, gate("./build/gen.sh"), missing=["build/gen.sh"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"missing": ["build/gen.sh"]},  # absent at both refs: a generated file, never trusted
+        {"missing_at": ["build/gen.sh@main"]},
+        {"missing_at": [f"build/gen.sh@{HEAD}"]},
+    ],
+)
+def test_a_path_the_gate_runs_that_is_absent_at_either_ref_needs_a_human(rig: Rig, state: dict[str, Any]) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("./build/gen.sh"), **state)
+    assert code == ship.EXIT_NEEDS_HUMAN and "build/gen.sh" in out and "absent" in out and merges(calls) == []
+
+
+# local_state reads are status aware: only a structurally valid 404 means "absent"
+
+
+@pytest.mark.parametrize("mode", ["500", "403", "429", "fail", "empty", "json", "nostatus"])
+@pytest.mark.parametrize("where", ["both", "base", "pin"])
+def test_a_failed_read_of_a_script_is_an_error_never_absence(rig: Rig, mode: str, where: str) -> None:  # noqa: F811
+    keys = {"both": ["ci/gate.sh"], "base": ["ci/gate.sh@main"], "pin": [f"ci/gate.sh@{HEAD}"]}[where]
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), shaky={key: mode for key in keys})
+    assert code == ship.EXIT_ERROR and out.startswith("ERROR") and merges(calls) == [], out
+    assert "NEEDS-HUMAN" not in out
+
+
+def test_a_500_that_says_not_found_in_its_text_is_still_an_error(rig: Rig) -> None:  # noqa: F811
+    code, out, _calls = stops_on(rig, gate("bash ci/gate.sh"), shaky={"ci/gate.sh": "500"})
+    assert code == ship.EXIT_ERROR and "HTTP status 500" in out
+
+
+class Answer(ship.Gh):
+    """A ship.Gh that gives one scripted answer to every gh call."""
+
+    def __init__(self, code: int, out: str, err: str = "") -> None:
+        super().__init__("gh", "git", {})
+        self.reply = (code, out, err)
+
+    def gh_call(self, *args: str) -> tuple[int, str, str]:
+        return self.reply
+
+
+def local_state_of(code: int, out: str) -> str | None:
+    watcher = ship.Watcher(
+        Answer(code, out),
+        io.StringIO(),
+        timeout=10,
+        interval=1,
+        max_polls=2,
+        method="squash",
+        delete_branch=False,
+    )
+    return watcher.local_state(REPO, "d", "main")
+
+
+def listing(*paths: str) -> str:
+    return "HTTP/2.0 200 OK\r\n\r\n" + json.dumps([{"path": p, "sha": "s" + p} for p in paths])
+
+
+def test_a_directory_listing_is_compared_as_a_whole_and_must_be_about_that_directory() -> None:
+    first = local_state_of(0, listing("d/a", "d/b"))
+    assert first is not None and first == local_state_of(0, listing("d/a", "d/b"))
+    assert first != local_state_of(0, listing("d/a", "d/c"))
+    for bad in (
+        listing("e/a"),
+        listing(),
+        listing("d/a", "e/b"),
+        "HTTP/2.0 200 OK\r\n\r\n{}",
+        "HTTP/2.0 200 OK\r\n\r\n5",
+    ):
+        with pytest.raises(ship.ShipError):
+            local_state_of(0, bad)
+
+
+def test_only_a_404_status_line_is_absence() -> None:
+    assert local_state_of(1, "HTTP/2.0 404 Not Found\r\n\r\n{}") is None
+    for bad in (
+        (1, "HTTP/2.0 500 X\r\n\r\n"),
+        (1, "HTTP/2.0 403 X\r\n\r\n"),
+        (1, "HTTP/2.0 429 X\r\n\r\n"),
+        (1, ""),
+        (0, ""),
+        (127, ""),
+        (1, "gh: Not Found (HTTP 404)"),  # text, not a status line
+    ):
+        with pytest.raises(ship.ShipError) as stop:
+            local_state_of(*bad)
+        assert stop.value.code == ship.EXIT_ERROR
+
+
+BASES = ["a#b", "a%41b", "a?b=c", "a b", "é/ü x", "release/1.x#rc?1 %", "a//b"]
+
+
+@pytest.mark.parametrize("base", BASES)
+def test_a_base_ref_is_percent_encoded_in_every_path_it_is_used_in(rig: Rig, base: str) -> None:  # noqa: F811
+    quoted = "/".join(ship.quote(part, safe="") for part in base.split("/"))
+    ok = dict(sv("CLEAN"), baseRefName=base)
+    rig.state["views"] = [*[ok] * 4, dict(ok, state="MERGED")]
+    code, out, calls = rig.go(*args(False))
+    assert code == 0, out
+    flat = [" ".join(c) for c in calls]
+    for needle in (
+        f"branches/{quoted}/protection/required_status_checks",
+        f"git/ref/heads/{quoted}",
+        f"compare/{quoted}...",
+        f"branches/{quoted}/protection ",
+    ):
+        assert any(needle in line + " " for line in flat), (needle, flat[:3])
+    for line in flat:
+        for marker in ("compare/", "git/ref/heads/", "branches/"):
+            if marker in line:
+                tail = line.split(marker, 1)[1].split(" ", 1)[0].split("?per_page")[0]
+                assert "#" not in tail and "?" not in tail and "%25" not in tail.replace(quoted, ""), tail
+
+
+def test_the_ref_answer_must_be_about_the_asked_for_branch(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["ref_override"] = "refs/heads/other"
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_ERROR and "not about" in out and merges(calls) == []
+
+
+def test_a_protection_answer_about_another_branch_is_a_refusal(rig: Rig) -> None:  # noqa: F811
+    other = {
+        "out": json.dumps(
+            {
+                "url": "https://example.invalid/repos/o/r/branches/other/protection",
+                "required_conversation_resolution": {"enabled": True},
+            }
+        )
+    }
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = other
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_PROTECTED and merges(calls) == []
+    mine = {
+        "out": json.dumps(
+            {
+                "url": "https://example.invalid/repos/o/r/branches/main/protection",
+                "required_conversation_resolution": {"enabled": True},
+            }
+        )
+    }
+    rig.state["full_protection"] = mine
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    code, out, _calls = rig.go(*args(False))
     assert code == 0, out
 
 

@@ -36,6 +36,7 @@ Exit codes (several pull requests: the highest code wins):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -324,6 +325,12 @@ def safe_repo_path(path: str) -> bool:
     )
 
 
+def ref_part(ref: str) -> str:
+    """A branch name as URL path segments: each part percent-quoted (so `#`, `%`, `?`, spaces and non-ASCII cannot end
+    or change the path), the slashes of a name like `release/1.x` kept as separators."""
+    return "/".join(quote(part, safe="") for part in ref.split("/"))
+
+
 def contents_args(repo: str, path: str, ref: str) -> list[str]:
     """The `gh api` arguments for the contents of `path` at `ref`: every path segment percent-quoted, and the ref sent
     as a query field (`-X GET -f ref=...`), never glued into the URL, so no text of either can add a parameter."""
@@ -518,7 +525,7 @@ class Watcher:
     def required(self, repo: str, base: str) -> tuple[list[str], dict[str, int]]:
         # -i puts the HTTP status line on stdout, so a missing protection is told by status, never by stderr text
         code, out, _err = self.gh.gh_call(
-            "api", "-i", f"repos/{repo}/branches/{base}/protection/required_status_checks"
+            "api", "-i", f"repos/{repo}/branches/{ref_part(base)}/protection/required_status_checks"
         )
         names = [GATE]
         head, _sep, body = out.replace("\r\n", "\n").partition("\n\n")
@@ -653,7 +660,7 @@ class Watcher:
         gate = self.gate_path(repo, base)
         code, out, err = self.gh.gh_call(
             "api",
-            f"repos/{repo}/compare/{base}...{pin}?per_page=100",
+            f"repos/{repo}/compare/{ref_part(base)}...{ref_part(pin)}?per_page=100",
             "--paginate",
             "--jq",
             ".files[] | .filename, (.previous_filename // empty)",
@@ -685,26 +692,33 @@ class Watcher:
         return self.gate_refs(repo, gate, base, pin)
 
     def local_state(self, repo: str, path: str, ref: str) -> str | None:
-        """The content sha of a file, or of a directory listing, at `ref` (None when it does not exist there)."""
-        code, out, _err = self.gh.gh_call(
-            *contents_args(repo, path, ref),
-            "--jq",
-            'if type=="array" then {dir: [.[]|{p:.path,s:.sha}]} else {file: .path, sha: .sha} end|tostring',
-        )
-        if code != 0 or not out.strip():
+        """The content sha of a file, or of a directory listing, at `ref`. None only for a structurally valid HTTP 404
+        (the status line); every other failure, an empty or malformed answer, or an answer about another path is an
+        error, never "absent"."""
+        code, out, err = self.gh.gh_call("api", "-i", *contents_args(repo, path, ref)[1:])
+        head, _sep, body = out.replace("\r\n", "\n").partition("\n\n")
+        found = re.match(r"HTTP/\S+ (\d{3})", head)
+        status = int(found.group(1)) if found else 0
+        where = f"{clean(path, 200)[0]} at {ref[:12]}"
+        if status == 404:
             return None
+        if code != 0 or not 200 <= status < 300:
+            raise ShipError(EXIT_ERROR, f"cannot read {where}: HTTP status {status or 'unknown'} {err.strip()[:100]}")
         try:
-            data = bounded.loads(out)
-            if isinstance(data, dict) and "file" in data:
-                ok = data["file"] == path
+            data = bounded.loads(body)
+            if isinstance(data, dict):
+                ok = data["path"] == path
+                state: Any = {"file": data["path"], "sha": data["sha"]}
+            elif isinstance(data, list) and data:
+                ok = all(isinstance(i, dict) and str(i["path"]).rsplit("/", 1)[0] == path for i in data)
+                state = {"dir": [{"p": i["path"], "s": i["sha"]} for i in data]}
             else:
-                items = data["dir"]
-                ok = all(isinstance(i, dict) and str(i.get("p")).rsplit("/", 1)[0] == path for i in items)
+                raise ValueError("empty")
         except (ValueError, KeyError, TypeError):
-            raise ShipError(EXIT_ERROR, "unreadable contents answer") from None
+            raise ShipError(EXIT_ERROR, f"unreadable contents answer for {where}") from None
         if not ok:  # the answer is about some other path than the one asked for
             raise ShipError(EXIT_ERROR, f"the contents answer is not about {clean(path, 200)[0]}")
-        return out.strip()
+        return json.dumps(state, sort_keys=True, separators=(",", ":"))
 
     def read_text(self, repo: str, path: str, ref: str) -> str | None:
         """The raw text of a file at `ref`; None only for a clear HTTP 404 (read from the status line, never from text);
@@ -792,19 +806,25 @@ class Watcher:
                         if not safe_repo_path(file):
                             return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: an unusual path in a run step")
                         before, after = self.local_state(repo, file, base), self.local_state(repo, file, pin)
+                        if before is None or after is None:
+                            # no generated-file support: a path the gate runs that is not in the repository at both
+                            # refs cannot be read, so a human decides
+                            return Result(
+                                EXIT_NEEDS_HUMAN,
+                                "NEEDS-HUMAN",
+                                f"{clean(file, 200)[0]} (run by {where}) is absent at "
+                                f"{clean(base, 80)[0] if before is None else 'the pin'}",
+                            )
                         if before != after:
                             return Result(
                                 EXIT_NEEDS_HUMAN,
                                 "NEEDS-HUMAN",
                                 f"{clean(file, 200)[0]} (run by {where}) differs between {base} and the pin",
                             )
-                        exists = after is not None
-                    else:
-                        exists = True
-                    if exists:  # what a script runs is held to the same rules, down to MAX_DEPTH levels
-                        if depth + 1 > MAX_DEPTH:
-                            return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-                        queue.append((file, depth + 1, "script", from_dir))
+                    # what a script runs is held to the same rules, down to MAX_DEPTH levels
+                    if depth + 1 > MAX_DEPTH:
+                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+                    queue.append((file, depth + 1, "script", from_dir))
             for ref in refs:
                 if ref.startswith("./"):
                     local = ref[2:].rstrip("/")
@@ -1193,10 +1213,12 @@ class Watcher:
         return None
 
     def base_tip(self, repo: str, base: str) -> str:
-        data = self.gh.json("api", f"repos/{repo}/git/ref/heads/{base}")
+        data = self.gh.json("api", f"repos/{repo}/git/ref/heads/{ref_part(base)}")
         tip = str(((data.get("object") or {}) if isinstance(data, dict) else {}).get("sha") or "")
         if not SHA.fullmatch(tip):
-            raise ShipError(EXIT_ERROR, f"cannot read the tip of {base}")
+            raise ShipError(EXIT_ERROR, f"cannot read the tip of {clean(base, 100)[0]}")
+        if data.get("ref") != f"refs/heads/{base}":  # the answer must be about the branch that was asked for
+            raise ShipError(EXIT_ERROR, f"the ref answer is not about {clean(base, 100)[0]}")
         return tip
 
     def is_update_commit(self, repo: str, head: str, pin: str, tip: str) -> bool:
@@ -1344,11 +1366,14 @@ class Watcher:
                     f"and the merge call on {base} is not stopped"
                 )
             return None
-        code, out, _err = self.gh.gh_call("api", f"repos/{repo}/branches/{base}/protection")
+        code, out, _err = self.gh.gh_call("api", f"repos/{repo}/branches/{ref_part(base)}/protection")
         try:
             data = bounded.loads(out) if code == 0 else None
             section = data.get("required_conversation_resolution") if isinstance(data, dict) else None
             enabled = isinstance(section, dict) and section.get("enabled") is True
+            about = data.get("url") if isinstance(data, dict) else None  # when it names a branch it must be this one
+            if isinstance(about, str) and f"/branches/{ref_part(base)}/protection" not in about:
+                enabled = False
         except ValueError:
             enabled = False
         if not enabled:
@@ -1476,6 +1501,8 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error(f"--total-timeout must be 1 to {MAX_TOTAL_TIMEOUT}")
     if args.gate_workflow and not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", args.gate_workflow):
         parser.error("--gate-workflow is a path like .github/workflows/ci.yml")
+    if args.gate_command and not args.protect_path:
+        parser.error("--gate-command needs at least one --protect-path: nothing follows a listed command to its inputs")
     for name in args.gate_command:
         if not shipscan.valid_command_name(name):
             parser.error("--gate-command is one plain command name (no path, no option, no interpreter)")

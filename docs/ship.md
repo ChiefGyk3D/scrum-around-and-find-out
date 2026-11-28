@@ -115,7 +115,8 @@ A `run:` text is accepted only when every line is one of these, and the offendin
   path, then plain literal arguments;
 - a repository-relative executable path that contains a slash, then plain literal arguments;
 - an exact command name listed with `--gate-command NAME` (repeatable, for example `make` or `pytest`), then plain
-  literal arguments. No file is derived from such a command: list it only together with `--protect-path` for its inputs.
+  literal arguments. No file is derived from such a command, so `--gate-command` is refused (usage error, exit 2) unless at
+  least one `--protect-path` is given too: protect the inputs of every listed command.
 
 A line may use only letters, digits, `.`, `_`, `/`, `=`, `:`, `@`, `,`, `+`, `-` and spaces. So there are no quotes,
 variables, `${{ }}` expressions, pipes, lists (`;`, `&&`, `||`), background jobs, redirections, subshells, command
@@ -123,8 +124,8 @@ substitution, backticks, heredocs, continuations, tabs, globs or `~`. A path has
 `..` part and does not start with `/`. Refused outright: any wrapper (`sudo`, `env`, `timeout`, `nice`, `xvfb-run`,
 `strace`, `uv run`, `npx`...), `VAR=value` prefixes, an interpreter option that takes a value, `-c`, `-m`, `-e`,
 `source`, `eval`, and every command that is not listed. Each script found is compared between the base and the pinned head
-(by content sha); a difference is `NEEDS-HUMAN` naming the file. A file missing at both refs is a generated one and is left
-alone. The same grammar applies to the steps of local composite actions (which must name `shell: bash` or `sh`).
+(by content sha); a difference is `NEEDS-HUMAN` naming the file. A file the gate runs that is absent at either ref, including both, is `NEEDS-HUMAN`: there is no generated-file support, so a
+gate that executes generated scripts always stops for a human. The same grammar applies to the steps of local composite actions (which must name `shell: bash` or `sh`).
 
 Every script that is found is followed: its text is read at the pinned head (it is identical to the base, or the run
 already stopped) and held to the same grammar, from the directory it was run from, and each file it runs is compared and
@@ -134,6 +135,11 @@ the file and the line. A first line `#!` must name an allowed interpreter exactl
 `/usr/bin/env`, then the name, no arguments); a script with no shebang is fine. A file that is not text, contains a NUL
 byte or is over 64 KiB is `NEEDS-HUMAN`; one that cannot be read is exit 7. A script in another language (Python, Node)
 is held to the same shell grammar and so always stops for a human: that is the price of closing the gap by construction.
+
+Reading what a script is: a file is read with its HTTP status line, and only a clear 404 means absent; any other failure
+(a 500, 403 or 429, a failed command, an empty, malformed or wrongly addressed answer) is exit 7, never "absent". Branch
+names are percent-encoded part by part wherever they sit in an API path (the two compare refs independently), the ref
+answer must name the branch that was asked for, and a protection answer that names another branch is a refusal.
 
 Each step also runs from the repository root in bash or sh: a `working-directory`, and a shell other than bash or sh, in
 the step, the `run` defaults of the job or of the workflow (the job's own value wins, key by key), is
