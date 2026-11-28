@@ -437,7 +437,7 @@ def test_probe_never_fails_the_session_even_when_agents_yaml_is_broken(
     if broken == "garbage":
         path.write_text("a: [unclosed\n")
     code, out, _ = hooks("probe", "--agents", str(path), home=_private_home)
-    assert code == 0 and "SAFO session probe could not finish" in out
+    assert code == 0 and "SAFO routing guard degraded" in out
     assert read_log(_private_home)[-1]["diagnostic"] == "config"
 
 
@@ -843,7 +843,7 @@ def test_hooks_probe_with_a_closed_or_empty_stdin_behaves_as_before(_private_hom
     with open(os.devnull) as null, os.fdopen(read_end) as empty_pipe:
         for stream in (closed, null, empty_pipe):
             code, out = run_probe_on(_private_home, agents, stream)
-            assert code == 0 and "SAFO session probe could not finish" in out and "nothing was probed" not in out
+            assert code == 0 and "SAFO routing guard degraded" in out and "nothing was probed" not in out
     assert [r["diagnostic"] for r in read_log(_private_home)] == ["input-parse"] * 3
 
 
@@ -1621,7 +1621,7 @@ def test_probe_write_failure_warns_and_records_degradation(
 
     monkeypatch.setattr(mod, "save_state", fail)
     code, out, _ = hooks("probe", "--agents", str(agents), home=_private_home)
-    assert code == 0 and "SAFO session probe could not finish" in out and "sentinel-token" not in out
+    assert code == 0 and "SAFO routing guard degraded" in out and "sentinel-token" not in out
     assert read_log(_private_home)[-1]["diagnostic"] == "state-write"
 
 

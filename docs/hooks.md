@@ -775,7 +775,7 @@ Rows written before the split carry `input` and are still read; status counts th
 `input-shell` row also carries `check_ms`, the whole milliseconds the check ran (an integer from 0 to 600000); no other
 row has that key. The visible warning names the cause too (fixed text, no command or input value): `input-shell` says a
 shell command could not be checked in time and was denied, `input-oversize` says the event was too large to check, and a
-failure of the SessionStart probe is its own notice, `SAFO session probe could not finish (cause)`, which says the
+failure of the SessionStart probe is its own notice, `SAFO routing guard degraded: the session probe could not finish (cause)`, which says the
 local-model status is unknown and that nothing was denied, so it never reads like a guard denial. Every other code keeps
 the generic degraded line. A safo from before #615 does not know the new codes or the key: it skips such a row and reports the
 log as degraded, the same as for `gemini-deny`. No prompt, description, address, endpoint name or loaded-model name is stored. Probe files

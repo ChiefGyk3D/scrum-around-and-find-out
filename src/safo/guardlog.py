@@ -111,8 +111,8 @@ def warning_for(code: str, event: str = "PreToolUse") -> str:
     if event == "SessionStart":
         cause = _PROBE_CAUSES.get(code, "it failed")
         return (
-            f"SAFO session probe could not finish ({cause}); the local-model status is unknown for this session. "
-            "Nothing was denied. Inspect safo hooks status."
+            f"SAFO routing guard degraded: the session probe could not finish ({cause}); the local-model status is "
+            "unknown for this session. Nothing was denied. Inspect safo hooks status."
         )
     return _CHECK_WARNINGS.get(code, WARNING)
 

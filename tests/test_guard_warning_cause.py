@@ -32,11 +32,12 @@ def test_each_cause_has_its_own_visible_warning() -> None:
     assert texts["input-parse"] == guardlog.WARNING  # the old generic text still means "could not be read"
 
 
-def test_a_probe_notice_does_not_read_like_a_denial_or_a_degraded_guard() -> None:
+def test_a_probe_notice_names_its_cause_and_says_nothing_was_denied() -> None:
     for code in ("input-parse", "config", "probe", "state-write", "timeout"):
         text = warning_for(code, "SessionStart")
-        assert "session probe" in text and "Nothing was denied" in text, code
-        assert "routing guard degraded" not in text, code
+        # other tools and tests key on the word degraded, so it stays; the cause and "nothing was denied" are added
+        assert text.startswith("SAFO routing guard degraded:"), code
+        assert "session probe could not finish" in text and "Nothing was denied" in text, code
 
 
 def test_the_shell_warning_reaches_the_host_and_names_the_cause(
