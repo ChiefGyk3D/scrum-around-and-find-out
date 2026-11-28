@@ -320,6 +320,23 @@ def test_a_decoder_makes_every_non_data_command_or_executable_creation_a_sink(co
     assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
 
 
+@pytest.mark.parametrize("command", ["sed -e e", "sort --compress-program=sh", "awk '{ print }'"])
+def test_code_loading_data_commands_are_sinks_beside_a_decoder(command: str) -> None:
+    assert geminibrief.shell_command_class(f"base64 -d f; {command}") == geminibrief.SHELL_DECODED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bas\\\ne64 -d f; sh",
+        "base64 \\\n-d f; sh",
+        "bas\\\ne64 -d f; echo $X '",
+    ],
+)
+def test_line_continuations_cannot_hide_a_decoder_from_the_prefilter(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -342,6 +359,19 @@ def test_an_inline_interpreter_is_a_decoder_and_sink_only_when_paired_with_anoth
     inline = f"{interpreter} {flag} 'print(1)'"
     assert geminibrief.shell_command_class(inline) is None
     assert geminibrief.shell_command_class(f"{inline}; custom-runner") == geminibrief.SHELL_DECODED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; python3 -c 'print(1)'",
+        "printf x | python3 -c 'import sys; sys.stdin.read()'",
+        "python3 -c 'print(1)' < input",
+        "python3 -c 'print(1)'; custom-runner",
+    ],
+)
+def test_inline_interpreters_are_sinks_when_the_command_has_another_execution_path(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
 
 
 @pytest.mark.parametrize(

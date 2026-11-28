@@ -1266,7 +1266,6 @@ _INLINE_DECODER_PREFILTER = re.compile(
 _STRING_DECODER = r"\b(?:base64|b64decode|unhexlify|fromhex|atob|xxd|uudecode)\b|\bdecode\s*\(|\bpack\s*\(\s*['\"]H\*"
 _DECODE_DATA_COMMANDS = _DECODE_COMMANDS | frozenset(
     {
-        "awk",
         "cat",
         "cd",
         "cp",
@@ -1282,9 +1281,7 @@ _DECODE_DATA_COMMANDS = _DECODE_COMMANDS | frozenset(
         "pwd",
         "read",
         "rm",
-        "sed",
         "sleep",
-        "sort",
         "tail",
         "tee",
         "test",
@@ -1423,15 +1420,21 @@ def _makes_executable(unit: shellunits.Unit) -> bool:
 
 def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
     """True when a decoder and a possible execution sink occur anywhere in the submitted command."""
-    stripped = _strip(command)
+    has_continuation = "\\\n" in command
+    try:
+        joined = shellunits._join_continuations(command)
+    except shellunits.Unreadable:
+        joined = command
+    stripped = _strip(joined)
     decoder_prefilter = (
-        _SHELL_DECODER.search(command) is not None
+        _SHELL_DECODER.search(joined) is not None
         or _SHELL_DECODER.search(stripped) is not None
         or _INLINE_DECODER_PREFILTER.search(stripped) is not None
     )
-    if not decoder_prefilter:
+    prefilter_sink = _SHELL_DECODE_SINK.search(joined) is not None
+    dynamic = _DYNAMIC_SHELL_MARKER.search(joined) is not None
+    if not decoder_prefilter and not (has_continuation and (prefilter_sink or dynamic)):
         return False
-    prefilter_sink = _SHELL_DECODE_SINK.search(command) is not None
     try:
         counter = shellunits._Counter()
         units = shellunits.parse(command, counter, tick)
@@ -1441,11 +1444,12 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
                 tick()
                 units.extend(shellunits.parse(heredoc.body, counter, tick, 1))
     except shellunits.Unreadable:
-        return prefilter_sink or _DYNAMIC_SHELL_MARKER.search(command) is not None
+        return prefilter_sink or dynamic
     decoders = 0
     decoder = False
     sink = False
     inline_decoder_units: set[int] = set()
+    decoder_units: set[int] = set()
     for unit in units:
         tick()
         command_words = list(unit.words)
@@ -1471,6 +1475,7 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
             if _SHELL_DECODER.search(word.value) is not None or decoder_word:
                 decoder = True
                 decoders += 1
+                decoder_units.add(id(unit))
             if decoders > MAX_SHELL_DECODERS:
                 return True
             if decoder and sink:
@@ -1484,9 +1489,14 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
         for unit in units:
             shellunits.effective(unit, counter, tick, 0, effects)
     except shellunits.Unreadable:
-        return decoder and (sink or prefilter_sink or _DYNAMIC_SHELL_MARKER.search(command) is not None)
-    inline_effects = 0
-    for effect in effects:
+        return decoder and (sink or prefilter_sink or dynamic)
+    non_data_units = {
+        id(effect.unit)
+        for effect in effects
+        if (re.sub(r"\d+(?:\.\d+)*$", "", effect.cmd.lower()) or effect.cmd.lower())
+        not in _DECODE_DATA_COMMANDS | _INLINE_INTERPRETERS
+    }
+    for effect_index, effect in enumerate(effects):
         tick()
         name = effect.cmd.lower()
         if name not in _DECODE_DATA_COMMANDS and name not in _INLINE_INTERPRETERS:
@@ -1501,12 +1511,17 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
         if command_paths or _makes_executable(effect.unit):
             sink = True
         if id(effect.unit) in inline_decoder_units and name in _INLINE_INTERPRETERS:
-            inline_effects += 1
-            continue
-        if name not in _DECODE_DATA_COMMANDS or (name == "awk" and re.search(r"\bsystem\s*\(", effect.text)):
+            other_decoder = bool(decoder_units - {id(effect.unit)})
+            reads_stdin = bool(
+                effect.unit.heredocs
+                or effect.unit.herestrings
+                or any(op.startswith("<") for op, _word in effect.unit.redirs)
+                or any(prior.unit.pipe == effect.unit.pipe for prior in effects[:effect_index])
+            )
+            if not other_decoder and not reads_stdin and not non_data_units:
+                continue
+        if name not in _DECODE_DATA_COMMANDS:
             sink = True
-    if inline_effects > 1:
-        sink = True
     return decoder and sink
 
 

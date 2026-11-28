@@ -5,8 +5,8 @@
 - The shell guard now denies a decoder name plus any command-position word outside its data-command allowlist anywhere
   in one submitted command (#645), including a path-named executable, an executable mode set by `chmod` or `install`,
   an inline interpreter paired with another possible sink, and a dynamic command after a wrapper or reserved word.
-  The allowlist is the decoder commands, `cat`, `echo`, `printf`, `tee`, `head`, `tail`, `wc`, `grep`, `sort`, `uniq`,
-  `cut`, `tr`, `sed`, `awk` without `system()`, `ls`, `test`, `true`, `false`, `mkdir`, `cp`, `mv`, `rm`, `touch`, `cd`,
+  The allowlist is the decoder commands, `cat`, `echo`, `printf`, `tee`, `head`, `tail`, `wc`, `grep`, `uniq`,
+  `cut`, `tr`, `ls`, `test`, `true`, `false`, `mkdir`, `cp`, `mv`, `rm`, `touch`, `cd`,
   `pwd`, `read`, `sleep`, `date` and `id`. Unreadable input with a decoder and either a sink name or any dynamic shell
   marker is denied. The guard does not prove byte flow: decoding and running must be split into separate submitted
   commands or files. The denial remains `encoded content and a possible execution target in one command`.

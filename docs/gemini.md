@@ -257,10 +257,11 @@ decoder name remains allowed. Unreadable input is denied when the decoder prefil
 any `$`, backtick, quote, backslash or glob character occurs anywhere in the original command.
 
 The complete data-command allowlist is the decoder commands (`base64`, `basenc`, `openssl`, `xxd`, `uudecode`, plus the
-escape-decoding forms of `printf` and `echo`), `cat`, `echo`, `printf`, `tee`, `head`, `tail`, `wc`, `grep`, `sort`,
-`uniq`, `cut`, `tr`, `sed`, `awk` only without `system()`, `ls`, `test`, `true`, `false`, `mkdir`, `cp`, `mv`, `rm`,
-`touch`, `cd`, `pwd`, `read`, `sleep`, `date` and `id`. Order, wrappers, wrapper options, connections and apparent byte
-flow do not relax the rule. Decoding and running must be split into separate submitted commands or files.
+escape-decoding forms of `printf` and `echo`), `cat`, `echo`, `printf`, `tee`, `head`, `tail`, `wc`, `grep`, `uniq`,
+`cut`, `tr`, `ls`, `test`, `true`, `false`, `mkdir`, `cp`, `mv`, `rm`, `touch`, `cd`, `pwd`, `read`, `sleep`, `date`
+and `id`. `sed`, `sort` and `awk` were removed because their arguments can execute commands or load code. Order,
+wrappers, wrapper options, connections and apparent byte flow do not relax the rule. Decoding and running must be split
+into separate submitted commands or files.
 
 **Passing protected text as data (#486).** Do not put text that mentions a protected word inline in a Bash command: the
 guard cannot prove that inline text is data rather than shell syntax. Write an issue body or brief with the editor or
