@@ -26,11 +26,14 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from safo import bounded, output
 
 WEEK_SECONDS = 7 * 24 * 3600
 STALE_SECONDS = 30 * 60
@@ -188,7 +191,7 @@ def default_state_path() -> Path:
 def read_json(path: Path) -> object:
     """The parsed file, or None when it is missing, unreadable or not JSON (the caller reads that as unknown)."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return bounded.read_json(path)
     except (OSError, ValueError):
         return None
 
@@ -234,11 +237,11 @@ def run(argv: Sequence[str] | None = None, now: float | None = None) -> int:
         decision, new_state = decide(data, t, saved if isinstance(saved, Mapping) else None)
         if state_path is not None and new_state != (saved if isinstance(saved, Mapping) else {}):
             save_state(state_path, new_state)
-        print(json.dumps(decision.__dict__) if args.json else format_line(decision))
+        output.write(sys.stdout, json.dumps(decision.__dict__) if args.json else format_line(decision))
     except SystemExit:
         raise
     except Exception:  # a broken reader must never block its caller: report unknown, exit 0
-        print("mode=unknown pace=- used=- elapsed=- age=- reason=error")
+        output.write(sys.stdout, "mode=unknown pace=- used=- elapsed=- age=- reason=error")
     return 0
 
 
