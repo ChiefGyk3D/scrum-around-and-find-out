@@ -11,10 +11,10 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Agent profiles](profiles.md): how to brief each agent, with every claim tied to a pointer at a measurement (the loader, the evidence check and the rendering into `examples/harness/` are built).
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
 - [Spend report](spend-report.md): `safo spend`, the weekly weighted token-spend report and stored baseline every token-savings change is measured by.
-- [Port ledger](port-ledger.md): one row per SAFO item with its port decision for the portable edition: ported, port as configurable, proposed, or not ported and why.
+- [Port ledger](port-ledger.md): one row per SAFO item with its port decision for the portable edition: ported, port as configurable, deferred (with its blocking issue), proposed, or not ported and why.
 - [Digest](digest.md): `safo-digest`, run an allow-listed command, save the full output privately and print a small capped digest.
 - [Impacted tests](impacted-tests.md): `scripts/impacted-tests.py`, which changed files map to which tests for a targeted run, and when it says run the full suite. CI stays the judge.
-- [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit.
+- [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit; `--queue` takes several PRs one at a time with head-lag retry, update-branch and named stops (exit codes 8 and 9).
 - [safo-threads](threads.md): list the open review threads of a pull request and reply to and resolve them from a strict dispositions file.
 - [safo-protect-threads](protect-threads.md): turns on required conversation resolution on a default branch with one GraphQL field, dry run first, read back after.
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
