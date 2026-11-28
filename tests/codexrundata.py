@@ -68,6 +68,11 @@ elif mode == "quote-long":
     open(out, "w").write("a review line\\n" * 2000 + "it quotes: flagged for possible cybersecurity risk\\n")
 elif mode == "empty":
     pass  # exit 0 and no final message: nothing was reviewed
+elif mode == "removed":
+    os.remove(out)
+elif mode == "unreadable":
+    open(out, "w").write("a real looking review\\n")
+    os.chmod(out, 0)
 elif mode == "no-start":
     open(out, "w").write("The deep scan failed to start, so no review ran.\\n")
 elif mode == "review-quotes-no-start":

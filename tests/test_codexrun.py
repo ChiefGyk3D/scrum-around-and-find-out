@@ -1399,3 +1399,15 @@ def test_exit_zero_without_a_real_result_is_incomplete_not_ok(
 def test_a_long_review_that_quotes_a_did_not_start_phrase_is_still_complete(world: World) -> None:
     world.mode("review-quotes-no-start")  # negative case: the check bites only on a short did-not-start result
     assert go(world, "security") == 0
+
+
+@pytest.mark.parametrize("mode", ["removed", "unreadable"])
+def test_exit_zero_with_a_missing_or_unreadable_result_is_incomplete(
+    world: World, mode: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.mode(mode)
+    assert os.geteuid() != 0  # root would read a mode 0 file; the test needs the permission check to bite
+    assert go(world, "security") == 60
+    assert "INCOMPLETE" in capsys.readouterr().err
+    (row,) = world.ledger()
+    assert row["exit"] == 60 and row["codex_exit"] == 0

@@ -56,7 +56,8 @@ What it does, in order, and stops at the first refusal with NO codex call (exit 
    `~/.local/state/safo/codex-runs/`, mode 0600).
 
 Exit codes: 0 done; 2 refused or could not start (nothing ran); 30 codex failed (its own code is in the ledger);
-40 tier filtered; 50 ran but the closing ledger row failed; 124 timed out.
+40 tier filtered; 50 ran but the closing ledger row failed; 60 incomplete (codex exited 0 but the result is
+empty, missing, unreadable or a short did-not-start notice: not reviewed); 124 timed out.
 
 Read confinement (security and copy classes). Codex's `read-only` sandbox restricts WRITES, not reads (its docs list
 `read-only`, `workspace-write`, `danger-full-access` and permission profiles `[permissions.<name>]`; they document no

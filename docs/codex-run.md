@@ -38,8 +38,9 @@ deliberate: a repository must not be able to make this wrapper contact a remote 
 ## A clean exit is not a finished review
 
 Exit 0 from codex means the process ended, not that a review happened (#577: a deep scan that never started still
-printed `exit=0 status=ok`). After a clean exit the wrapper reads the result file and exits 60 (`INCOMPLETE`, also the
-ledger `exit`) when it is empty or missing, or when it is short (600 bytes or less) and says the run `failed to start`,
+printed `exit=0 status=ok`). Exit codes of the wrapper: 0 done; 2 refused or could not start; 30 codex failed;
+40 tier filtered; 50 ran but the closing ledger row failed; 60 incomplete; 124 timed out. After a clean exit the wrapper reads the result file and exits 60 (`INCOMPLETE`, also the
+ledger `exit`) when it is empty, missing or unreadable, or when it is short (600 bytes or less) and says the run `failed to start`,
 `did not start`, `could not start` or `unable to start`. A longer result is a real answer and may quote those words.
 
 Consumers follow the same rule. The marker line `exit=N status=WORD` that the separate `daybreak-run` wrapper appends is
