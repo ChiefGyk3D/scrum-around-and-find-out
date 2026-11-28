@@ -1464,8 +1464,6 @@ def test_a_directory_symlink_or_odd_answer_where_a_file_is_expected_is_an_error(
     listing = "HTTP/2.0 200 OK\r\n\r\n" + json.dumps([{"path": "d/a", "sha": "s", "type": "file"}])
     for bad in (
         listing,
-        file_answer(kind="symlink"),
-        file_answer(kind="submodule"),
         file_answer(kind="dir"),
         file_answer(path="e"),
         "HTTP/2.0 200 OK\r\n\r\n{}",
@@ -1475,6 +1473,12 @@ def test_a_directory_symlink_or_odd_answer_where_a_file_is_expected_is_an_error(
         with pytest.raises(ship.ShipError) as stop:
             local_state_of(0, bad)
         assert stop.value.code == ship.EXIT_ERROR
+
+
+@pytest.mark.parametrize("kind", ["symlink", "submodule"])
+def test_a_symlink_or_submodule_answer_is_a_human_stop_not_a_comparison(kind: str) -> None:
+    with pytest.raises(ship.LinkFoundError):
+        local_state_of(0, file_answer(kind=kind))
 
 
 def test_only_a_404_status_line_is_absence() -> None:
@@ -1687,7 +1691,7 @@ def test_an_executed_path_that_is_a_directory_or_a_symlink_is_an_error(rig: Rig)
     code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), dirs=["ci/gate.sh"])
     assert code == ship.EXIT_ERROR and "directory where a file was expected" in out and merges(calls) == []
     code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), dirs=[], kinds={"ci/gate.sh": "symlink"})
-    assert code == ship.EXIT_ERROR and "symlink" in out and merges(calls) == []
+    assert code == ship.EXIT_NEEDS_HUMAN and "symlink" in out and merges(calls) == []
 
 
 def test_a_local_reusable_workflow_is_compared_by_its_blob(rig: Rig) -> None:  # noqa: F811
@@ -1746,3 +1750,126 @@ def test_the_protection_url_follows_the_encoded_branch() -> None:
     assert ship.protection_url_ok("/repos/o/r/branches/a%23b%25c/protection", "o/r", "a#b%c")
     assert not ship.protection_url_ok("/repos/o/r/branches/a#b%c/protection", "o/r", "a#b%c")
     assert not ship.protection_url_ok("/repos/o/r/branches/release%2F1.x/protection", "o/r", "release/1.x")
+
+
+# Daybreak round 7: links among what runs, and a protection answer must carry its own url
+
+GOOD = {"required_conversation_resolution": {"enabled": True}, "required_status_checks": {"strict": True}}
+
+
+@pytest.mark.parametrize("queue", [False, True])
+@pytest.mark.parametrize("url", [None, 5, ["https://api.github.com" + PROT], {"u": 1}, "", True])
+def test_a_protection_answer_whose_url_is_null_or_not_a_string_is_unreadable(rig: Rig, queue: bool, url: Any) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = {"out": json.dumps(dict(GOOD, url=url))}
+    code, out, calls = rig.go(*args(queue))
+    assert code == ship.EXIT_PROTECTED and out.startswith("PROTECTED") and merges(calls) == []
+
+
+@pytest.mark.parametrize("queue", [False, True])
+def test_a_protection_answer_without_any_url_is_unreadable(rig: Rig, queue: bool) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = {"out": json.dumps(GOOD)}
+    rig.state["omit_url"] = True
+    code, out, calls = rig.go(*args(queue))
+    assert code == ship.EXIT_PROTECTED and merges(calls) == []
+    rig.state["omit_url"] = False  # the fake adds the exact url of what was asked for: the same body now merges
+    rig.state["views"] = [*[sv("CLEAN")] * (5 if queue else 4), sv("CLEAN", state="MERGED")]
+    code, out, _calls = rig.go(*args(queue))
+    assert code == 0, out
+
+
+def test_a_urlless_answer_cannot_be_used_to_prove_strict_even_with_one_opt_out(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = {"out": json.dumps(GOOD)}
+    rig.state["omit_url"] = True
+    extra = ("--best-effort-threads",)
+    code, out, calls = rig.go(*args(False, *extra))
+    assert code == ship.EXIT_PROTECTED and "strict" in out and merges(calls) == []
+
+
+def entry(path: str, mode: str = "100644", kind: str = "blob", sha: str = "a") -> dict[str, str]:
+    return {"path": path, "type": kind, "mode": mode, "sha": sha}
+
+
+TOP = entry("ci/action", "040000", "tree", "t")
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        entry("ci/action/action.yml", "120000"),  # to ../../attacker/action.yml
+        entry("ci/action/helper.mjs", "120000"),
+        entry("ci/action/sub", "120000"),
+        entry("ci/action/vendored", "160000", "commit"),
+    ],
+)
+def test_an_unchanged_symlink_or_submodule_inside_a_local_action_is_a_human_stop(
+    rig: Rig,  # noqa: F811
+    link: dict[str, str],
+) -> None:
+    tree = [TOP, link]
+    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": tree, HEAD: tree})  # identical in both trees
+    assert code == ship.EXIT_NEEDS_HUMAN and "symlink or submodule" in out and merges(calls) == []
+    assert link["path"] in out
+
+
+def test_a_chain_of_symlinks_and_links_to_paths_inside_or_outside_the_tree_all_stop(rig: Rig) -> None:  # noqa: F811
+    for links in (
+        [entry("ci/action/a", "120000"), entry("ci/action/b", "120000")],  # a chain: a -> b -> ../x
+        [entry("ci/action/inner", "120000")],  # to a path inside the tree
+        [entry("ci/action/up", "120000", sha="..")],  # a relative target with ..
+        [entry("ci/action/abs", "120000", sha="/etc/x")],  # an absolute target
+    ):
+        tree = [TOP, *links]
+        code, _out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": tree, HEAD: tree})
+        assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == [], links
+        assert not [c for c in calls if len(c) > 2 and "blobs" in " ".join(c)], "the target is never fetched"
+
+
+def test_a_link_that_only_the_pinned_head_has_is_a_human_stop_too(rig: Rig) -> None:  # noqa: F811
+    plain = [TOP, entry("ci/action/action.yml")]
+    linked = [TOP, entry("ci/action/action.yml", "120000")]
+    code, _out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": plain, HEAD: linked})
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
+
+
+@pytest.mark.parametrize("ref", ["main", HEAD])
+def test_a_symlinked_directory_above_an_executed_script_is_a_human_stop(rig: Rig, ref: str) -> None:  # noqa: F811
+    tree = {"main": [entry("ci", "120000")], HEAD: [entry("ci", "120000")]}
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), tree_by_ref={ref: tree[ref], "other": []})
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci is a symlink" in out and merges(calls) == []
+
+
+def test_a_symlinked_script_or_gate_workflow_or_local_workflow_is_a_human_stop(rig: Rig) -> None:  # noqa: F811
+    code, out, calls = stops_on(
+        rig, gate("bash ci/gate.sh"), tree_by_ref={"main": [entry("ci/gate.sh", "120000")], HEAD: []}
+    )
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and merges(calls) == []
+    code, out, calls = stops_on(
+        rig, gate("bash ci/a.sh"), tree_by_ref={"main": [], HEAD: [entry(".github/workflows/ci.yml", "120000")]}
+    )
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci.yml" in out and merges(calls) == []
+    text = "jobs:\n  a:\n    uses: ./ci/w.yml\n"
+    code, out, calls = stops_on(rig, text, tree_by_ref={"main": [entry("ci/w.yml", "120000")], HEAD: []})
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/w.yml" in out and merges(calls) == []
+
+
+def test_ordinary_entries_and_other_links_elsewhere_do_not_stop_the_gate(rig: Rig) -> None:  # noqa: F811
+    tree = [entry("docs/readme", "120000"), entry("ci", "040000", "tree"), entry("ci/gate.sh"), entry("ci2", "120000")]
+    code, out, _calls = merges_through(rig, gate("bash ci/gate.sh"), tree_by_ref={"main": tree, HEAD: tree})
+    assert code == 0, out
+
+
+def test_the_tree_is_read_once_per_ref_for_all_link_checks(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["gate_text"] = gate("bash ci/a.sh", "bash ci/b.sh")
+    code, out, calls = rig.go(*args(False))
+    assert code == 0, out
+    reads = [c for c in calls if "git/trees" in " ".join(c)]
+    assert len(reads) == 2, reads  # base and pin, shared by every check of this gate
+
+
+def test_a_truncated_tree_stops_the_link_check_with_an_error(rig: Rig) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), tree_truncated=True)
+    assert code == ship.EXIT_ERROR and "truncated" in out and merges(calls) == []

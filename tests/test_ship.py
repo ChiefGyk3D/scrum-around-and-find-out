@@ -167,7 +167,15 @@ STUB = textwrap.dedent(
                 }}
             )
         }}
-        reply(pop("full_protection_seq") if "full_protection_seq" in state else state.get("full_protection", on))
+        item = pop("full_protection_seq") if "full_protection_seq" in state else state.get("full_protection", on)
+        try:  # a real answer says which branch it is about: the exact url, unless a test takes it away on purpose
+            body = json.loads(item["out"]) if item.get("rc", 0) == 0 and "out" in item else None
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and "url" not in body and not state.get("omit_url"):
+            body["url"] = "https://api.github.com/" + rest[1]
+            item = dict(item, out=json.dumps(body))
+        reply(item)
     if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
         tip = pop("base_tips") if "base_tips" in state else state.get("base_tip", "e" * 40)
         asked = unquote(rest[1].split("/git/ref/heads/")[1])

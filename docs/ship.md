@@ -172,10 +172,17 @@ merge call is made per pass.
 A local composite action is not identified by a directory listing (the contents API caps listings and gives no
 completeness signal): everything under its directory is read from the whole Git tree at the base and at the pinned head
 (path, type, mode, sha of each entry) and compared; a truncated tree, a failed read or a file where the directory was
-expected is exit 7. A file the gate executes is identified by its path, type and blob sha; a directory, symlink or
-submodule where a file was expected is exit 7. The protection answer's `url`, when it has one, must be exactly
+expected is exit 7. A file the gate executes is identified by its path, type and blob sha; a directory where a file was
+expected is exit 7.
+
+Links are never followed: a symlink or submodule (mode 120000 or 160000) anywhere under a local action, as an executed or
+sourced file, as a local reusable workflow, as the gate workflow, or as any directory above one of those, is
+`NEEDS-HUMAN` (exit 10) naming the entry, even when it is identical at the base and the pinned head, because where it
+points (a file outside the compared tree) is not compared. The whole Git tree is read once per ref for these checks; a
+truncated tree is exit 7. The protection answer must carry a `url` that is a string and is exactly
 `https://api.github.com/repos/OWNER/NAME/branches/BRANCH/protection` (or that path alone) with the branch percent-encoded,
-no query and no fragment; anything else is treated as an unreadable answer (GitHub Enterprise Server hosts are not accepted).
+no query and no fragment; a missing, null, non-string or different `url` makes the whole answer unreadable, which is a refusal (GitHub Enterprise
+Server hosts are not accepted).
 
 ## Queue mode
 

@@ -105,6 +105,10 @@ Sleep = Callable[[float], None]
 Clock = Callable[[], float]
 
 
+class LinkFoundError(Exception):
+    """A symlink or submodule where code that runs must be: a human decides, since where it points is not compared."""
+
+
 class BinaryFileError(Exception):
     """A file that is not text: read_text raises it, the caller turns it into a human stop."""
 
@@ -512,6 +516,7 @@ class Watcher:
         self.gate_commands = tuple(gate_commands)
         self.protect_paths = tuple(protect_paths)
         self.best_effort_threads = best_effort_threads
+        self.trees: dict[tuple[str, str], list[dict[str, Any]] | None] = {}
         self.tip0 = ""  # the base tip every check of this attempt was read against
         self.pin = ""
         self.chain: tuple[list[str], dict[str, int], str, PrCtx] | None = None
@@ -743,37 +748,72 @@ class Watcher:
             raise ShipError(EXIT_ERROR, f"unreadable contents answer for {where}") from None
         if found["path"] != path:  # the answer is about some other path than the one asked for
             raise ShipError(EXIT_ERROR, f"the contents answer is not about {clean(path, 200)[0]}")
+        if found["type"] in ("symlink", "submodule"):
+            raise LinkFoundError(f"{clean(path, 200)[0]} is a {found['type']}: where it points is not compared")
         if found["type"] != "file":
             raise ShipError(EXIT_ERROR, f"{where} is a {clean(str(found['type']), 20)[0]}, not a file")
         return json.dumps(found, sort_keys=True, separators=(",", ":"))
 
-    def tree_state(self, repo: str, ref: str, directory: str) -> str | None:
-        """The identity of everything under `directory` at `ref`, from the Git trees API with the whole tree (a
-        directory listing is capped and gives no completeness signal). None when nothing is there (404 or no entry);
-        a truncated tree, any other failure or a file where a directory was expected is an error."""
+    def tree_entries(self, repo: str, ref: str) -> list[dict[str, Any]] | None:
+        """Every entry of the whole Git tree at `ref` (path, type, mode, sha), read once per gate check. None for a 404;
+        a truncated tree (a listing that is capped gives no completeness signal), any other failure or an odd answer
+        is an error."""
+        key = (repo, ref)
+        if key in self.trees:
+            return self.trees[key]
         code, out, _err = self.gh.gh_call("api", "-i", f"repos/{repo}/git/trees/{ref_part(ref)}?recursive=1")
         status, body = self.status_of(out)
-        where = f"{clean(directory, 200)[0]} at {ref[:12]}"
+        where = f"the tree at {ref[:12]}"
         if status == 404:
+            self.trees[key] = None
             return None
         if code != 0 or not 200 <= status < 300:
-            raise ShipError(EXIT_ERROR, f"cannot read the tree for {where}: HTTP status {status or 'unknown'}")
+            raise ShipError(EXIT_ERROR, f"cannot read {where}: HTTP status {status or 'unknown'}")
         try:
             data = bounded.loads(body)
             if data["truncated"] is not False or not isinstance(data["tree"], list):
-                raise ShipError(EXIT_ERROR, f"the tree for {where} is truncated or unreadable")
+                raise ShipError(EXIT_ERROR, f"{where} is truncated or unreadable")
             entries = [
-                {"path": e["path"], "type": e["type"], "mode": e["mode"], "sha": e["sha"]}
-                for e in data["tree"]
-                if e["path"] == directory or str(e["path"]).startswith(directory + "/")
+                {"path": str(e["path"]), "type": e["type"], "mode": e["mode"], "sha": e["sha"]} for e in data["tree"]
             ]
         except (ValueError, KeyError, TypeError):
             raise ShipError(EXIT_ERROR, f"unreadable tree answer for {where}") from None
-        if any(e["path"] == directory and e["type"] != "tree" for e in entries):
-            raise ShipError(EXIT_ERROR, f"{where} is a file where a directory was expected")
-        if not entries:
+        self.trees[key] = entries
+        return entries
+
+    @staticmethod
+    def is_link(entry: Mapping[str, Any]) -> bool:
+        return entry.get("mode") in ("120000", "160000") or entry.get("type") == "commit"
+
+    def link_check(self, repo: str, ref: str, path: str) -> None:
+        """LinkFoundError when `path` or any directory above it is a symlink or submodule at `ref`: a link redirects
+        what runs to a place that is not part of what was compared."""
+        entries = self.tree_entries(repo, ref)
+        if entries is None:
+            return
+        parts = path.split("/")
+        above = {"/".join(parts[: i + 1]) for i in range(len(parts))}
+        for entry in entries:
+            if entry["path"] in above and self.is_link(entry):
+                raise LinkFoundError(f"{clean(str(entry['path']), 200)[0]} is a symlink or submodule at {ref[:12]}")
+
+    def tree_state(self, repo: str, ref: str, directory: str) -> str | None:
+        """The identity of everything under `directory` at `ref`, from the whole Git tree. None when nothing is there;
+        a file where a directory was expected is an error and a symlink or submodule anywhere under it is a human stop
+        (LinkFoundError): what a link points at is not part of the compared tree."""
+        entries = self.tree_entries(repo, ref)
+        where = f"{clean(directory, 200)[0]} at {ref[:12]}"
+        if entries is None:
             return None
-        return json.dumps(sorted(entries, key=lambda e: str(e["path"])), separators=(",", ":"))
+        found = [e for e in entries if e["path"] == directory or e["path"].startswith(directory + "/")]
+        for entry in found:
+            if self.is_link(entry):
+                raise LinkFoundError(f"{clean(str(entry['path']), 200)[0]} is a symlink or submodule at {ref[:12]}")
+        if any(e["path"] == directory and e["type"] != "tree" for e in found):
+            raise ShipError(EXIT_ERROR, f"{where} is a file where a directory was expected")
+        if not found:
+            return None
+        return json.dumps(sorted(found, key=lambda e: e["path"]), separators=(",", ":"))
 
     def read_text(self, repo: str, path: str, ref: str) -> str | None:
         """The raw text of a file at `ref`; None only for a clear HTTP 404 (read from the status line, never from text);
@@ -797,6 +837,14 @@ class Watcher:
         return body
 
     def gate_refs(self, repo: str, gate: str, base: str, pin: str) -> Result | None:
+        """See `_gate_refs`; a symlink or submodule among what runs is a human stop, whatever it points at."""
+        self.trees = {}
+        try:
+            return self._gate_refs(repo, gate, base, pin)
+        except LinkFoundError as why:
+            return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", str(why))
+
+    def _gate_refs(self, repo: str, gate: str, base: str, pin: str) -> Result | None:
         """NEEDS-HUMAN unless everything the gate workflow executes is the same on `base` and `pin`, or pinned:
         - every `uses:` (of the workflow, of each local workflow and of each local composite action, followed) is a
           remote reference pinned by a 40-hex commit (a docker one by digest) or a local path identical on both;
@@ -806,6 +854,8 @@ class Watcher:
         stay outside it; --protect-path and rulesets with required workflows are the other controls."""
         seen: set[tuple[str, str, str]] = set()
         compared: set[str] = set()
+        for where_ref in (base, pin):
+            self.link_check(repo, where_ref, gate)
         queue: list[tuple[str, int, str, str]] = [(gate, 0, "workflow", "")]
         while queue:
             path, depth, kind, cwd = queue.pop(0)
@@ -860,6 +910,8 @@ class Watcher:
                         compared.add(file)
                         if not safe_repo_path(file):
                             return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: an unusual path in a run step")
+                        for where_ref in (base, pin):
+                            self.link_check(repo, where_ref, file)
                         before, after = self.local_state(repo, file, base), self.local_state(repo, file, pin)
                         if before is None or after is None:
                             # no generated-file support: a path the gate runs that is not in the repository at both
@@ -889,6 +941,8 @@ class Watcher:
                         )
                     is_workflow = local.endswith((".yml", ".yaml"))
                     if is_workflow:  # a file: compared by its blob identity
+                        for where_ref in (base, pin):
+                            self.link_check(repo, where_ref, local)
                         before, after = self.local_state(repo, local, base), self.local_state(repo, local, pin)
                     else:  # an action directory: everything under it, from the whole Git tree, never a capped listing
                         before, after = self.tree_state(repo, base, local), self.tree_state(repo, pin, local)
@@ -1432,8 +1486,8 @@ class Watcher:
             except ValueError:
                 data = None
             about = data.get("url") if isinstance(data, dict) else None  # when it names a branch it must be this one
-            if isinstance(about, str) and not protection_url_ok(about, repo, base):
-                data = None
+            if not isinstance(about, str) or not protection_url_ok(about, repo, base):
+                data = None  # the answer must say which branch it is about, and say it exactly
         if self.best_effort_threads:
             if not self.noticed:
                 self.noticed = True
