@@ -862,6 +862,9 @@ def ensure(
     check_timeout(timeout)
     for value in (root, lockfile, python):
         check_plain(value)
+    # Children run from the private build directory, so every path they are handed must be absolute before any child
+    # starts. abspath is lexical (it follows no link): the symlink and ownership checks then run on this final path.
+    root = Path(os.path.abspath(root))
     parse_pip_args(pip_args)
     data = read_lockfile(lockfile)
     check_hashes(data)

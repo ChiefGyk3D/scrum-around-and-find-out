@@ -1677,16 +1677,34 @@ def test_every_child_is_isolated_and_runs_from_a_fixed_directory(
 ) -> None:
     cwd, _ = _planted(tmp_path)
     monkeypatch.chdir(cwd)
-    seen: list[tuple[list[str], object]] = []
+    seen: list[tuple[list[str], object, object]] = []
     real = subprocess.run
 
     def spy(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
-        seen.append((list(cmd), kw.get("cwd")))
+        seen.append((list(cmd), kw.get("cwd"), kw.get("stdin")))
         return real(cmd, **kw)
 
     monkeypatch.setattr("subprocess.run", spy)
     sharedvenv.ensure(tmp_path / "root", lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
     assert len(seen) >= 3  # identity, venv, pip
-    for cmd, where in seen:
+    for cmd, where, stdin in seen:
         assert "-I" in cmd, cmd
+        assert stdin == subprocess.DEVNULL, (cmd, stdin)
         assert where is not None and Path(str(where)).is_absolute() and Path(str(where)) != cwd, (cmd, where)
+
+
+def test_a_relative_root_builds_under_the_intended_directory_and_leaves_the_work_directory_clean(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "base"
+    base.mkdir()
+    base.chmod(0o755)
+    monkeypatch.chdir(base)
+    out = sharedvenv.ensure(Path("relroot"), lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    root = base / "relroot"
+    assert out.is_absolute() and root in out.parents, out
+    assert sorted(p.name for p in root.iterdir() if not p.name.startswith(".") and p.suffix != ".used") == [
+        out.parent.parent.name
+    ]
+    assert [p.name for p in root.iterdir() if p.name.startswith(".")] == [".lock"]  # no stage, no build directory left
+    assert sorted(p.name for p in base.iterdir()) == ["relroot"]  # nothing built relative to the child's directory
