@@ -20,7 +20,6 @@ runs nothing against GitHub.
 from __future__ import annotations
 
 import argparse
-import ast
 import os
 import re
 import shlex
@@ -50,11 +49,9 @@ def parse_audit(text: str) -> list[dict[str, str]]:
 
 
 def has_ci_green(ctx: str) -> bool:
-    try:
-        names = ast.literal_eval(ctx)
-    except (ValueError, SyntaxError):
-        return False
-    return isinstance(names, list) and any(n == "CI green" or str(n).endswith(" / CI green") for n in names)
+    # The audit prints a Python list of quoted names, e.g. ['ci / CI green', 'shell / CI green']; read the quoted items.
+    names = re.findall(r"'([^']*)'|\"([^\"]*)\"", ctx)
+    return any(n in ("CI green",) or n.endswith(" / CI green") for pair in names for n in pair if n)
 
 
 def plan(

@@ -199,7 +199,7 @@ replaced are gone.
 - [Security-findings](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Security-findings)
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [Codex-run](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Codex-run)
-- [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
+- [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher, with a queue mode
 - [safo-threads](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threads): list, reply to and resolve review threads from a dispositions file
 - [safo-protect-threads](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Protect-threads): require conversation resolution on a default branch, changing only that field
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
