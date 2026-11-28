@@ -11,12 +11,14 @@ Every row carries exactly one of five decisions:
 
 - **Ported**: the work exists in the portable edition's `main`. Each such row was checked against that repository on
   2026-11-27; the Notes column names the file or merged pull request. Whether a port is configurable is said in Notes.
-- **Port as configurable**: it belongs there, an issue is filed, nothing is built yet. Thresholds, weights, models,
+- **Port as configurable**: it belongs there, an issue is filed, and the port is not complete (nothing built, or only
+  a design or a part, as the Notes name). Thresholds, weights, models,
   paths and vendors are config values, never the maintainer's numbers.
 - **Not ported**: stays SAFO-only, with the reason.
 - **Deferred**: it belongs there, but an open issue blocks it; Notes names the blocker. Revisit when it closes.
-- **Proposed**: no issue there yet and no owner decision recorded; Notes says what is proposed. A proposal is not a
-  filing. Turn it into one of the others above when decided.
+- **Proposed**: no decision recorded yet, either because there is no portable-edition issue (Notes says what is
+  proposed; a proposal is not a filing), or because the port is written in an open pull request and flips to Ported
+  when that pull request merges. Turn it into one of the others above when decided.
 
 The SAFO column links the SAFO issue or pull request, or the doc page where the item has no single issue. "PE" is the
 portable edition's repository. Rows are added as ports land; verify a row against both repositories before changing
@@ -36,7 +38,7 @@ its status. One row per SAFO issue or page: a shared portable-edition reference 
 | [#519](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/519): one-file instruction layout | Ported | [PE #45](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/45) via [PE PR #49](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/49) | Same change as #489: size limits in the optional `[limits]` table; no size defaults (`shit/check.py`, `shit/config.py`, `templates/config.toml`) |
 | [#489](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/489): slim the fixed context | Ported | [PE #45](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/45) via [PE PR #49](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/49) | `instruction_max_bytes` and `listed_roles_max` in the optional `[limits]` table; `shit check` warns by default, fails on request; no size defaults (`shit/check.py`, `shit/config.py`, `templates/config.toml`) |
 
-## Port as configurable (issue filed, not built)
+## Port as configurable (issue filed, port not complete)
 
 | SAFO item | Decision | Portable edition | Config the port must expose |
 | --- | --- | --- | --- |
@@ -74,7 +76,7 @@ Decided 2026-11-27 under the secure-default rule: build nothing in the portable 
 | [#541](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/541): branch-protection drift audit | Deferred | [SAFO #541](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/541) (open) | not built in SAFO yet; check name and standard from config |
 | [#536](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/536): Dependabot auto-merge after the 7-day hold | Deferred | [SAFO #536](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/536) (open) | not built in SAFO yet; hold days from config; merge stays a human or lead decision |
 
-## Proposed (no issue in the portable edition yet)
+## Proposed (no issue yet, or ported in an open pull request)
 
 | SAFO item | Decision | Portable edition | Proposal |
 | --- | --- | --- | --- |
