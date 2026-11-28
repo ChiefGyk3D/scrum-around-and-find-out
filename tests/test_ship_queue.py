@@ -1645,7 +1645,9 @@ def test_any_other_file_under_the_action_directory_counts_too(rig: Rig) -> None:
     entry = {"path": "ci/action/helper.mjs", "type": "blob", "mode": "100644", "sha": "a"}
     base = [{"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}, entry]
     pin = [{"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}, dict(entry, sha="b")]
-    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": base, HEAD: pin})
+    code, out, calls = stops_on(
+        rig, ACTION_USE, tree_by_ref={"main": base, HEAD: pin}, texts={"ci/action/action.yml": COMPOSITE}
+    )
     assert code == ship.EXIT_NEEDS_HUMAN and "differs" in out and merges(calls) == []
 
 
@@ -1653,7 +1655,12 @@ def test_a_mode_change_under_the_action_directory_counts(rig: Rig) -> None:  # n
     one = {"path": "ci/action/run", "type": "blob", "mode": "100644", "sha": "a"}
     two = dict(one, mode="120000")  # now a symlink, the blob sha field unchanged
     top = {"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}
-    code, _out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": [top, one], HEAD: [top, two]})
+    code, _out, calls = stops_on(
+        rig,
+        ACTION_USE,
+        tree_by_ref={"main": [top, one], HEAD: [top, two]},
+        texts={"ci/action/action.yml": COMPOSITE},
+    )
     assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
 
 
