@@ -56,7 +56,8 @@ What it does, in order, and stops at the first refusal with NO codex call (exit 
    `~/.local/state/safo/codex-runs/`, mode 0600).
 
 Exit codes: 0 done; 2 refused or could not start (nothing ran); 30 codex failed (its own code is in the ledger);
-40 tier filtered; 50 ran but the closing ledger row failed; 124 timed out.
+40 tier filtered; 50 ran but the closing ledger row failed; 60 incomplete (codex exited 0 but the result is
+empty, missing, unreadable or a short did-not-start notice: not reviewed); 124 timed out.
 
 Read confinement (security and copy classes). Codex's `read-only` sandbox restricts WRITES, not reads (its docs list
 `read-only`, `workspace-write`, `danger-full-access` and permission profiles `[permissions.<name>]`; they document no
@@ -131,6 +132,18 @@ FILTER_PHRASE = "flagged for possible cybersecurity risk"
 FILTER_EVENT_TYPES = ("error", "turn.failed")
 DEFAULT_BWRAP = "/usr/bin/bwrap"
 EXIT_UNRECORDED = 50  # codex ran but the closing ledger row could not be written
+EXIT_INCOMPLETE = 60  # codex exited 0 but left no real result: nothing was reviewed (#577)
+# A result this short that says the work never started is a did-not-start notice, not a review (#577). Longer text
+# is a real answer that may quote the phrase, so only a short result is judged by its words.
+DID_NOT_START_MAX = 600
+DID_NOT_START = (
+    "failed to start",
+    "did not start",
+    "didn't start",
+    "could not start",
+    "couldn't start",
+    "unable to start",
+)
 
 STATE_PARTS = (".local", "state", "safo")
 LEDGER_NAME = "codex-runs.jsonl"
@@ -1075,6 +1088,22 @@ def _new_result(home: str, cls: str, now: dt.datetime) -> str:
     return path
 
 
+def incomplete_reason(path: str) -> str:
+    """Why a clean codex exit still left no review ("" when the result looks like one). Never trusts the exit code or a
+    wrapper's `status=ok` marker alone: an empty or missing result, or a short did-not-start notice, is not a review."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(DID_NOT_START_MAX + 1)
+    except OSError:
+        return "the result file cannot be read"
+    text = data.decode("utf-8", "replace").strip()
+    if not text:
+        return "the result is empty"
+    if len(data) <= DID_NOT_START_MAX and any(p in text.lower() for p in DID_NOT_START):
+        return "the result says the run did not start"
+    return ""
+
+
 def _lines(path: str) -> int:
     try:
         with open(path, "rb") as handle:
@@ -1135,6 +1164,7 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
         code, timed_out = run_codex(argv, env, root, copy_path, meta, args.timeout)
         seconds = time.monotonic() - started
         filtered = tier_filtered(code, timed_out, os.path.join(meta, "stderr"), os.path.join(meta, "events"))
+        reason = ""
         if filtered:
             final = EXIT_FILTERED
         elif timed_out:
@@ -1142,7 +1172,8 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
         elif code != 0:
             final = EXIT_CODEX_FAILED
         else:
-            final = EXIT_OK
+            reason = incomplete_reason(result)
+            final = EXIT_INCOMPLETE if reason else EXIT_OK
         if empty and os.listdir(empty):
             output.write(sys.stderr, "safo-codex-run: warning: the empty working folder was written to during the run")
         row = ledger_row(
@@ -1174,6 +1205,12 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
                 sys.stderr,
                 "Fix the tier (security work must use the security class) and rerun. Do not reword the prompt and do "
                 "not use another model: only the owner decides that.",
+            )
+        elif final == EXIT_INCOMPLETE:
+            output.write(
+                sys.stderr,
+                f"INCOMPLETE: codex exited 0 but {reason}. Treat this as not reviewed; rerun, and never trust an "
+                "`exit=0 status=ok` line alone.",
             )
         elif timed_out:
             output.write(sys.stderr, f"safo-codex-run: timed out after {args.timeout} s; the process group was killed")
