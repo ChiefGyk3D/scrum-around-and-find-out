@@ -248,6 +248,10 @@ like any other line (they can be run by a shell), which can false-block shell ex
 that holds is in the code: `ask` raises on a paid request before any request, and the only paid path is the broker, which
 verifies a fresh signature for every call.
 
+The decoded-command rule is deliberately conservative: a decoder and an interpreter anywhere in the same submitted
+command are denied, even when they are in separate statements, reversed, wrapped, or apparently unrelated. The guard
+does not try to prove how bytes flow between them. Split the work into separate commands or use a file between them.
+
 **Passing protected text as data (#486).** Do not put text that mentions a protected word inline in a Bash command: the
 guard cannot prove that inline text is data rather than shell syntax. Write an issue body or brief with the editor or
 Write tool, then pass only its path and plain options to the consuming tool. For example, use `gh issue create --title

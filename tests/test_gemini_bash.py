@@ -136,7 +136,111 @@ DECODE_TO_INTERPRETER = [
 
 @pytest.mark.parametrize("command", DECODE_TO_INTERPRETER)
 def test_the_classifier_denies_decoded_output_that_reaches_an_interpreter(command: str) -> None:
-    assert geminibrief.shell_command_class(command) is not None, command
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d input > payload; sh < payload",
+        "base64 -d input; sh",
+        "sh; base64 -d input",
+    ],
+)
+def test_a_decoder_and_sink_are_denied_without_proving_connectivity_or_order(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; A=1 B=2 sh",
+        "A=1 B=2 base64 -d f; sh",
+        "A=1; base64 -d f; B=2 sh",
+        "base64 -d f; A=1; sh",
+    ],
+)
+def test_assignments_cannot_hide_a_decoder_or_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "decoder",
+    [
+        "base64 -di f",
+        "xxd -rp f",
+        "base64 --dec f",
+        "base64 --decode= f",
+        "openssl enc -d -base64 f",
+        "openssl base64 -d f",
+        "basenc --base64 -d f",
+        "uudecode f",
+    ],
+)
+def test_decoder_option_forms_are_denied_with_a_sink(decoder: str) -> None:
+    command = f"{decoder}; sh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "{ base64 -d f; }; sh",
+        "(base64 -d f); sh",
+        "if true; then base64 -d f; else sh; fi",
+        "while false; do base64 -d f; done; sh",
+        "for x in f; do base64 -d f; done; sh",
+        "case x in x) base64 -d f;; y) sh;; esac",
+        "f() { base64 -d f; }; sh",
+    ],
+)
+def test_compound_constructs_cannot_separate_a_decoder_from_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+DECODE_WRAPPERS = (
+    "command",
+    "builtin",
+    "exec",
+    "nice",
+    "nohup",
+    "timeout",
+    "stdbuf",
+    "time",
+    "sudo",
+    "doas",
+    "busybox",
+    "setsid",
+    "chrt",
+    "ionice",
+    "taskset",
+    "unbuffer",
+    "env",
+    "xargs",
+    "!",
+)
+
+
+@pytest.mark.parametrize("wrapper", DECODE_WRAPPERS)
+@pytest.mark.parametrize("wrapped", ["sink", "decoder"])
+def test_wrappers_cannot_hide_a_decoder_or_sink(wrapper: str, wrapped: str) -> None:
+    command = f"base64 -d input; {wrapper} sh" if wrapped == "sink" else f"{wrapper} base64 -d input; sh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/base64 -d f; sh",
+        "base64 -d f; ./sh",
+        "base64 -d f; \\sh",
+        'base64 -d f; "sh"',
+        "'base64' -d f; sh",
+        'base64 -d f; "$(printf sh)"',
+    ],
+)
+def test_static_spellings_and_a_dynamic_command_word_are_denied(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
 
 
 @pytest.mark.parametrize("command", DECODE_TO_INTERPRETER)
@@ -152,11 +256,15 @@ def test_the_prefilter_selects_every_decode_to_interpreter_shape(command: str) -
         "printf %s cGF5bG9hZA== | base64 -d | cat",
         "printf '%s' payload",
         "echo payload",
-        "base64 -d input > /tmp/payload; echo $(date); python report.py",
     ],
 )
-def test_the_classifier_allows_decode_lookalikes_that_do_not_reach_an_interpreter(command: str) -> None:
+def test_the_classifier_allows_decode_lookalikes_with_no_sink_word(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
+
+
+def test_a_decode_lookalike_with_a_sink_word_elsewhere_is_denied() -> None:
+    command = "base64 -d input > /tmp/payload; echo $(date); python report.py"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
 
 
 @pytest.mark.parametrize(

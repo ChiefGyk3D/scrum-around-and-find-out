@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- The shell guard now unconditionally denies decoded output connected to a shell or interpreter (#645), independent of
-  protected words. The sanctioned pattern for protected text remains file-based handoff to a tool (#486); inline text
-  is not relaxed because the guard cannot prove it is data. Tests cover decoder, sink and connection variants plus
-  harmless decoding that is saved, counted, printed or passed to a text command.
+- The shell guard now unconditionally denies a command containing both a decoder and a shell or interpreter (#645),
+  independent of order, wrappers, connections or protected words. The conservative rule does not prove byte flow:
+  split the operations into separate commands or use a file. Decoder look-alikes remain allowed only when the command
+  has no sink word; the former `base64 ...; python report.py` allowance is now denied. Tests cover input-redirection,
+  separate-statement, reversed-order and wrapper bypasses, plus harmless decoding with no interpreter anywhere.
 - `safo-ship` (#586, Daybreak round 8, scope shrunk): a gate that uses ANY local action or local workflow (a `./` path, or a reference into this repository) is always NEEDS-HUMAN (exit 10) naming the reference, and nothing about such an action is read; the code that derived action manifests, composite steps, entry points, local reusable workflows and action directories, and its tests, are deleted. Every whole-tree entry is validated before use (strings, known mode that agrees with the type, 40 or 64 hex sha, plain path, no duplicates, no file that is also a directory) and a malformed tree is exit 7; the fake gh refuses to produce an impossible tree unless a test asks.
 - `safo-ship` (#586, Daybreak round 7): a symlink or submodule under a local action, as an executed or local-workflow file, as the gate workflow or as a directory above one of them is NEEDS-HUMAN (exit 10) even when unchanged, because its target is not compared; the protection answer must carry a string `url` that matches exactly (missing or non-string is unreadable, so PROTECTED); the fake gh adds the exact url and link entries.
 - `safo-ship` (#586, Daybreak round 6): refuses (PROTECTED, exit 9) unless branch protection has strict required status checks, because no client-side read can bind `gh pr merge` to the base tip; `--accept-base-race` opts out with a NOTICE and a mark in the MERGED line, and the docs now say the restart only narrows the window; a local action is compared by everything under it from the whole Git tree (a truncated tree is exit 7), files are identified by path, type and blob sha (a directory or symlink is exit 7); the protection answer's url must match exactly.

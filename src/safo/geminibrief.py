@@ -1216,7 +1216,7 @@ SHELL_VENDOR = "the vendor API host or SDK"
 SHELL_KEY = "the key variable name"
 SHELL_STORE = "the secret-store project or config name"
 SHELL_BUILT = "a word built from escapes beside a network or secret tool"
-SHELL_DECODED = "decoded output handed to a shell or interpreter"
+SHELL_DECODED = "a decoder and shell or interpreter in one command"
 SHELL_TOOL = "a secret tool run with a shell expansion"
 SHELL_BROKER_MODULE = "the broker client module run directly"
 SHELL_UNVERIFIED = "a command that could not be checked in time"
@@ -1234,59 +1234,32 @@ _SHELL_DECODER = re.compile(
     re.IGNORECASE,
 )
 _SHELL_DECODE_SINK = re.compile(
-    r"(?:\b(?:sh|bash|zsh|dash|ksh|eval|source|python[\d.]*|perl|ruby|node|nodejs)\b|(?<!\S)\.(?=\s))",
+    r"(?:\b(?:sh|bash|zsh|dash|ksh|eval|source|env|xargs|python[\d.]*|perl|ruby|node|nodejs|busybox)\b"
+    r"|(?<!\S)\.(?=\s))",
     re.IGNORECASE,
 )
 MAX_SHELL_DECODERS = 32
-_DECODE_SINKS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "eval", "source", ".", "perl", "ruby", "node", "nodejs"})
-_DECODE_WRAPPERS = frozenset({"env", "xargs"})
-_XARGS_VALUE_OPTIONS = frozenset({"-I", "-n", "-P", "-d", "-L", "-s", "-E", "-a"})
+_DECODE_COMMANDS = frozenset({"base64", "basenc", "openssl", "xxd", "uudecode", "printf", "echo", "perl"})
+_DECODE_SINKS = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "eval",
+        "source",
+        ".",
+        "env",
+        "xargs",
+        "perl",
+        "ruby",
+        "node",
+        "nodejs",
+        "busybox",
+    }
+)
 PREFILTER += (("shell decoder", _SHELL_DECODER), ("shell decode sink", _SHELL_DECODE_SINK))
-
-
-def _shell_unit_command(unit: shellunits.Unit, tick: Callable[[], None]) -> tuple[str, list[str]]:
-    """Return the static command word and arguments needed by the decode guard; unknown dynamic words stay empty."""
-    words: list[str | None] = []
-    for shell_word in unit.words:
-        tick()
-        words.append(shell_word.value)
-    i = 0
-    while i < len(words):
-        tick()
-        value = words[i]
-        if value is None:
-            return "", []
-        if "=" in value and not value.startswith("=") and i == 0:
-            i += 1
-            continue
-        command = value.rsplit("/", 1)[-1].lower()
-        i += 1
-        if command not in _DECODE_WRAPPERS:
-            args: list[str] = []
-            while i < len(words):
-                tick()
-                arg = words[i]
-                if arg is not None:
-                    args.append(arg)
-                i += 1
-            return command, args
-        while i < len(words):
-            tick()
-            option = words[i]
-            if option is None:
-                return "", []
-            if option == "--":
-                i += 1
-                break
-            if command == "env" and "=" in option and not option.startswith("="):
-                i += 1
-                continue
-            if not option.startswith("-") or option == "-":
-                break
-            i += 1
-            if option in _XARGS_VALUE_OPTIONS or (command == "env" and option in {"-u", "-C", "-S"}):
-                i += 1
-    return "", []
 
 
 def _option_has(options: set[str], letter: str, tick: Callable[[], None]) -> bool:
@@ -1297,19 +1270,33 @@ def _option_has(options: set[str], letter: str, tick: Callable[[], None]) -> boo
     return False
 
 
-def _decoder_unit(unit: shellunits.Unit, tick: Callable[[], None]) -> bool:
-    command, args = _shell_unit_command(unit, tick)
-    options: set[str] = set()
-    for arg in args:
+def _decode_option(options: set[str], letter: str, tick: Callable[[], None]) -> bool:
+    """Whether an option set names a decoder flag, including clusters and unambiguous long-option prefixes."""
+    for option in options:
         tick()
-        if arg.startswith("-"):
-            options.add(arg)
+        if option.startswith("--dec") or (not option.startswith("--") and letter in option[1:]):
+            return True
+    return False
+
+
+def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -> bool:
+    value = unit.words[index].value
+    if value is None:
+        return False
+    command = value.rsplit("/", 1)[-1].lower()
+    if command not in _DECODE_COMMANDS and not command.startswith("python"):
+        return False
+    options: set[str] = set()
+    for word in unit.words[index + 1 :]:
+        tick()
+        if word.value is not None and word.value.startswith("-"):
+            options.add(word.value)
     if command in {"base64", "basenc"}:
-        return bool(options & {"-d", "-D", "--decode"})
+        return _decode_option(options, "d", tick) or _option_has(options, "D", tick)
     if command == "openssl":
         return bool(options & {"-d", "--decode"})
     if command == "xxd":
-        return bool(options & {"-r", "--revert"})
+        return _option_has(options, "r", tick) or "--revert" in options
     if command == "uudecode":
         return True
     raw_parts: list[str] = []
@@ -1328,39 +1315,38 @@ def _decoder_unit(unit: shellunits.Unit, tick: Callable[[], None]) -> bool:
 
 
 def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
-    """True when a decoder's output is connected to a shell or interpreter in the submitted command."""
+    """True when static words name both a decoder and an interpreter anywhere in the submitted command."""
     joined = _join(command)
     if _SHELL_DECODER.search(joined) is None or _SHELL_DECODE_SINK.search(joined) is None:
         return False
     try:
-        units = shellunits.parse(joined, shellunits._Counter(), tick)
+        counter = shellunits._Counter()
+        units = shellunits.parse(joined, counter, tick)
+        for unit in units:
+            tick()
+            for heredoc in unit.heredocs:
+                tick()
+                units.extend(shellunits.parse(heredoc.body, counter, tick, 1))
     except shellunits.Unreadable:
-        return True  # both candidate classes are present, but the shell tokenizer cannot prove their connection safe
-    decoders: list[int] = []
-    commands: list[tuple[str, list[str]]] = []
-    for index, unit in enumerate(units):
+        return True  # both candidate classes are present, but the shell tokenizer cannot prove the command safe
+    decoders = 0
+    decoder = False
+    sink = False
+    for unit in units:
         tick()
-        commands.append(_shell_unit_command(unit, tick))
-        if _decoder_unit(unit, tick):
-            decoders.append(index)
-            if len(decoders) > MAX_SHELL_DECODERS:
-                return True
-    for decoder in decoders:
-        tick()
-        unit = units[decoder]
-        written: set[str] = set()
-        for operator, word in unit.redirs:
+        for index, word in enumerate(unit.words):
             tick()
-            if operator.startswith(">") and word.value is not None:
-                written.add(word.value)
-        for later in range(decoder + 1, len(units)):
-            tick()
-            sink, args = commands[later]
-            if sink not in _DECODE_SINKS and not sink.startswith("python"):
+            if word.value is None:
                 continue
-            if units[later].pipe == unit.pipe:
+            name = word.value.rsplit("/", 1)[-1].lower()
+            if name in _DECODE_SINKS or name.startswith("python"):
+                sink = True
+            if _decoder_word(unit, index, tick):
+                decoder = True
+                decoders += 1
+            if decoders > MAX_SHELL_DECODERS:
                 return True
-            if written.intersection(args):
+            if decoder and sink:
                 return True
     return False
 
@@ -1369,7 +1355,8 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
     it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED.
 
-    Decoded output connected to a shell or interpreter is always SHELL_DECODED, independent of protected words.
+    A decoder and a shell or interpreter anywhere in the same command is always SHELL_DECODED, independent of
+    protected words.
     The default is the old denial (#388): the secret tool with a project or config name, an expansion or a backtick, a
     word built from escapes, or a project or config name by itself, anywhere in the command. It is relaxed only on a
     positive proof from `safo.shellproof`: the protected words sit in comments, or the whole command is made of
