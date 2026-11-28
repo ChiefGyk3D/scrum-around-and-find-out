@@ -32,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import select
 import signal
 import stat
 import sys
@@ -1590,6 +1591,39 @@ def mode_json(env: Mapping[str, str], out: TextIO, now: float) -> int:
     return 0
 
 
+class StopFlag:
+    """A stop request a signal handler can set without taking any lock.
+
+    `threading.Event.set` takes the event's condition lock, which `Event.wait` holds for an instant; a signal that
+    lands on the main thread inside that instant runs the handler there and the handler waits for a lock its own
+    thread holds, forever (#614). This flag only writes one byte to a pipe, which is safe in a handler."""
+
+    def __init__(self) -> None:
+        self._read, self._write = os.pipe()
+        os.set_blocking(self._read, False)
+        os.set_blocking(self._write, False)
+        self._set = False
+
+    def set(self, *_: object) -> None:
+        self._set = True
+        with contextlib.suppress(OSError):  # a full pipe already holds a wake-up; a closed one needs none
+            os.write(self._write, b"x")
+
+    def is_set(self) -> bool:
+        return self._set
+
+    def wait(self, timeout: float) -> bool:
+        """Sleep up to `timeout` seconds; True as soon as the flag is set."""
+        if not self._set:
+            select.select([self._read], [], [], timeout)  # a handler's byte ends the sleep at once
+        return self._set
+
+    def close(self) -> None:
+        for fd in (self._read, self._write):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
 def mode_watch(
     env: Mapping[str, str],
     out: TextIO,
@@ -1600,9 +1634,9 @@ def mode_watch(
     clock: Callable[[], float] = time.time,
 ) -> int:
     """Redraw the table until interrupted. `wait` returns True when asked to stop (a signal)."""
-    stop = threading.Event()
+    stop = StopFlag()
     wait = wait or stop.wait
-    previous = [signal.signal(s, lambda *_: stop.set()) for s in (signal.SIGINT, signal.SIGTERM)]
+    previous = [signal.signal(s, stop.set) for s in (signal.SIGINT, signal.SIGTERM)]
     try:
         frames = 0
         while not stop.is_set():  # a signal that landed while the last frame was drawn must not start another
@@ -1620,6 +1654,7 @@ def mode_watch(
     finally:
         for sig, old in zip((signal.SIGINT, signal.SIGTERM), previous, strict=True):
             signal.signal(sig, old)
+        stop.close()
 
 
 # -- events -----------------------------------------------------------------------------------------------------------
@@ -1731,9 +1766,9 @@ def mode_events(
     """Poll one provider; print a line only on a state change, at most `cap` per `window`, then one dropped-count
     line per window. Ends after `limit` seconds (29 minutes) so the monitor can be re-armed, and on SIGINT/SIGTERM,
     always with exit 0."""
-    stop = threading.Event()
+    stop = StopFlag()
     wait = wait or stop.wait
-    previous = [signal.signal(s, lambda *_: stop.set()) for s in (signal.SIGINT, signal.SIGTERM)]
+    previous = [signal.signal(s, stop.set) for s in (signal.SIGINT, signal.SIGTERM)]
     cfg = load_config(env)
     state = {"start": clock(), "sent": 0, "dropped": 0}
 
@@ -1779,6 +1814,7 @@ def mode_events(
     finally:
         for sig, old in zip((signal.SIGINT, signal.SIGTERM), previous, strict=True):
             signal.signal(sig, old)
+        stop.close()
 
 
 # -- entry points -----------------------------------------------------------------------------------------------------

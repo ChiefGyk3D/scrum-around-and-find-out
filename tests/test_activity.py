@@ -1196,6 +1196,48 @@ def test_the_monitor_harness_fails_on_a_hung_child_with_its_stderr(box: Box) -> 
         signal_a_monitor(box, signal.SIGTERM, [], code=_DEAF_CODE, timeout=1)
 
 
+def test_a_stop_flag_set_by_a_handler_inside_its_own_wait_ends_that_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #614: threading.Event.set in a handler deadlocked when the signal landed inside Event.wait's lock window
+    flag = activity.StopFlag()
+    previous = signal.signal(signal.SIGTERM, flag.set)
+    real_select = activity.select.select
+
+    def land_inside_the_wait(*args: Any) -> Any:
+        os.kill(os.getpid(), signal.SIGTERM)  # the handler runs on this thread, while the wait is in progress
+        return real_select(*args)
+
+    monkeypatch.setattr(activity.select, "select", land_inside_the_wait)
+    try:
+        started = time.monotonic()
+        assert flag.wait(30) is True
+        assert flag.is_set()
+        assert time.monotonic() - started < 10  # it ended on the byte, not on the 30 s timeout
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        flag.close()
+
+
+def test_a_stop_flag_waits_out_its_timeout_when_never_set_and_is_idempotent_to_close() -> None:
+    flag = activity.StopFlag()
+    assert flag.wait(0.01) is False
+    assert not flag.is_set()
+    flag.set()
+    flag.set()  # a second set never blocks, even with the pipe full of earlier bytes
+    assert flag.wait(30) is True
+    flag.close()
+    flag.close()
+
+
+def test_a_stop_flag_survives_a_full_wake_up_pipe() -> None:
+    flag = activity.StopFlag()
+    try:
+        for _ in range(200_000):  # more than any pipe holds: the handler path must never raise or block
+            flag.set()
+        assert flag.wait(30) is True
+    finally:
+        flag.close()
+
+
 def test_watch_stops_at_once_when_a_signal_lands_while_a_frame_is_drawn(box: Box) -> None:
     frames: list[int] = []
 
