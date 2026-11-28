@@ -18,6 +18,7 @@ import zipfile
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1649,3 +1650,61 @@ def test_gc_converts_a_failure_inside_its_own_body(
     with pytest.raises(sharedvenv.Failed) as caught:
         sharedvenv.gc(tmp_path / "root", 1, False, 5)
     assert_clean(caught.value)
+
+
+def _planted(tmp_path: Path) -> tuple[Path, Path]:
+    """A directory holding modules named like the ones the child commands import; running one writes a marker."""
+    cwd = tmp_path / "planted"
+    cwd.mkdir()
+    marker = tmp_path / "ran.txt"
+    for name in ("venv", "pip", "ensurepip"):
+        (cwd / f"{name}.py").write_text(f"open({str(marker)!r}, 'a').write({name!r})\nraise SystemExit(0)\n")
+    return cwd, marker
+
+
+def test_planted_modules_in_the_callers_directory_never_run(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd, marker = _planted(tmp_path)
+    monkeypatch.chdir(cwd)
+    out = sharedvenv.ensure(tmp_path / "root", lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    assert not marker.exists(), marker.read_text()
+    assert out.exists()
+
+
+def test_every_child_is_isolated_and_runs_from_a_fixed_directory(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd, _ = _planted(tmp_path)
+    monkeypatch.chdir(cwd)
+    seen: list[tuple[list[str], object, object]] = []
+    real = subprocess.run
+
+    def spy(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.append((list(cmd), kw.get("cwd"), kw.get("stdin")))
+        return real(cmd, **kw)
+
+    monkeypatch.setattr("subprocess.run", spy)
+    sharedvenv.ensure(tmp_path / "root", lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    assert len(seen) >= 3  # identity, venv, pip
+    for cmd, where, stdin in seen:
+        assert "-I" in cmd, cmd
+        assert stdin == subprocess.DEVNULL, (cmd, stdin)
+        assert where is not None and Path(str(where)).is_absolute() and Path(str(where)) != cwd, (cmd, where)
+
+
+def test_a_relative_root_builds_under_the_intended_directory_and_leaves_the_work_directory_clean(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "base"
+    base.mkdir()
+    base.chmod(0o755)
+    monkeypatch.chdir(base)
+    out = sharedvenv.ensure(Path("relroot"), lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    root = base / "relroot"
+    assert out.is_absolute() and root in out.parents, out
+    assert sorted(p.name for p in root.iterdir() if not p.name.startswith(".") and p.suffix != ".used") == [
+        out.parent.parent.name
+    ]
+    assert [p.name for p in root.iterdir() if p.name.startswith(".")] == [".lock"]  # no stage, no build directory left
+    assert sorted(p.name for p in base.iterdir()) == ["relroot"]  # nothing built relative to the child's directory
