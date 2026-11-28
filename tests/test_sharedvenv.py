@@ -18,6 +18,7 @@ import zipfile
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1636,3 +1637,43 @@ def test_gc_converts_a_failure_inside_its_own_body(
     with pytest.raises(sharedvenv.Failed) as caught:
         sharedvenv.gc(tmp_path / "root", 1, False, 5)
     assert_clean(caught.value)
+
+
+def _planted(tmp_path: Path) -> tuple[Path, Path]:
+    """A directory holding modules named like the ones the child commands import; running one writes a marker."""
+    cwd = tmp_path / "planted"
+    cwd.mkdir()
+    marker = tmp_path / "ran.txt"
+    for name in ("venv", "pip", "ensurepip"):
+        (cwd / f"{name}.py").write_text(f"open({str(marker)!r}, 'a').write({name!r})\nraise SystemExit(0)\n")
+    return cwd, marker
+
+
+def test_planted_modules_in_the_callers_directory_never_run(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd, marker = _planted(tmp_path)
+    monkeypatch.chdir(cwd)
+    out = sharedvenv.ensure(tmp_path / "root", lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    assert not marker.exists(), marker.read_text()
+    assert out.exists()
+
+
+def test_every_child_is_isolated_and_runs_from_a_fixed_directory(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd, _ = _planted(tmp_path)
+    monkeypatch.chdir(cwd)
+    seen: list[tuple[list[str], object]] = []
+    real = subprocess.run
+
+    def spy(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.append((list(cmd), kw.get("cwd")))
+        return real(cmd, **kw)
+
+    monkeypatch.setattr("subprocess.run", spy)
+    sharedvenv.ensure(tmp_path / "root", lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    assert len(seen) >= 3  # identity, venv, pip
+    for cmd, where in seen:
+        assert "-I" in cmd, cmd
+        assert where is not None and Path(str(where)).is_absolute() and Path(str(where)) != cwd, (cmd, where)
