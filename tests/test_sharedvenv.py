@@ -151,10 +151,14 @@ def test_venv_is_read_only_and_reuse_does_not_rebuild(tmp_path: Path, wheels: Pa
     writable = [p for p in venv.rglob("*") if not p.is_symlink() and p.stat().st_mode & 0o222]
     assert writable == []
     assert not venv.stat().st_mode & 0o222
-    inode = venv.stat().st_ino
-    second = cli(*build_args(lock, root, wheels))  # a rebuild would give the entry a new inode
-    assert (second.returncode, second.stdout) == (0, first.stdout)
-    assert venv.stat().st_ino == inode
+    held = os.open(venv, os.O_RDONLY)  # keeps the old inode live, so a rebuild could never reuse its number
+    try:
+        inode = os.fstat(held).st_ino
+        second = cli(*build_args(lock, root, wheels))  # a rebuild would give the entry a new inode
+        assert (second.returncode, second.stdout) == (0, first.stdout)
+        assert venv.stat().st_ino == inode
+    finally:
+        os.close(held)
     with pytest.raises(PermissionError):
         (venv / "lib" / "evil.txt").write_text("x")
 
@@ -1209,12 +1213,21 @@ def test_a_writable_entry_with_our_marker_is_rebuilt_but_a_foreign_one_is_refuse
     tmp_path: Path, wheels: Path, lock: Path
 ) -> None:
     root, venv = build_in(tmp_path, wheels, lock)
-    inode = venv.stat().st_ino
     venv.chmod(0o755)  # what an interruption after an unsealed publish used to leave behind
-    done = cli(*build_args(lock, root, wheels))
+    # A freed inode number can be reused at once (ext4), so an inode comparison proves nothing. A file only the old
+    # entry holds proves the rebuild by content; the open descriptor also keeps the old inode live while we compare.
+    sentinel = venv / "old-entry-sentinel"
+    sentinel.write_text("old\n")
+    held = os.open(venv, os.O_RDONLY)
+    try:
+        inode = os.fstat(held).st_ino
+        done = cli(*build_args(lock, root, wheels))
+        assert venv.stat().st_ino != inode  # both inodes live: cannot be a reused number
+    finally:
+        os.close(held)
     assert done.returncode == 0, done.stderr
     assert venv_of(done) == venv and not venv.stat().st_mode & 0o222
-    assert venv.stat().st_ino != inode  # rebuilt, not reused
+    assert not sentinel.exists()  # rebuilt, not reused
     marker = venv / sharedvenv.MARKER
     venv.chmod(0o755)
     marker.chmod(0o644)
