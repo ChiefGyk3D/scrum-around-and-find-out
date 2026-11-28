@@ -402,9 +402,8 @@ def _run_defaults(section: Mapping[str, Any]) -> dict[str, Any] | None:
     return dict(run) if isinstance(run, dict) else None
 
 
-def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[str], str]:
-    """(the `uses:` references, the `run:` texts, "") of a workflow (jobs.*) or a composite action (runs.steps), or
-    ([], [], why the file cannot be trusted).
+def workflow_refs(text: str) -> tuple[list[str], list[str], str]:
+    """(the `uses:` references, the `run:` texts, "") of a workflow (jobs.*), or ([], [], why it cannot be trusted).
 
     Fail closed, never open: a file that is too large, does not parse, uses an anchor or alias, has a shape other than
     mappings and lists where `jobs`, a job or `steps` should be, or has more than MAX_REFS references is refused; and
@@ -422,40 +421,27 @@ def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[str]
         return [], [], bad
     if not isinstance(data, dict):
         return [], [], bad
-    units: list[dict[str, Any]] = []  # jobs, or the one composite action
+    units: list[dict[str, Any]] = []
     defaults: list[dict[str, Any]] = []
     unix: list[bool] = []
-    if action:
-        section = data.get("runs")
-        if section is not None and not isinstance(section, dict):
+    jobs = data.get("jobs")
+    if jobs is None:
+        jobs = {}
+    if not isinstance(jobs, dict):
+        return [], [], bad
+    top = _run_defaults(data)
+    if top is None:
+        return [], [], bad
+    for job in jobs.values():
+        if not isinstance(job, dict):
             return [], [], bad
-        if isinstance(section, dict) and section.get("using") == "composite":
-            units.append(section)
-            defaults.append({})
-            unix.append(False)  # a composite step names its shell
-        elif isinstance(section, dict) and isinstance(section.get("image"), str):
-            units.append({"uses": section["image"]} if section["image"].startswith("docker://") else {})
-            defaults.append({})
-            unix.append(False)
-    else:
-        jobs = data.get("jobs")
-        if jobs is None:
-            jobs = {}
-        if not isinstance(jobs, dict):
+        own = _run_defaults(job)
+        if own is None:
             return [], [], bad
-        top = _run_defaults(data)
-        if top is None:
-            return [], [], bad
-        for job in jobs.values():
-            if not isinstance(job, dict):
-                return [], [], bad
-            own = _run_defaults(job)
-            if own is None:
-                return [], [], bad
-            units.append(job)
-            defaults.append({**top, **own})  # a job's own default wins, key by key
-            label = job.get("runs-on")
-            unix.append(isinstance(label, str) and UNIX_LABEL.fullmatch(label) is not None)
+        units.append(job)
+        defaults.append({**top, **own})  # a job's own default wins, key by key
+        label = job.get("runs-on")
+        unix.append(isinstance(label, str) and UNIX_LABEL.fullmatch(label) is not None)
     refs: list[str] = []
     runs: list[str] = []
     for unit, default, is_unix in zip(units, defaults, unix, strict=True):
@@ -480,6 +466,49 @@ def workflow_refs(text: str, action: bool = False) -> tuple[list[str], list[str]
     if len(USES_TOKEN.findall(COMMENT.sub("", text))) != len(refs):
         return [], [], "has a `uses` the parse did not account for; " + bad
     return refs, runs, ""
+
+
+TREE_MODES = {"040000": "tree", "100644": "blob", "100755": "blob", "120000": "blob", "160000": "commit"}
+TREE_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+LINE_SEPARATORS = (chr(0x2028), chr(0x2029))
+
+
+def validated_tree(items: list[Any]) -> list[dict[str, Any]]:
+    """The entries of a Git tree answer, each checked before anything uses it (ValueError on the first bad one): all
+    four fields are strings, the mode is one Git has and agrees with the type, the sha is 40 or 64 lower-case hex, the
+    path is non-empty with no control, format or separator character and no empty, `.` or `..` part, no path appears
+    twice and no path that is a file, link or submodule is also the parent of another path."""
+    seen: set[str] = set()
+    parents: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("path", "type", "mode", "sha")):
+            raise ValueError("an entry that is not four strings")
+        path, kind, mode, sha = item["path"], item["type"], item["mode"], item["sha"]
+        if TREE_MODES.get(mode) != kind or TREE_SHA.fullmatch(sha) is None:
+            raise ValueError("an impossible mode, type or sha")
+        parts = path.split("/")
+        if any(part in ("", ".", "..") for part in parts) or any(
+            unicodedata.category(ch)[0] == "C" or ch in LINE_SEPARATORS for ch in path
+        ):
+            raise ValueError("a path that is not a plain repository path")
+        if path in seen:
+            raise ValueError("a path that appears twice")
+        seen.add(path)
+        parents.update("/".join(parts[:i]) for i in range(1, len(parts)))
+        entries.append({"path": path, "type": kind, "mode": mode, "sha": sha})
+    if any(entry["path"] in parents and entry["type"] != "tree" for entry in entries):
+        raise ValueError("a file that is also a directory")
+    return entries
+
+
+def is_local_ref(ref: str, repo: str) -> bool:
+    """True for a `uses:` that runs code from this repository: a path (`./x`, `.`) or `OWNER/NAME[/path]@ref` naming
+    this repository (case-insensitive). What such an action runs, from whichever ref, is not read: a human decides."""
+    if ref == "." or ref.startswith("./"):
+        return True
+    named = ref.split("@", 1)[0].split("/")
+    return len(named) >= 2 and "/".join(named[:2]).lower() == repo.lower() and not ref.startswith("docker://")
 
 
 def name_ok(context: str, name: str) -> bool:
@@ -773,9 +802,7 @@ class Watcher:
             data = bounded.loads(body)
             if data["truncated"] is not False or not isinstance(data["tree"], list):
                 raise ShipError(EXIT_ERROR, f"{where} is truncated or unreadable")
-            entries = [
-                {"path": str(e["path"]), "type": e["type"], "mode": e["mode"], "sha": e["sha"]} for e in data["tree"]
-            ]
+            entries = validated_tree(data["tree"])
         except (ValueError, KeyError, TypeError):
             raise ShipError(EXIT_ERROR, f"unreadable tree answer for {where}") from None
         self.trees[key] = entries
@@ -796,24 +823,6 @@ class Watcher:
         for entry in entries:
             if entry["path"] in above and self.is_link(entry):
                 raise LinkFoundError(f"{clean(str(entry['path']), 200)[0]} is a symlink or submodule at {ref[:12]}")
-
-    def tree_state(self, repo: str, ref: str, directory: str) -> str | None:
-        """The identity of everything under `directory` at `ref`, from the whole Git tree. None when nothing is there;
-        a file where a directory was expected is an error and a symlink or submodule anywhere under it is a human stop
-        (LinkFoundError): what a link points at is not part of the compared tree."""
-        entries = self.tree_entries(repo, ref)
-        where = f"{clean(directory, 200)[0]} at {ref[:12]}"
-        if entries is None:
-            return None
-        found = [e for e in entries if e["path"] == directory or e["path"].startswith(directory + "/")]
-        for entry in found:
-            if self.is_link(entry):
-                raise LinkFoundError(f"{clean(str(entry['path']), 200)[0]} is a symlink or submodule at {ref[:12]}")
-        if any(e["path"] == directory and e["type"] != "tree" for e in found):
-            raise ShipError(EXIT_ERROR, f"{where} is a file where a directory was expected")
-        if not found:
-            return None
-        return json.dumps(sorted(found, key=lambda e: e["path"]), separators=(",", ":"))
 
     def read_text(self, repo: str, path: str, ref: str) -> str | None:
         """The raw text of a file at `ref`; None only for a clear HTTP 404 (read from the status line, never from text);
@@ -846,10 +855,11 @@ class Watcher:
 
     def _gate_refs(self, repo: str, gate: str, base: str, pin: str) -> Result | None:
         """NEEDS-HUMAN unless everything the gate workflow executes is the same on `base` and `pin`, or pinned:
-        - every `uses:` (of the workflow, of each local workflow and of each local composite action, followed) is a
-          remote reference pinned by a 40-hex commit (a docker one by digest) or a local path identical on both;
-        - every `run:` text (of those files) is in the strict grammar of safo.shipscan, and every repository file it
-          executes is identical on both. A line outside the grammar is itself a stop.
+        - a `uses:` that is a local action or workflow (`./...`, or a reference into this repository) is always a stop:
+          no manifest, entry point, composite step or action directory is ever read;
+        - every other `uses:` is a remote reference pinned by a 40-hex commit (a docker one by digest);
+        - every `run:` text is in the strict grammar of safo.shipscan, and every repository file it executes (scripts
+          are followed) is identical on both. A line outside the grammar is itself a stop.
         Files that a script reads, Makefile targets, configuration, installed dependencies and what a program imports
         stay outside it; --protect-path and rulesets with required workflows are the other controls."""
         seen: set[tuple[str, str, str]] = set()
@@ -881,17 +891,10 @@ class Watcher:
                 refs: list[str] = []
                 units = [(text, cwd)]  # a script is held to the same grammar, from the directory it was run from
             else:
-                if kind == "action":
-                    text = self.read_text(repo, f"{path}/action.yml", pin)
-                    if text is None:
-                        text = self.read_text(repo, f"{path}/action.yaml", pin)
-                    if text is None:
-                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: a local action without action.yml")
-                else:
-                    text = self.read_text(repo, path, pin)
-                    if text is None:
-                        raise ShipError(EXIT_ERROR, f"cannot read {where}: not found at the pinned head")
-                refs, runs, problem = workflow_refs(text, action=kind == "action")
+                text = self.read_text(repo, path, pin)
+                if text is None:
+                    raise ShipError(EXIT_ERROR, f"cannot read {where}: not found at the pinned head")
+                refs, runs, problem = workflow_refs(text)
                 if problem:
                     return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{where}: {problem}")
                 units = [(run_text, "") for run_text in runs]
@@ -933,29 +936,13 @@ class Watcher:
                         return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
                     queue.append((file, depth + 1, "script", from_dir))
             for ref in refs:
-                if ref.startswith("./"):
-                    local = ref[2:].rstrip("/")
-                    if not safe_repo_path(local):
-                        return Result(
-                            EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", "local workflow reference has unsupported characters"
-                        )
-                    is_workflow = local.endswith((".yml", ".yaml"))
-                    if is_workflow:  # a file: compared by its blob identity
-                        for where_ref in (base, pin):
-                            self.link_check(repo, where_ref, local)
-                        before, after = self.local_state(repo, local, base), self.local_state(repo, local, pin)
-                    else:  # an action directory: everything under it, from the whole Git tree, never a capped listing
-                        before, after = self.tree_state(repo, base, local), self.tree_state(repo, pin, local)
-                    if before is None and after is None:
-                        raise ShipError(EXIT_ERROR, f"cannot read {clean(ref, 200)[0]}")
-                    if before != after:
-                        return Result(
-                            EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{clean(ref, 200)[0]} differs between {base} and the pin"
-                        )
-                    if depth >= MAX_DEPTH:
-                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
-                    queue.append((local, depth + 1, "workflow" if local.endswith((".yml", ".yaml")) else "action", ""))
-                elif ref.startswith("docker://"):
+                if is_local_ref(ref, repo):
+                    return Result(
+                        EXIT_NEEDS_HUMAN,
+                        "NEEDS-HUMAN",
+                        f"{where}: a local action or workflow ({clean(ref, 200)[0]}) is always merged by a human",
+                    )
+                if ref.startswith("docker://"):
                     if not DOCKER_DIGEST.search(ref):
                         return Result(
                             EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"unpinned reference {clean(ref, 200)[0]} (needs a digest)"

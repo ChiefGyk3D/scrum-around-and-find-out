@@ -146,16 +146,33 @@ STUB = textwrap.dedent(
         if state.get("tree_status"):
             reply({{"rc": 1, "out": "HTTP/2.0 " + str(state["tree_status"]) + " X\\r\\n\\r\\n{{}}"}})
         listed = state.get("tree_by_ref", {{}}).get(tref)
-        if listed is None:  # one tree for the directories the tests use, derived from the same per-path identities
-            listed = []
-            for folder in state.get("tree_dirs", ["ci/action", "tools/act"]):
-                gone = folder in state.get("missing", []) or folder + "@" + tref in state.get("missing_at", [])
-                if gone:
-                    continue
-                by_ref = state.get("local_by_ref", {{}}).get(tref, "same")
-                sha = state.get("local_by_path", {{}}).get(folder + "@" + tref, by_ref)
-                listed += [{{"path": folder, "type": "tree", "mode": "040000", "sha": "t" + sha}}]
-                listed += [{{"path": folder + "/action.yml", "type": "blob", "mode": "100644", "sha": sha}}]
+        if listed is None:
+            listed = []  # by default the repository has no links
+        modes = {{"040000": "tree", "100644": "blob", "100755": "blob", "120000": "blob", "160000": "commit"}}
+        hexdigits = "0123456789abcdef"
+        seen_paths = set()
+        impossible = []
+        if not isinstance(listed, list):
+            impossible.append("the tree is not a list")
+        for item in listed if isinstance(listed, list) else []:
+            ok = isinstance(item, dict) and all(isinstance(item.get(k), str) for k in ("path", "type", "mode", "sha"))
+            ok = ok and modes.get(item["mode"]) == item["type"]
+            ok = ok and len(item["sha"]) in (40, 64) and all(c in hexdigits for c in item["sha"])
+            ok = ok and item["path"] != "" and all(
+                part not in ("", ".", "..") for part in item["path"].split("/")
+            )
+            ok = ok and all(32 <= ord(c) != 127 and ord(c) not in (0x2028, 0x2029) for c in item["path"])
+            ok = ok and item["path"] not in seen_paths
+            if ok:
+                seen_paths.add(item["path"])
+            else:
+                impossible.append(str(item)[:80])
+        for first in seen_paths:  # a path that is a file (or link) and also the parent of another path
+            kinds_of = {{i["path"]: i["type"] for i in listed if isinstance(i, dict) and "path" in i}}
+            if kinds_of.get(first) != "tree" and any(other.startswith(first + "/") for other in seen_paths):
+                impossible.append("a file that is also a directory: " + first)
+        if impossible and not state.get("allow_invalid_tree"):
+            state.setdefault("impossible", []).extend(impossible)  # the Rig asserts that this stays empty
         body = {{"sha": "x", "truncated": state.get("tree_truncated", False), "tree": listed}}
         reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps(body)}})
     if rest[0] == "api" and rest[1].endswith("/protection"):
@@ -325,8 +342,10 @@ class Rig:
             sleep=sleep,
             clock=lambda: self.now,
         )
-        calls = json.loads(self.state_path.read_text(encoding="utf-8"))["calls"]
-        return code, out.getvalue() + err.getvalue(), calls
+        saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        # the fake never hands out a tree that GitHub could not make, unless a test asks for one (allow_invalid_tree)
+        assert not saved.get("impossible"), saved["impossible"]
+        return code, out.getvalue() + err.getvalue(), saved["calls"]
 
 
 @pytest.fixture

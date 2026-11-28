@@ -746,22 +746,6 @@ def test_pinned_remote_references_are_accepted(rig: Rig) -> None:  # noqa: F811
     assert code == 0, out
 
 
-def test_a_local_action_the_gate_uses_must_be_the_same_on_base_and_head(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
-    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./tools/act\n"
-    rig.state["local_by_ref"] = {"main": "one", HEAD: "two"}
-    code, out, calls = rig.go(*args(False))
-    assert code == ship.EXIT_NEEDS_HUMAN and "./tools/act" in out and merges(calls) == []
-
-
-def test_a_nested_local_workflow_is_followed_and_its_remote_uses_are_checked(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
-    rig.state["gate_text"] = "jobs:\n  a:\n    uses: ./ci/w.yml\n"
-    rig.state["texts"] = {"ci/w.yml": "jobs:\n  b:\n    steps:\n      - uses: a/b@v1\n"}
-    code, out, _calls = rig.go(*args(False))
-    assert code == ship.EXIT_NEEDS_HUMAN and "unpinned" in out
-
-
 def test_plain_mode_caps_every_call_by_the_per_pr_deadline(rig: Rig) -> None:  # noqa: F811
     rig.tick = 2.0
     rig.state["views"] = [sv("CLEAN", rollup=[])]
@@ -845,42 +829,16 @@ def gate_with(rig: Rig, text: str) -> tuple[int, str, list[list[str]]]:  # noqa:
 
 
 def test_51_references_in_one_file_need_a_human(rig: Rig) -> None:  # noqa: F811
-    text = "jobs:\n  a:\n    steps:\n" + "".join(step(f"o/r@{PINNED}") for _ in range(51))
+    text = "jobs:\n  a:\n    steps:\n" + "".join(step(f"o/x@{PINNED}") for _ in range(51))
     code, out, calls = gate_with(rig, text)
     assert code == ship.EXIT_NEEDS_HUMAN and "too many references or nesting too deep to verify" in out
     assert merges(calls) == []
 
 
 def test_50_references_are_still_read(rig: Rig) -> None:  # noqa: F811
-    text = "jobs:\n  a:\n    steps:\n" + "".join(step(f"o/r@{PINNED}") for _ in range(50))
+    text = "jobs:\n  a:\n    steps:\n" + "".join(step(f"o/x@{PINNED}") for _ in range(50))
     rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
     rig.state["gate_text"] = text
-    code, out, _calls = rig.go(*args(False))
-    assert code == 0, out
-
-
-def test_local_workflows_nested_too_deep_need_a_human(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
-    rig.state["gate_text"] = "jobs:\n  a:\n    uses: ./w1.yml\n"
-    rig.state["texts"] = {
-        "w1.yml": "jobs:\n  a:\n    uses: ./w2.yml\n",
-        "w2.yml": "jobs:\n  a:\n    uses: ./w3.yml\n",
-        "w3.yml": "jobs:\n  a:\n    uses: ./w4.yml\n",
-        "w4.yml": "jobs:\n  a:\n    runs-on: x\n",
-    }
-    code, out, calls = rig.go(*args(False))
-    assert code == ship.EXIT_NEEDS_HUMAN and "too many references or nesting too deep to verify" in out
-    assert merges(calls) == []
-
-
-def test_three_levels_of_local_workflows_are_followed(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
-    rig.state["gate_text"] = "jobs:\n  a:\n    uses: ./w1.yml\n"
-    rig.state["texts"] = {
-        "w1.yml": "jobs:\n  a:\n    uses: ./w2.yml\n",
-        "w2.yml": "jobs:\n  a:\n    uses: ./w3.yml\n",
-        "w3.yml": "jobs:\n  a:\n    runs-on: x\n",
-    }
     code, out, _calls = rig.go(*args(False))
     assert code == 0, out
 
@@ -890,11 +848,11 @@ def test_three_levels_of_local_workflows_are_followed(rig: Rig) -> None:  # noqa
     [
         "jobs:\n  a:\n    steps:\n      - run: |\n          echo uses: evil/x@v1\n",
         "jobs:\n  a:\n    strategy:\n      uses: evil/x@v1\n    steps: []\n",
-        "jobs:\n  a:\n    steps:\n      - {uses: 'evil/x@v1'}\n      - uses: o/r@"
+        "jobs:\n  a:\n    steps:\n      - {uses: 'evil/x@v1'}\n      - uses: o/x@"
         + PINNED
         + "\n    uses: ./x\n    uses: o/y@v2\n",
-        "jobs:\n  a:\n    steps:\n      - uses: o/r@" + PINNED + "\n      - name: uses the cache\n",
-        "uses: o/r@v1\njobs: {}\n",
+        "jobs:\n  a:\n    steps:\n      - uses: o/x@" + PINNED + "\n      - name: uses the cache\n",
+        "uses: o/x@v1\njobs: {}\n",
     ],
 )
 def test_a_uses_the_parse_did_not_account_for_needs_a_human(rig: Rig, text: str) -> None:  # noqa: F811
@@ -924,7 +882,7 @@ def test_an_unparsable_or_oddly_shaped_gate_file_needs_a_human(rig: Rig, text: s
 def test_a_comment_with_the_word_uses_does_not_trip_the_scan(rig: Rig) -> None:  # noqa: F811
     rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
     rig.state["gate_text"] = (
-        "# this file uses the shared jobs\njobs:\n  a:\n    steps:\n      - uses: o/r@" + PINNED + " # uses a pin\n"
+        "# this file uses the shared jobs\njobs:\n  a:\n    steps:\n      - uses: o/x@" + PINNED + " # uses a pin\n"
     )
     code, out, _calls = rig.go(*args(False))
     assert code == 0, out
@@ -955,22 +913,9 @@ def test_a_local_reference_with_odd_characters_needs_a_human(rig: Rig, local: st
     rig.state["views"] = [sv("CLEAN")]
     rig.state["gate_text"] = f'jobs:\n  a:\n    steps:\n      - uses: "./{local}"\n'
     code, out, calls = rig.go(*args(False))
-    assert code == ship.EXIT_NEEDS_HUMAN and "local workflow reference has unsupported characters" in out
+    assert code == ship.EXIT_NEEDS_HUMAN and "local action or workflow" in out
     assert merges(calls) == []
     assert not [c for c in calls if len(c) > 3 and any(local in part for part in c[1:])], "it must never reach a call"
-
-
-def test_contents_are_asked_for_with_a_quoted_path_and_a_ref_field(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
-    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./tools/act\n"
-    rig.state["local_by_ref"] = {"main": "one", HEAD: "two"}
-    code, _out, calls = rig.go(*args(False))
-    assert code == ship.EXIT_NEEDS_HUMAN
-    reads = [c for c in calls if "/contents/" in " ".join(c)]
-    assert reads and all(
-        c[c.index("-X") + 1] == "GET" and not any("?" in a for a in c[1:] if "/contents/" in a) for c in reads
-    )
-    assert all(any(a.startswith("ref=") for a in c) for c in reads)
 
 
 def test_contents_args_quote_each_segment_and_pass_the_ref_as_a_field() -> None:
@@ -1223,57 +1168,6 @@ def test_a_step_that_is_not_plain_bash_from_the_root_needs_a_human(rig: Rig, tex
 def test_the_shell_and_directory_rules_have_these_accepted_forms(rig: Rig, text: str) -> None:  # noqa: F811
     code, out, _calls = merges_through(rig, text)
     assert code == 0, out
-
-
-COMPOSITE = "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: bash ci/gate.sh\n"
-
-
-def test_the_run_steps_of_a_local_composite_action_are_analyzed(rig: Rig) -> None:  # noqa: F811
-    text = "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./ci/action\n"
-    changed = {"ci/gate.sh@main": "one", f"ci/gate.sh@{HEAD}": "two"}
-    code, out, calls = stops_on(rig, text, texts={"ci/action/action.yml": COMPOSITE}, local_by_path=changed)
-    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and merges(calls) == []
-    code, out, _calls = merges_through(rig, text, texts={"ci/action/action.yml": COMPOSITE}, local_by_path={})
-    assert code == 0, out
-
-
-@pytest.mark.parametrize(
-    "action",
-    [
-        "runs:\n  using: composite\n  steps:\n    - run: bash ci/gate.sh\n",  # no shell named
-        "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: bash ci/g.sh | tee out\n",
-        "runs:\n  using: composite\n  steps:\n    - shell: pwsh\n      run: ./ci/g.ps1\n",
-    ],
-)
-def test_a_composite_step_outside_the_grammar_needs_a_human(rig: Rig, action: str) -> None:  # noqa: F811
-    text = "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./ci/action\n"
-    code, _out, calls = stops_on(rig, text, texts={"ci/action/action.yml": action})
-    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
-
-
-ACTION_USE = "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./ci/action\n"
-
-
-def test_only_a_clear_404_means_a_missing_action_file(rig: Rig) -> None:  # noqa: F811
-    code, out, _calls = stops_on(rig, ACTION_USE, error_files=["ci/action/action.yml"])  # a 500 that says "404" in text
-    assert code == ship.EXIT_ERROR and "HTTP status 500" in out
-    code, out, _calls = merges_through(
-        rig,
-        ACTION_USE,
-        missing_files=["ci/action/action.yml"],  # a clear 404: the .yaml spelling is tried
-        texts={"ci/action/action.yaml": COMPOSITE},
-    )
-    assert code == 0, out
-
-
-def test_a_local_action_without_any_action_file_needs_a_human(rig: Rig) -> None:  # noqa: F811
-    code, out, calls = stops_on(rig, ACTION_USE, missing_files=["ci/action/action.yml", "ci/action/action.yaml"])
-    assert code == ship.EXIT_NEEDS_HUMAN and "without action.yml" in out and merges(calls) == []
-
-
-def test_a_local_action_directory_that_does_not_exist_is_an_error(rig: Rig) -> None:  # noqa: F811
-    code, out, calls = stops_on(rig, ACTION_USE, missing=["ci/action"])
-    assert code == ship.EXIT_ERROR and "cannot read" in out and merges(calls) == []
 
 
 def test_a_workflow_file_that_cannot_be_read_is_an_error_not_a_pass(rig: Rig) -> None:  # noqa: F811
@@ -1637,68 +1531,11 @@ def test_the_flag_is_off_by_default() -> None:
 # a local action is compared by everything under it, from the whole Git tree
 
 
-def test_a_changed_action_manifest_is_found_by_the_tree(rig: Rig) -> None:  # noqa: F811
-    changed = {"ci/action@main": "one", f"ci/action@{HEAD}": "two"}
-    code, out, calls = stops_on(rig, ACTION_USE, texts={"ci/action/action.yml": COMPOSITE}, local_by_path=changed)
-    assert code == ship.EXIT_NEEDS_HUMAN and "ci/action" in out and "differs" in out and merges(calls) == []
-    code, out, _calls = merges_through(rig, ACTION_USE, texts={"ci/action/action.yml": COMPOSITE}, local_by_path={})
-    assert code == 0, out
-
-
-def test_any_other_file_under_the_action_directory_counts_too(rig: Rig) -> None:  # noqa: F811
-    entry = {"path": "ci/action/helper.mjs", "type": "blob", "mode": "100644", "sha": "a"}
-    base = [{"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}, entry]
-    pin = [{"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}, dict(entry, sha="b")]
-    code, out, calls = stops_on(
-        rig, ACTION_USE, tree_by_ref={"main": base, HEAD: pin}, texts={"ci/action/action.yml": COMPOSITE}
-    )
-    assert code == ship.EXIT_NEEDS_HUMAN and "differs" in out and merges(calls) == []
-
-
-def test_a_mode_change_under_the_action_directory_counts(rig: Rig) -> None:  # noqa: F811
-    one = {"path": "ci/action/run", "type": "blob", "mode": "100644", "sha": "a"}
-    two = dict(one, mode="120000")  # now a symlink, the blob sha field unchanged
-    top = {"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}
-    code, _out, calls = stops_on(
-        rig,
-        ACTION_USE,
-        tree_by_ref={"main": [top, one], HEAD: [top, two]},
-        texts={"ci/action/action.yml": COMPOSITE},
-    )
-    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
-
-
-def test_a_truncated_tree_is_an_error_not_an_answer(rig: Rig) -> None:  # noqa: F811
-    top = {"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}
-    rig.state["tree_truncated"] = True
-    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": [top], HEAD: [top]})
-    assert code == ship.EXIT_ERROR and "truncated" in out and merges(calls) == []
-
-
-@pytest.mark.parametrize("status", ["500", "403", "429"])
-def test_a_failed_tree_read_is_an_error(rig: Rig, status: str) -> None:  # noqa: F811
-    code, out, calls = stops_on(rig, ACTION_USE, tree_status=status)
-    assert code == ship.EXIT_ERROR and f"HTTP status {status}" in out and merges(calls) == []
-
-
-def test_a_file_where_the_action_directory_was_expected_is_an_error(rig: Rig) -> None:  # noqa: F811
-    blob = [{"path": "ci/action", "type": "blob", "mode": "100644", "sha": "a"}]
-    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": blob, HEAD: blob})
-    assert code == ship.EXIT_ERROR and "file where a directory was expected" in out and merges(calls) == []
-
-
 def test_an_executed_path_that_is_a_directory_or_a_symlink_is_an_error(rig: Rig) -> None:  # noqa: F811
     code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), dirs=["ci/gate.sh"])
     assert code == ship.EXIT_ERROR and "directory where a file was expected" in out and merges(calls) == []
     code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), dirs=[], kinds={"ci/gate.sh": "symlink"})
     assert code == ship.EXIT_NEEDS_HUMAN and "symlink" in out and merges(calls) == []
-
-
-def test_a_local_reusable_workflow_is_compared_by_its_blob(rig: Rig) -> None:  # noqa: F811
-    text = "jobs:\n  a:\n    uses: ./ci/w.yml\n"
-    changed = {"ci/w.yml@main": "one", f"ci/w.yml@{HEAD}": "two"}
-    code, out, calls = stops_on(rig, text, local_by_path=changed)
-    assert code == ship.EXIT_NEEDS_HUMAN and "ci/w.yml" in out and merges(calls) == []
 
 
 # the protection answer's url is compared exactly
@@ -1788,50 +1625,8 @@ def test_a_urlless_answer_cannot_be_used_to_prove_strict_even_with_one_opt_out(r
     assert code == ship.EXIT_PROTECTED and "strict" in out and merges(calls) == []
 
 
-def entry(path: str, mode: str = "100644", kind: str = "blob", sha: str = "a") -> dict[str, str]:
+def entry(path: str, mode: str = "100644", kind: str = "blob", sha: str = "a" * 40) -> dict[str, str]:
     return {"path": path, "type": kind, "mode": mode, "sha": sha}
-
-
-TOP = entry("ci/action", "040000", "tree", "t")
-
-
-@pytest.mark.parametrize(
-    "link",
-    [
-        entry("ci/action/action.yml", "120000"),  # to ../../attacker/action.yml
-        entry("ci/action/helper.mjs", "120000"),
-        entry("ci/action/sub", "120000"),
-        entry("ci/action/vendored", "160000", "commit"),
-    ],
-)
-def test_an_unchanged_symlink_or_submodule_inside_a_local_action_is_a_human_stop(
-    rig: Rig,  # noqa: F811
-    link: dict[str, str],
-) -> None:
-    tree = [TOP, link]
-    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": tree, HEAD: tree})  # identical in both trees
-    assert code == ship.EXIT_NEEDS_HUMAN and "symlink or submodule" in out and merges(calls) == []
-    assert link["path"] in out
-
-
-def test_a_chain_of_symlinks_and_links_to_paths_inside_or_outside_the_tree_all_stop(rig: Rig) -> None:  # noqa: F811
-    for links in (
-        [entry("ci/action/a", "120000"), entry("ci/action/b", "120000")],  # a chain: a -> b -> ../x
-        [entry("ci/action/inner", "120000")],  # to a path inside the tree
-        [entry("ci/action/up", "120000", sha="..")],  # a relative target with ..
-        [entry("ci/action/abs", "120000", sha="/etc/x")],  # an absolute target
-    ):
-        tree = [TOP, *links]
-        code, _out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": tree, HEAD: tree})
-        assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == [], links
-        assert not [c for c in calls if len(c) > 2 and "blobs" in " ".join(c)], "the target is never fetched"
-
-
-def test_a_link_that_only_the_pinned_head_has_is_a_human_stop_too(rig: Rig) -> None:  # noqa: F811
-    plain = [TOP, entry("ci/action/action.yml")]
-    linked = [TOP, entry("ci/action/action.yml", "120000")]
-    code, _out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": plain, HEAD: linked})
-    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
 
 
 @pytest.mark.parametrize("ref", ["main", HEAD])
@@ -1839,20 +1634,6 @@ def test_a_symlinked_directory_above_an_executed_script_is_a_human_stop(rig: Rig
     tree = {"main": [entry("ci", "120000")], HEAD: [entry("ci", "120000")]}
     code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), tree_by_ref={ref: tree[ref], "other": []})
     assert code == ship.EXIT_NEEDS_HUMAN and "ci is a symlink" in out and merges(calls) == []
-
-
-def test_a_symlinked_script_or_gate_workflow_or_local_workflow_is_a_human_stop(rig: Rig) -> None:  # noqa: F811
-    code, out, calls = stops_on(
-        rig, gate("bash ci/gate.sh"), tree_by_ref={"main": [entry("ci/gate.sh", "120000")], HEAD: []}
-    )
-    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and merges(calls) == []
-    code, out, calls = stops_on(
-        rig, gate("bash ci/a.sh"), tree_by_ref={"main": [], HEAD: [entry(".github/workflows/ci.yml", "120000")]}
-    )
-    assert code == ship.EXIT_NEEDS_HUMAN and "ci.yml" in out and merges(calls) == []
-    text = "jobs:\n  a:\n    uses: ./ci/w.yml\n"
-    code, out, calls = stops_on(rig, text, tree_by_ref={"main": [entry("ci/w.yml", "120000")], HEAD: []})
-    assert code == ship.EXIT_NEEDS_HUMAN and "ci/w.yml" in out and merges(calls) == []
 
 
 def test_ordinary_entries_and_other_links_elsewhere_do_not_stop_the_gate(rig: Rig) -> None:  # noqa: F811
@@ -1873,3 +1654,199 @@ def test_the_tree_is_read_once_per_ref_for_all_link_checks(rig: Rig) -> None:  #
 def test_a_truncated_tree_stops_the_link_check_with_an_error(rig: Rig) -> None:  # noqa: F811
     code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), tree_truncated=True)
     assert code == ship.EXIT_ERROR and "truncated" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("status", ["500", "403", "429"])
+def test_a_failed_tree_read_is_an_error(rig: Rig, status: str) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), tree_status=status)
+    assert code == ship.EXIT_ERROR and f"HTTP status {status}" in out and merges(calls) == []
+
+
+def test_a_symlinked_script_or_gate_workflow_is_a_human_stop(rig: Rig) -> None:  # noqa: F811
+    one = {"main": [entry("ci/gate.sh", "120000")], HEAD: []}
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), tree_by_ref=one)
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/gate.sh" in out and merges(calls) == []
+    two = {"main": [], HEAD: [entry(".github/workflows/ci.yml", "120000")]}
+    code, out, calls = stops_on(rig, gate("bash ci/a.sh"), tree_by_ref=two)
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci.yml" in out and merges(calls) == []
+
+
+# Daybreak round 8: a gate that uses any local action or local workflow always stops for a human
+
+LOCAL_REFS = [
+    "./ci/action",
+    "./.github/actions/setup",
+    "./",
+    "./ci/w.yml",
+    "./.github/workflows/x.yml",
+    f"o/r/.github/actions/x@{PINNED}",
+    f"O/R/.github/actions/x@{PINNED}",
+    f"o/r@{PINNED}",
+    f"o/r/ci/w.yml@{PINNED}",
+]
+
+
+@pytest.mark.parametrize("ref", LOCAL_REFS)
+@pytest.mark.parametrize("where", ["step", "job"])
+def test_any_local_action_or_workflow_is_a_human_stop_and_is_never_read(rig: Rig, ref: str, where: str) -> None:  # noqa: F811
+    if where == "step":
+        text = f"jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {ref}\n"
+    else:
+        text = f"jobs:\n  a:\n    uses: {ref}\n"
+    manifest = "runs:\n  using: node20\n  main: ../outside.js\n  pre: ../pre.js\n  post: ../post.js\n"
+    texts = {"ci/action/action.yml": manifest, "ci/w.yml": text, ".github/actions/setup/action.yml": manifest}
+    code, out, calls = stops_on(rig, text, texts=texts)
+    assert code == ship.EXIT_NEEDS_HUMAN and out.startswith("NEEDS-HUMAN"), out
+    assert "local action or workflow" in out and ref in out and merges(calls) == []
+    flat = [" ".join(c) for c in calls]
+    assert not [line for line in flat if "action.yml" in line or "action.yaml" in line or "outside.js" in line]
+    assert not [line for line in flat if "/contents/ci/" in line or "/contents/.github/actions" in line]
+
+
+def test_an_action_of_another_repository_pinned_by_sha_is_not_local(rig: Rig) -> None:  # noqa: F811
+    text = f"jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: o/other/.github/actions/x@{PINNED}\n"
+    code, out, _calls = merges_through(rig, text)
+    assert code == 0, out
+
+
+def test_a_local_action_stops_the_gate_even_beside_a_perfect_grammar_script(rig: Rig) -> None:  # noqa: F811
+    text = (
+        "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./ci/action\n      - run: bash ci/gate.sh\n"
+    )
+    code, out, calls = stops_on(rig, text)
+    assert code == ship.EXIT_NEEDS_HUMAN and "./ci/action" in out and merges(calls) == []
+
+
+# Daybreak round 8: every whole-tree entry is validated before it is used
+
+H40, H64 = "a" * 40, "b" * 64
+
+
+def tree_answer(entries: Any, truncated: Any = False) -> str:
+    return "HTTP/2.0 200 OK\r\n\r\n" + json.dumps({"truncated": truncated, "tree": entries})
+
+
+def tree_of(out: str, code: int = 0) -> list[dict[str, Any]] | None:
+    watcher = ship.Watcher(
+        Answer(code, out), io.StringIO(), timeout=10, interval=1, max_polls=2, method="squash", delete_branch=False
+    )
+    return watcher.tree_entries(REPO, "main")
+
+
+GOOD_TREE = [
+    entry("ci", "040000", "tree"),
+    entry("ci/a.sh"),
+    entry("ci/b.sh", "100755"),
+    entry("ci/deep/er/c.sh", sha=H64),
+    entry("link", "120000"),
+    entry("sub", "160000", "commit"),
+    entry("a.b.c"),
+    entry("-dash"),
+]
+
+
+def test_a_well_formed_tree_is_accepted() -> None:
+    assert tree_of(tree_answer(GOOD_TREE)) == GOOD_TREE
+    assert tree_of(tree_answer([])) == []
+
+
+def good(**change: Any) -> dict[str, Any]:
+    return {**entry("ci/a.sh"), **change}
+
+
+MALFORMED: list[tuple[str, Any]] = [
+    ("numeric mode", [good(mode=100644)]),
+    ("numeric link mode", [good(path="ci/h", mode=120000)]),
+    ("null mode", [good(mode=None)]),
+    ("null type", [good(type=None)]),
+    ("null sha", [good(sha=None)]),
+    ("numeric sha", [good(sha=123)]),
+    ("null path", [good(path=None)]),
+    ("numeric path", [good(path=5)]),
+    ("list path", [good(path=["a"])]),
+    ("missing path", [{"type": "blob", "mode": "100644", "sha": H40}]),
+    ("missing mode", [{"path": "a", "type": "blob", "sha": H40}]),
+    ("short sha", [good(sha="not-a-sha")]),
+    ("41 hex sha", [good(sha="a" * 41)]),
+    ("63 hex sha", [good(sha="a" * 63)]),
+    ("upper-case sha", [good(sha="A" * 40)]),
+    ("non-hex sha", [good(sha="g" * 40)]),
+    ("empty sha", [good(sha="")]),
+    ("unknown mode", [good(mode="100664")]),
+    ("mode with spaces", [good(mode=" 100644")]),
+    ("blob with tree mode", [good(mode="040000")]),
+    ("tree with file mode", [entry("ci", "100644", "tree")]),
+    ("commit with link mode", [entry("sub", "120000", "commit")]),
+    ("blob with commit mode", [entry("sub", "160000", "blob")]),
+    ("unknown type", [good(type="tag")]),
+    ("duplicate path", [entry("ci/a.sh"), entry("ci/a.sh", "100755")]),
+    ("identical duplicate", [entry("ci/a.sh"), entry("ci/a.sh")]),
+    ("dot segment", [entry("ci/./a.sh")]),
+    ("dotdot segment", [entry("ci/../a.sh")]),
+    ("leading dot segment", [entry("./a.sh")]),
+    ("only dotdot", [entry("..")]),
+    ("only dot", [entry(".")]),
+    ("empty segment", [entry("ci//a.sh")]),
+    ("leading slash", [entry("/a.sh")]),
+    ("trailing slash", [entry("ci/a.sh/")]),
+    ("empty path", [entry("")]),
+    ("control char", [entry("ci/a\tb.sh")]),
+    ("newline", [entry("ci/a\nb.sh")]),
+    ("nul", [entry("ci/a" + chr(0) + "b.sh")]),
+    ("escape", [entry("ci/a" + chr(27) + "b.sh")]),
+    ("delete char", [entry("ci/a" + chr(127) + "b.sh")]),
+    ("unicode line separator", [entry("ci/a" + chr(0x2028) + "b.sh")]),
+    ("file and directory prefix", [entry("ci"), entry("ci/a.sh")]),
+    ("link and directory prefix", [entry("ci", "120000"), entry("ci/a.sh")]),
+    ("submodule and directory prefix", [entry("ci", "160000", "commit"), entry("ci/a.sh")]),
+    ("entry is not an object", ["ci/a.sh"]),
+    ("entry is a list", [["ci/a.sh"]]),
+    ("entry is null", [None]),
+    ("tree is not a list", {"ci/a.sh": 1}),
+    ("tree is a string", "ci/a.sh"),
+    ("tree is null", None),
+]
+
+
+@pytest.mark.parametrize("entries", [item[1] for item in MALFORMED], ids=[item[0] for item in MALFORMED])
+def test_a_malformed_tree_entry_refuses_the_whole_tree(entries: Any) -> None:
+    with pytest.raises(ship.ShipError) as stop:
+        tree_of(tree_answer(entries))
+    assert stop.value.code == ship.EXIT_ERROR
+
+
+@pytest.mark.parametrize("truncated", [True, None, "false", 0, "", [], {}])
+def test_only_a_literal_false_truncated_flag_is_accepted(truncated: Any) -> None:
+    with pytest.raises(ship.ShipError):
+        tree_of(tree_answer(GOOD_TREE, truncated))
+
+
+def test_a_tree_answer_without_the_flag_or_not_an_object_is_refused() -> None:
+    for body in ('{"tree": []}', "[]", "5", "null", '{"truncated": false}', "not json"):
+        with pytest.raises(ship.ShipError):
+            tree_of("HTTP/2.0 200 OK\r\n\r\n" + body)
+
+
+@pytest.mark.parametrize("index", [0, 5, 7])
+def test_one_bad_entry_among_good_ones_refuses_the_tree(index: int) -> None:
+    entries = [*GOOD_TREE]
+    entries[index] = good(path=entries[index]["path"], sha="zz")
+    with pytest.raises(ship.ShipError):
+        tree_of(tree_answer(entries))
+
+
+@pytest.mark.parametrize("which", [0, 1, 2, 3, 4, 5, 6])
+def test_a_malformed_tree_stops_a_real_run_with_an_error(rig: Rig, which: int) -> None:  # noqa: F811
+    bad = MALFORMED[which * 7][1]
+    code, out, calls = stops_on(
+        rig, gate("bash ci/gate.sh"), tree_by_ref={"main": bad, HEAD: bad}, allow_invalid_tree=True
+    )
+    assert code == ship.EXIT_ERROR and "ERROR" in out and merges(calls) == []
+
+
+def test_the_fake_refuses_to_make_an_impossible_tree_unless_asked(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = gate("bash ci/gate.sh")
+    rig.state["tree_by_ref"] = {"main": [good(mode=100644)], HEAD: [good(mode=100644)]}
+    with pytest.raises(AssertionError):
+        rig.go(*args(False))

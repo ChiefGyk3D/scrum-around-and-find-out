@@ -93,16 +93,17 @@ differs between the base and the pinned head, stops with `NEEDS-HUMAN` (exit 10)
 it. Before that check and again right before the merge call the pull request is re-read: a base branch that is no longer
 the one the checks were read for is `MERGE-REFUSED`, a moved head is `HEAD-MOVED`.
 
-The gate file is also read at the pinned head with a YAML parser (no anchors or aliases; at most 256 KiB, 50 references per
-file, 20 files, 3 levels of local workflows) and every `uses:` of `jobs.*` and `jobs.*.steps[*]` must be one of: a remote
-reference pinned by a 40-hex commit sha, a docker image pinned by a `sha256` digest, or a local workflow or action
-(`./path`) whose content is identical on the base and the pinned head (local workflows are followed). A local path may
-hold only `[A-Za-z0-9._/-]`, no empty, `.` or `..` part, at most 200 characters; anything else is `NEEDS-HUMAN` ("local
-workflow reference has unsupported characters"). Contents are asked for with each path part percent-quoted and the ref as
-a `-f ref=` field (never in the URL), and an answer about a different path than the one asked for is exit 7. Anything else, a file
-that does not parse or has an odd shape, or a word `uses` outside comments that the parse did not account for (a block
-scalar, a flow mapping, a duplicate key), is `NEEDS-HUMAN` ("too many references or nesting too deep to verify" when a cap
-is hit); a comment that says "uses" is ignored, a name or string that says it stops the tool and a human reads the file.
+Scope: a gate that uses ANY local action or local workflow always stops for a human. The gate file is read at the pinned
+head with a YAML parser (no anchors or aliases; at most 256 KiB, 50 references per file) and every `uses:` of `jobs.*` and
+`jobs.*.steps[*]` must be a remote reference pinned by a 40-hex commit sha or a docker image pinned by a `sha256` digest.
+A `uses:` that is a path (`./...` or `.`), or that names this repository (`OWNER/NAME[/path]@ref`, case-insensitive), is
+`NEEDS-HUMAN` (exit 10) naming it, for a step or a whole job (a reusable workflow), whether it is a composite, JavaScript
+or Docker action: nothing about it is read, so no manifest, entry point, composite step or action directory is ever
+parsed. Anything else, a file that does not parse or has an odd shape, or a word `uses` outside comments that the parse did
+not account for (a block scalar, a flow mapping, a duplicate key), is `NEEDS-HUMAN` ("too many references or nesting too
+deep to verify" when a cap is hit); a comment that says "uses" is ignored, a name or string that says it stops the tool and
+a human reads the file. Contents are asked for with each path part percent-quoted and the ref as a `-f ref=` field (never
+in the URL), and an answer about a different path than the one asked for is exit 7.
 
 The `run:` steps are read too, with a strict allowlist grammar (the shipscan module), not a best-effort reading of shell:
 deriving the executed files from arbitrary shell is an open-ended class, so anything outside the grammar is a human stop.
@@ -125,7 +126,7 @@ substitution, backticks, heredocs, continuations, tabs, globs or `~`. A path has
 `strace`, `uv run`, `npx`...), `VAR=value` prefixes, an interpreter option that takes a value, `-c`, `-m`, `-e`,
 `source`, `eval`, and every command that is not listed. Each script found is compared between the base and the pinned head
 (by content sha); a difference is `NEEDS-HUMAN` naming the file. A file the gate runs that is absent at either ref, including both, is `NEEDS-HUMAN`: there is no generated-file support, so a
-gate that executes generated scripts always stops for a human. The same grammar applies to the steps of local composite actions (which must name `shell: bash` or `sh`).
+gate that executes generated scripts always stops for a human.
 
 Every script that is found is followed: its text is read at the pinned head (it is identical to the base, or the run
 already stopped) and held to the same grammar, from the directory it was run from, and each file it runs is compared and
@@ -144,9 +145,8 @@ answer must name the branch that was asked for, and a protection answer that nam
 Each step also runs from the repository root in bash or sh: a `working-directory`, and a shell other than bash or sh, in
 the step, the `run` defaults of the job or of the workflow (the job's own value wins, key by key), is
 `NEEDS-HUMAN`; an unset shell counts as bash only on a literal `ubuntu-` or `macos-` runner label (on Windows it would be
-pwsh, on any other label it is unknown). An unreadable workflow or action file is exit 7 (only a clear HTTP 404 status line
-counts as missing); a local action directory that does not exist is exit 7, and one without an `action.yml` or
-`action.yaml` is `NEEDS-HUMAN`.
+pwsh, on any other label it is unknown). An unreadable workflow or script file is exit 7 (only a clear HTTP 404 status line
+counts as missing).
 
 What this does not see, stated plainly: Makefile targets and the files a listed command uses, configuration, test
 inventories, installed dependencies, and what a Python or Node program imports. The price of closing the gap by
@@ -169,17 +169,15 @@ names the residual, and the `MERGED` result line says "base race accepted". The 
 before the merge, and branch protection is read again for every pull request, never remembered from the one before. One
 merge call is made per pass.
 
-A local composite action is not identified by a directory listing (the contents API caps listings and gives no
-completeness signal): everything under its directory is read from the whole Git tree at the base and at the pinned head
-(path, type, mode, sha of each entry) and compared; a truncated tree, a failed read or a file where the directory was
-expected is exit 7. A file the gate executes is identified by its path, type and blob sha; a directory where a file was
-expected is exit 7.
+A file the gate executes is identified by its path, type and blob sha; a directory where a file was expected is exit 7.
 
-Links are never followed: a symlink or submodule (mode 120000 or 160000) anywhere under a local action, as an executed or
-sourced file, as a local reusable workflow, as the gate workflow, or as any directory above one of those, is
-`NEEDS-HUMAN` (exit 10) naming the entry, even when it is identical at the base and the pinned head, because where it
-points (a file outside the compared tree) is not compared. The whole Git tree is read once per ref for these checks; a
-truncated tree is exit 7. The protection answer must carry a `url` that is a string and is exactly
+Links are never followed: a symlink or submodule (mode 120000 or 160000) as an executed or sourced file, as the gate
+workflow, or as any directory above one of those, is `NEEDS-HUMAN` (exit 10) naming the entry, even when it is identical at
+the base and the pinned head, because where it points is not compared. The whole Git tree is read once per ref for these
+checks; a truncated tree is exit 7, and so is a tree with any malformed entry: every entry must be four strings, the mode
+one of 040000, 100644, 100755, 120000 or 160000 and agreeing with the type (tree, blob, blob, blob, commit), the sha 40 or
+64 lower-case hex, the path non-empty with no control, format or separator character and no empty, `.` or `..` part, no
+path may appear twice, and no file, link or submodule may also be the parent of another path. The protection answer must carry a `url` that is a string and is exactly
 `https://api.github.com/repos/OWNER/NAME/branches/BRANCH/protection` (or that path alone) with the branch percent-encoded,
 no query and no fragment; a missing, null, non-string or different `url` makes the whole answer unreadable, which is a refusal (GitHub Enterprise
 Server hosts are not accepted).
