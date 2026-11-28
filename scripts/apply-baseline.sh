@@ -220,10 +220,16 @@ run_branch_mode() {
     else
         rollback_line="ROLLBACK: gh api -X PUT repos/$repo/branches/$branch/protection --input $restore_file"
     fi
-    if $apply; then echo "applying --mode $mode to $repo ($live_visibility, branch $branch)"; else
+    if $apply; then
+        echo "applying --mode $mode to $repo ($live_visibility, branch $branch)"
+    else
         echo "plan only (nothing is changed); add --apply to run it against $repo ($live_visibility, branch $branch, mode $mode)"
     fi
-    [ "$rule" = NONE ] && echo "current rule: none" || echo "current rule: backed up to $rule_file at apply"
+    if [ "$rule" = NONE ]; then
+        echo "current rule: none"
+    else
+        echo "current rule: backed up to $rule_file at apply"
+    fi
     echo "$rollback_line"
     if $apply; then
         write_private "$rule_file" "$rule"
@@ -281,7 +287,9 @@ run_secret_scanning() {
         undo+=("-f 'security_and_analysis[secret_scanning_push_protection][status]=$pp'")
     fi
     rollback_line="ROLLBACK: gh api -X PATCH repos/$repo ${undo[*]}"
-    if $apply; then echo "applying --mode secret-scanning to $repo"; else
+    if $apply; then
+        echo "applying --mode secret-scanning to $repo"
+    else
         echo "plan only (nothing is changed); add --apply to run it against $repo (mode secret-scanning)"
     fi
     echo "current: secret_scanning=$ss push_protection=$pp"

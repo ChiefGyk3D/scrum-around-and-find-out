@@ -231,6 +231,22 @@ def test_standard_apply_orders_calls_keeps_checks_and_reads_back(tmp_path: Path)
     assert after["allow_force_pushes"]["enabled"] is False and after["allow_deletions"]["enabled"] is False
 
 
+def test_standard_turns_force_push_and_deletion_off_and_the_restore_file_keeps_them_as_they_were(
+    tmp_path: Path,
+) -> None:
+    open_rule = rule(["CI green"])
+    open_rule["allow_force_pushes"] = {"enabled": True}
+    open_rule["allow_deletions"] = {"enabled": True}
+    box = Sandbox(tmp_path, {"r1": repo_state(rule_=open_rule)})
+    done = box.apply_one("r1", "standard", "--apply")
+    assert done.returncode == 0, done.stderr
+    after = box.repo("r1")["rule"]
+    assert after["allow_force_pushes"]["enabled"] is False and after["allow_deletions"]["enabled"] is False
+    restore = next(f for f in box.backups.iterdir() if f.name.endswith(".restore.json"))
+    body = json.loads(restore.read_text())
+    assert body["allow_force_pushes"] is True and body["allow_deletions"] is True
+
+
 def test_standard_backup_is_private_and_the_rollback_line_restores_it(tmp_path: Path) -> None:
     box = Sandbox(tmp_path, {"r1": repo_state(rule_=rule(["CI green"], conv=True))})
     done = box.apply_one("r1", "standard", "--apply")
