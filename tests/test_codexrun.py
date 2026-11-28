@@ -1380,3 +1380,22 @@ def test_a_partial_clone_is_refused_and_a_missing_object_is_not_fetched(tmp_path
     assert shielded.returncode != 0  # with the variable the same read fails instead of fetching
     with pytest.raises(codexrun.CodexRunError):
         codexrun.check_repo_config(gitbin, str(tmp_path), str(dst))
+
+
+# -- 9. a clean codex exit is not a completed review (#577) -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["empty", "no-start"])
+def test_exit_zero_without_a_real_result_is_incomplete_not_ok(
+    world: World, mode: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.mode(mode)
+    assert go(world, "security") == 60
+    assert "INCOMPLETE" in capsys.readouterr().err
+    (row,) = world.ledger()
+    assert row["exit"] == 60 and row["codex_exit"] == 0
+
+
+def test_a_long_review_that_quotes_a_did_not_start_phrase_is_still_complete(world: World) -> None:
+    world.mode("review-quotes-no-start")  # negative case: the check bites only on a short did-not-start result
+    assert go(world, "security") == 0

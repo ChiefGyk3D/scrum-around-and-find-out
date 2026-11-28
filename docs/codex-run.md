@@ -34,3 +34,15 @@ Every git call this wrapper makes (and `safo-digest`, which shares the config ch
 remote, which are not on the allowlist. The behavior change from earlier versions: a worktree whose objects are
 missing and would have been fetched on demand now fails the check instead of reaching for the network. That is
 deliberate: a repository must not be able to make this wrapper contact a remote of its choosing.
+
+## A clean exit is not a finished review
+
+Exit 0 from codex means the process ended, not that a review happened (#577: a deep scan that never started still
+printed `exit=0 status=ok`). After a clean exit the wrapper reads the result file and exits 60 (`INCOMPLETE`, also the
+ledger `exit`) when it is empty or missing, or when it is short (600 bytes or less) and says the run `failed to start`,
+`did not start`, `could not start` or `unable to start`. A longer result is a real answer and may quote those words.
+
+Consumers follow the same rule. The marker line `exit=N status=WORD` that the separate `daybreak-run` wrapper appends is
+produced outside this repository and cannot prove completeness: count a review as complete only when its verdict
+parser says so (for example a recognized `VERDICT:` line, see [handoff](handoff.md)) or this exit code is 0. A missing
+or unparseable verdict is not reviewed, never a pass.
