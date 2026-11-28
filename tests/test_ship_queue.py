@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -1477,7 +1478,7 @@ BASES = ["a#b", "a%41b", "a?b=c", "a b", "é/ü x", "release/1.x#rc?1 %", "a//b"
 
 @pytest.mark.parametrize("base", BASES)
 def test_a_base_ref_is_percent_encoded_in_every_path_it_is_used_in(rig: Rig, base: str) -> None:  # noqa: F811
-    quoted = "/".join(ship.quote(part, safe="") for part in base.split("/"))
+    quoted = "/".join(quote(part, safe="") for part in base.split("/"))
     ok = dict(sv("CLEAN"), baseRefName=base)
     rig.state["views"] = [*[ok] * 4, dict(ok, state="MERGED")]
     code, out, calls = rig.go(*args(False))
