@@ -155,12 +155,27 @@ rulesets with required workflows and CODEOWNERS on the files the gate relies on;
 replace them. The workflow run's `path` match is a name match, not a signature. A protected context with no `app_id` is
 accepted from any source: pin it. Other pinned contexts are checked by app and name only, not by workflow.
 
-The base is pinned too. Its tip is read before any check and compared again right before the merge; when it moved, or
-the merge call answers "Base branch was modified", nothing is merged on the old checks: the whole chain (required
-checks, gate path, workflow and file comparisons, run binding, threads, protection) runs again against the new base, once,
-on the same head, and a second movement is `MERGE-REFUSED`. The gate's check runs are read once more right before the
-merge, and branch protection is read again for every pull request, never remembered from the one before. One merge call
-is made per pass.
+The base is pinned too, but only as far as a client can: its tip is read before any check and compared again right before
+the merge; when it moved, or the merge call answers "Base branch was modified", nothing is merged on the old checks and the
+whole chain (required checks, gate path, workflow and file comparisons, run binding, threads, protection) runs again
+against the new base, once, on the same head, and a second movement is `MERGE-REFUSED`. That restart narrows the window
+and does not close it: `gh pr merge --match-head-commit` binds the head, not the base, and no read made before the call
+can bind it, so a push to the base after the last read and before GitHub handles the merge is merged unverified. The
+real control is server side, so the tool refuses (`PROTECTED`, exit 9, "branch protection does not require strict (up to
+date) status checks...") unless the base branch's protection has required status checks with `strict: true` (a merge
+queue is the other answer). An unreadable or oddly shaped protection answer counts as not strict. For a repository that
+cannot enable it there is an explicit opt-out, `--accept-base-race` (default off): the merge goes ahead, a `NOTICE` line
+names the residual, and the `MERGED` result line says "base race accepted". The gate's check runs are read once more right
+before the merge, and branch protection is read again for every pull request, never remembered from the one before. One
+merge call is made per pass.
+
+A local composite action is not identified by a directory listing (the contents API caps listings and gives no
+completeness signal): everything under its directory is read from the whole Git tree at the base and at the pinned head
+(path, type, mode, sha of each entry) and compared; a truncated tree, a failed read or a file where the directory was
+expected is exit 7. A file the gate executes is identified by its path, type and blob sha; a directory, symlink or
+submodule where a file was expected is exit 7. The protection answer's `url`, when it has one, must be exactly
+`https://api.github.com/repos/OWNER/NAME/branches/BRANCH/protection` (or that path alone) with the branch percent-encoded,
+no query and no fragment; anything else is treated as an unreadable answer (GitHub Enterprise Server hosts are not accepted).
 
 ## Queue mode
 

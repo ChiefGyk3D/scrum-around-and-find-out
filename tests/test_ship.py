@@ -136,9 +136,37 @@ STUB = textwrap.dedent(
             reply({{"out": shown + "|" + state.get("blob_by_ref", {{}}).get(fref, "blobsha")}})
         by_ref = state.get("local_by_ref", {{}}).get(fref, "same")
         sha = state.get("local_by_path", {{}}).get(cpath + "@" + fref, by_ref)
-        reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps({{"path": shown, "sha": sha, "type": "file"}})}})
+        if cpath in state.get("dirs", []):  # a directory answers with a list of entries, as the real API does
+            entries = [{{"path": cpath + "/e" + str(n), "sha": "s" + str(n), "type": "file"}} for n in range(3)]
+            reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps(entries)}})
+        kind = state.get("kinds", {{}}).get(cpath, "file")
+        reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps({{"path": shown, "sha": sha, "type": kind}})}})
+    if rest[0] == "api" and "/git/trees/" in url:
+        tref = unquote(url.split("/git/trees/")[1].split("?")[0])
+        if state.get("tree_status"):
+            reply({{"rc": 1, "out": "HTTP/2.0 " + str(state["tree_status"]) + " X\\r\\n\\r\\n{{}}"}})
+        listed = state.get("tree_by_ref", {{}}).get(tref)
+        if listed is None:  # one tree for the directories the tests use, derived from the same per-path identities
+            listed = []
+            for folder in state.get("tree_dirs", ["ci/action", "tools/act"]):
+                gone = folder in state.get("missing", []) or folder + "@" + tref in state.get("missing_at", [])
+                if gone:
+                    continue
+                by_ref = state.get("local_by_ref", {{}}).get(tref, "same")
+                sha = state.get("local_by_path", {{}}).get(folder + "@" + tref, by_ref)
+                listed += [{{"path": folder, "type": "tree", "mode": "040000", "sha": "t" + sha}}]
+                listed += [{{"path": folder + "/action.yml", "type": "blob", "mode": "100644", "sha": sha}}]
+        body = {{"sha": "x", "truncated": state.get("tree_truncated", False), "tree": listed}}
+        reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps(body)}})
     if rest[0] == "api" and rest[1].endswith("/protection"):
-        on = {{"out": json.dumps({{"required_conversation_resolution": {{"enabled": True}}}})}}
+        on = {{
+            "out": json.dumps(
+                {{
+                    "required_conversation_resolution": {{"enabled": True}},
+                    "required_status_checks": {{"strict": True, "contexts": []}},
+                }}
+            )
+        }}
         reply(pop("full_protection_seq") if "full_protection_seq" in state else state.get("full_protection", on))
     if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
         tip = pop("base_tips") if "base_tips" in state else state.get("base_tip", "e" * 40)

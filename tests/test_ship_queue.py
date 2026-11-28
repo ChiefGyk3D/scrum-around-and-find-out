@@ -661,7 +661,11 @@ def test_a_base_retarget_right_before_the_merge_stops_it(rig: Rig, queue: bool) 
 
 # Daybreak round 3 (PR #594)
 
-OFF = {"out": json.dumps({"required_conversation_resolution": {"enabled": False}})}
+OFF = {
+    "out": json.dumps(
+        {"required_conversation_resolution": {"enabled": False}, "required_status_checks": {"strict": True}}
+    )
+}
 PINNED = "a" * 40
 HOSTILE = "bad\n::error::forged\x1b[31m"
 
@@ -980,10 +984,10 @@ def test_contents_args_quote_each_segment_and_pass_the_ref_as_a_field() -> None:
     ]
 
 
-@pytest.mark.parametrize("asked", ["tools/act", ".github/workflows/ci.yml"])
+@pytest.mark.parametrize("asked", ["ci/gate.sh", ".github/workflows/ci.yml"])
 def test_an_answer_about_another_path_is_an_error_not_a_comparison(rig: Rig, asked: str) -> None:  # noqa: F811
     rig.state["views"] = [sv("CLEAN")]
-    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./tools/act\n"
+    rig.state["gate_text"] = gate("bash ci/gate.sh")
     rig.state["path_override"] = {asked: "somewhere/else"}
     code, out, calls = rig.go(*args(False))
     assert code == ship.EXIT_ERROR and "not about" in out and merges(calls) == []
@@ -1036,7 +1040,11 @@ def test_base_modified_then_a_new_thread_is_found_by_the_second_pass(rig: Rig) -
 
 def test_base_modified_then_protection_switched_off_is_refused(rig: Rig) -> None:  # noqa: F811
     rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}, {"rc": 0}]
-    on = {"out": json.dumps({"required_conversation_resolution": {"enabled": True}})}
+    on = {
+        "out": json.dumps(
+            {"required_conversation_resolution": {"enabled": True}, "required_status_checks": {"strict": True}}
+        )
+    }
     rig.state["full_protection_seq"] = [on, OFF]
     rig.state["views"] = [sv("CLEAN")]
     code, out, calls = rig.go(*args(True))
@@ -1053,7 +1061,11 @@ def test_a_gate_that_turns_red_after_it_was_verified_is_not_merged(rig: Rig) -> 
 
 
 def test_the_protection_is_read_again_for_every_queued_pr(rig: Rig) -> None:  # noqa: F811
-    on = {"out": json.dumps({"required_conversation_resolution": {"enabled": True}})}
+    on = {
+        "out": json.dumps(
+            {"required_conversation_resolution": {"enabled": True}, "required_status_checks": {"strict": True}}
+        )
+    }
     rig.state["full_protection_seq"] = [on, OFF]  # switched off while the first PR merges
     rig.state["views"] = [*[sv("CLEAN")] * 5, sv("CLEAN", state="MERGED"), sv("CLEAN")]
     code, out, calls = rig.go("--queue", "5", "6", "--repo", REPO, "--interval", "1")
@@ -1438,23 +1450,31 @@ def local_state_of(code: int, out: str) -> str | None:
     return watcher.local_state(REPO, "d", "main")
 
 
-def listing(*paths: str) -> str:
-    return "HTTP/2.0 200 OK\r\n\r\n" + json.dumps([{"path": p, "sha": "s" + p} for p in paths])
+def file_answer(path: str = "d", kind: str = "file", sha: str = "s1") -> str:
+    return "HTTP/2.0 200 OK\r\n\r\n" + json.dumps({"path": path, "type": kind, "sha": sha})
 
 
-def test_a_directory_listing_is_compared_as_a_whole_and_must_be_about_that_directory() -> None:
-    first = local_state_of(0, listing("d/a", "d/b"))
-    assert first is not None and first == local_state_of(0, listing("d/a", "d/b"))
-    assert first != local_state_of(0, listing("d/a", "d/c"))
+def test_a_file_is_identified_by_path_type_and_blob_sha() -> None:
+    first = local_state_of(0, file_answer())
+    assert first is not None and first == local_state_of(0, file_answer())
+    assert first != local_state_of(0, file_answer(sha="s2"))
+
+
+def test_a_directory_symlink_or_odd_answer_where_a_file_is_expected_is_an_error() -> None:
+    listing = "HTTP/2.0 200 OK\r\n\r\n" + json.dumps([{"path": "d/a", "sha": "s", "type": "file"}])
     for bad in (
-        listing("e/a"),
-        listing(),
-        listing("d/a", "e/b"),
+        listing,
+        file_answer(kind="symlink"),
+        file_answer(kind="submodule"),
+        file_answer(kind="dir"),
+        file_answer(path="e"),
         "HTTP/2.0 200 OK\r\n\r\n{}",
         "HTTP/2.0 200 OK\r\n\r\n5",
+        "HTTP/2.0 200 OK\r\n\r\n[]",
     ):
-        with pytest.raises(ship.ShipError):
+        with pytest.raises(ship.ShipError) as stop:
             local_state_of(0, bad)
+        assert stop.value.code == ship.EXIT_ERROR
 
 
 def test_only_a_404_status_line_is_absence() -> None:
@@ -1509,7 +1529,7 @@ def test_a_protection_answer_about_another_branch_is_a_refusal(rig: Rig) -> None
     other = {
         "out": json.dumps(
             {
-                "url": "https://example.invalid/repos/o/r/branches/other/protection",
+                "url": "https://api.github.com/repos/o/r/branches/other/protection",
                 "required_conversation_resolution": {"enabled": True},
             }
         )
@@ -1521,8 +1541,9 @@ def test_a_protection_answer_about_another_branch_is_a_refusal(rig: Rig) -> None
     mine = {
         "out": json.dumps(
             {
-                "url": "https://example.invalid/repos/o/r/branches/main/protection",
+                "url": "https://api.github.com/repos/o/r/branches/main/protection",
                 "required_conversation_resolution": {"enabled": True},
+                "required_status_checks": {"strict": True},
             }
         )
     }
@@ -1540,3 +1561,179 @@ def test_a_file_that_exists_on_only_one_side_differs(rig: Rig) -> None:  # noqa:
         missing_at=["ci/new.sh@main"],
     )
     assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
+
+
+# Daybreak round 6: strict checks are required, actions are compared by their whole tree, protection url is exact
+
+NOT_STRICT = [
+    {"required_conversation_resolution": {"enabled": True}},
+    {"required_conversation_resolution": {"enabled": True}, "required_status_checks": {"strict": False}},
+    {"required_conversation_resolution": {"enabled": True}, "required_status_checks": {"strict": "true"}},
+    {"required_conversation_resolution": {"enabled": True}, "required_status_checks": {"strict": 1}},
+    {"required_conversation_resolution": {"enabled": True}, "required_status_checks": []},
+    {"required_conversation_resolution": {"enabled": True}, "required_status_checks": None},
+]
+
+
+@pytest.mark.parametrize("queue", [False, True])
+@pytest.mark.parametrize("body", NOT_STRICT)
+def test_without_strict_status_checks_nothing_is_merged(rig: Rig, queue: bool, body: dict[str, Any]) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = {"out": json.dumps(body)}
+    code, out, calls = rig.go(*args(queue))
+    assert code == ship.EXIT_PROTECTED and out.startswith("PROTECTED") and "strict" in out and merges(calls) == []
+
+
+def test_an_unreadable_protection_answer_is_not_strict(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = {"rc": 1, "err": "HTTP 500"}
+    code, out, calls = rig.go(*args(True, "--best-effort-threads"))
+    assert code == ship.EXIT_PROTECTED and "strict" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("queue", [False, True])
+def test_strict_status_checks_are_accepted_without_a_notice(rig: Rig, queue: bool) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * (5 if queue else 4), sv("CLEAN", state="MERGED")]
+    code, out, _calls = rig.go(*args(queue, "--accept-base-race"))  # the flag changes nothing when strict is on
+    assert code == 0 and "NOTICE" not in out and "base race" not in out
+
+
+@pytest.mark.parametrize("queue", [False, True])
+def test_the_opt_out_merges_with_a_loud_line_and_marks_the_result(rig: Rig, queue: bool) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * (5 if queue else 4), sv("CLEAN", state="MERGED")]
+    rig.state["full_protection"] = {"out": json.dumps(NOT_STRICT[0])}
+    code, out, calls = rig.go(*args(queue, "--accept-base-race"))
+    assert code == 0 and len(merges(calls)) == 1
+    lines = out.strip().splitlines()
+    assert lines[0].startswith("NOTICE --accept-base-race") and "nothing server-side stops it" in lines[0]
+    assert lines[-1].startswith("MERGED") and "base race accepted" in lines[-1]
+
+
+def test_both_opt_outs_together_merge_without_reading_protection(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["full_protection"] = {"rc": 1, "err": "HTTP 500"}
+    code, out, _calls = rig.go(*args(False, "--accept-base-race", "--best-effort-threads"))
+    assert code == 0 and out.count("NOTICE") == 2
+
+
+def test_the_conversation_rule_is_still_checked_first(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = {"out": json.dumps({})}
+    code, out, _calls = rig.go(*args(False))
+    assert code == ship.EXIT_PROTECTED and "conversation resolution" in out
+
+
+def test_the_flag_is_off_by_default() -> None:
+    assert ship.build_parser().parse_args(["5"]).accept_base_race is False
+    assert ship.build_parser().parse_args(["5", "--accept-base-race"]).accept_base_race is True
+
+
+# a local action is compared by everything under it, from the whole Git tree
+
+
+def test_a_changed_action_manifest_is_found_by_the_tree(rig: Rig) -> None:  # noqa: F811
+    changed = {"ci/action@main": "one", f"ci/action@{HEAD}": "two"}
+    code, out, calls = stops_on(rig, ACTION_USE, texts={"ci/action/action.yml": COMPOSITE}, local_by_path=changed)
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/action" in out and "differs" in out and merges(calls) == []
+    code, out, _calls = merges_through(rig, ACTION_USE, texts={"ci/action/action.yml": COMPOSITE}, local_by_path={})
+    assert code == 0, out
+
+
+def test_any_other_file_under_the_action_directory_counts_too(rig: Rig) -> None:  # noqa: F811
+    entry = {"path": "ci/action/helper.mjs", "type": "blob", "mode": "100644", "sha": "a"}
+    base = [{"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}, entry]
+    pin = [{"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}, dict(entry, sha="b")]
+    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": base, HEAD: pin})
+    assert code == ship.EXIT_NEEDS_HUMAN and "differs" in out and merges(calls) == []
+
+
+def test_a_mode_change_under_the_action_directory_counts(rig: Rig) -> None:  # noqa: F811
+    one = {"path": "ci/action/run", "type": "blob", "mode": "100644", "sha": "a"}
+    two = dict(one, mode="120000")  # now a symlink, the blob sha field unchanged
+    top = {"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}
+    code, _out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": [top, one], HEAD: [top, two]})
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
+
+
+def test_a_truncated_tree_is_an_error_not_an_answer(rig: Rig) -> None:  # noqa: F811
+    top = {"path": "ci/action", "type": "tree", "mode": "040000", "sha": "t"}
+    rig.state["tree_truncated"] = True
+    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": [top], HEAD: [top]})
+    assert code == ship.EXIT_ERROR and "truncated" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("status", ["500", "403", "429"])
+def test_a_failed_tree_read_is_an_error(rig: Rig, status: str) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, ACTION_USE, tree_status=status)
+    assert code == ship.EXIT_ERROR and f"HTTP status {status}" in out and merges(calls) == []
+
+
+def test_a_file_where_the_action_directory_was_expected_is_an_error(rig: Rig) -> None:  # noqa: F811
+    blob = [{"path": "ci/action", "type": "blob", "mode": "100644", "sha": "a"}]
+    code, out, calls = stops_on(rig, ACTION_USE, tree_by_ref={"main": blob, HEAD: blob})
+    assert code == ship.EXIT_ERROR and "file where a directory was expected" in out and merges(calls) == []
+
+
+def test_an_executed_path_that_is_a_directory_or_a_symlink_is_an_error(rig: Rig) -> None:  # noqa: F811
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), dirs=["ci/gate.sh"])
+    assert code == ship.EXIT_ERROR and "directory where a file was expected" in out and merges(calls) == []
+    code, out, calls = stops_on(rig, gate("bash ci/gate.sh"), dirs=[], kinds={"ci/gate.sh": "symlink"})
+    assert code == ship.EXIT_ERROR and "symlink" in out and merges(calls) == []
+
+
+def test_a_local_reusable_workflow_is_compared_by_its_blob(rig: Rig) -> None:  # noqa: F811
+    text = "jobs:\n  a:\n    uses: ./ci/w.yml\n"
+    changed = {"ci/w.yml@main": "one", f"ci/w.yml@{HEAD}": "two"}
+    code, out, calls = stops_on(rig, text, local_by_path=changed)
+    assert code == ship.EXIT_NEEDS_HUMAN and "ci/w.yml" in out and merges(calls) == []
+
+
+# the protection answer's url is compared exactly
+
+PROT = "/repos/o/r/branches/main/protection"
+
+
+@pytest.mark.parametrize("url", ["https://api.github.com" + PROT, PROT])
+def test_the_exact_protection_url_is_accepted(url: str) -> None:
+    assert ship.protection_url_ok(url, "o/r", "main")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.github.com" + PROT + "-attacker",
+        "https://api.github.com" + PROT + "/",
+        "https://api.github.com" + PROT + "/x",
+        "https://api.github.com" + PROT + "?x=1",
+        "https://api.github.com" + PROT + "#frag",
+        "https://api.github.com" + PROT + "?",
+        "https://example.invalid" + PROT,
+        "http://api.github.com" + PROT,
+        "https://api.github.com:444" + PROT,
+        "https://evil.api.github.com" + PROT,
+        "https://api.github.com.evil.example" + PROT,
+        "https://user@api.github.com" + PROT,
+        "//api.github.com" + PROT,
+        "https://api.github.com/repos/o/other/branches/main/protection",
+        "https://api.github.com/repos/other/r/branches/main/protection",
+        "https://api.github.com/repos/o/r/branches/main%2Fx/protection",
+        "https://api.github.com/repos/o/r/branches/ma%69n/protection",
+        "https://api.github.com/repos/o/r/branches/main%252F/protection",
+        "https://api.github.com/x" + PROT,
+        "https://api.github.com/" + PROT,
+        "https://api.github.com/repos/o/r/branches/main/protection/required_status_checks",
+        "https://api.github.com/repos/o/r/branches/other/protection",
+        "repos/o/r/branches/main/protection",
+        "",
+        " https://api.github.com" + PROT,
+    ],
+)
+def test_any_other_protection_url_is_refused(url: str) -> None:
+    assert not ship.protection_url_ok(url, "o/r", "main")
+
+
+def test_the_protection_url_follows_the_encoded_branch() -> None:
+    assert ship.protection_url_ok("/repos/o/r/branches/release/1.x/protection", "o/r", "release/1.x")
+    assert ship.protection_url_ok("/repos/o/r/branches/a%23b%25c/protection", "o/r", "a#b%c")
+    assert not ship.protection_url_ok("/repos/o/r/branches/a#b%c/protection", "o/r", "a#b%c")
+    assert not ship.protection_url_ok("/repos/o/r/branches/release%2F1.x/protection", "o/r", "release/1.x")

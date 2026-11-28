@@ -46,7 +46,7 @@ import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TextIO
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import yaml
 
@@ -331,6 +331,26 @@ def ref_part(ref: str) -> str:
     return "/".join(quote(part, safe="") for part in ref.split("/"))
 
 
+API_HOST = "api.github.com"
+
+
+def protection_url_ok(url: str, repo: str, base: str) -> bool:
+    """True only when `url` is the protection URL of exactly this repository and branch: https on the GitHub API host
+    (or a path-only relative form), no query, no fragment, and the path equal, not merely containing, to
+    /repos/OWNER/NAME/branches/BRANCH/protection with the branch percent-encoded as ref_part writes it."""
+    if url != url.strip() or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return False
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.query or parts.fragment or "#" in url or "?" in url:
+        return False
+    if (parts.scheme or parts.netloc) and (parts.scheme != "https" or parts.netloc != API_HOST):
+        return False
+    return parts.path == f"/repos/{repo}/branches/{ref_part(base)}/protection"
+
+
 def contents_args(repo: str, path: str, ref: str) -> list[str]:
     """The `gh api` arguments for the contents of `path` at `ref`: every path segment percent-quoted, and the ref sent
     as a query field (`-X GET -f ref=...`), never glued into the URL, so no text of either can add a parameter."""
@@ -484,7 +504,11 @@ class Watcher:
         protect_paths: Sequence[str] = (),
         best_effort_threads: bool = False,
         gate_commands: Sequence[str] = (),
+        accept_base_race: bool = False,
     ):
+        self.accept_base_race = accept_base_race
+        self.race_accepted = False
+        self.race_noticed = False
         self.gate_commands = tuple(gate_commands)
         self.protect_paths = tuple(protect_paths)
         self.best_effort_threads = best_effort_threads
@@ -691,14 +715,18 @@ class Watcher:
             )
         return self.gate_refs(repo, gate, base, pin)
 
-    def local_state(self, repo: str, path: str, ref: str) -> str | None:
-        """The content sha of a file, or of a directory listing, at `ref`. None only for a structurally valid HTTP 404
-        (the status line); every other failure, an empty or malformed answer, or an answer about another path is an
-        error, never "absent"."""
-        code, out, err = self.gh.gh_call("api", "-i", *contents_args(repo, path, ref)[1:])
+    def status_of(self, out: str) -> tuple[int, str]:
+        """(the HTTP status of a `gh api -i` answer, its body); 0 when there is no status line."""
         head, _sep, body = out.replace("\r\n", "\n").partition("\n\n")
         found = re.match(r"HTTP/\S+ (\d{3})", head)
-        status = int(found.group(1)) if found else 0
+        return (int(found.group(1)) if found else 0), body
+
+    def local_state(self, repo: str, path: str, ref: str) -> str | None:
+        """The identity (path, type, blob sha) of one FILE at `ref`. None only for a structurally valid HTTP 404; every
+        other failure, an empty or malformed answer, an answer about another path, a directory where a file was
+        expected, or a symlink or submodule, is an error, never "absent"."""
+        code, out, err = self.gh.gh_call("api", "-i", *contents_args(repo, path, ref)[1:])
+        status, body = self.status_of(out)
         where = f"{clean(path, 200)[0]} at {ref[:12]}"
         if status == 404:
             return None
@@ -706,19 +734,46 @@ class Watcher:
             raise ShipError(EXIT_ERROR, f"cannot read {where}: HTTP status {status or 'unknown'} {err.strip()[:100]}")
         try:
             data = bounded.loads(body)
-            if isinstance(data, dict):
-                ok = data["path"] == path
-                state: Any = {"file": data["path"], "sha": data["sha"]}
-            elif isinstance(data, list) and data:
-                ok = all(isinstance(i, dict) and str(i["path"]).rsplit("/", 1)[0] == path for i in data)
-                state = {"dir": [{"p": i["path"], "s": i["sha"]} for i in data]}
-            else:
-                raise ValueError("empty")
+            if isinstance(data, list):
+                raise ShipError(EXIT_ERROR, f"{where} is a directory where a file was expected")
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+            found = {"path": data["path"], "type": data["type"], "sha": data["sha"]}
         except (ValueError, KeyError, TypeError):
             raise ShipError(EXIT_ERROR, f"unreadable contents answer for {where}") from None
-        if not ok:  # the answer is about some other path than the one asked for
+        if found["path"] != path:  # the answer is about some other path than the one asked for
             raise ShipError(EXIT_ERROR, f"the contents answer is not about {clean(path, 200)[0]}")
-        return json.dumps(state, sort_keys=True, separators=(",", ":"))
+        if found["type"] != "file":
+            raise ShipError(EXIT_ERROR, f"{where} is a {clean(str(found['type']), 20)[0]}, not a file")
+        return json.dumps(found, sort_keys=True, separators=(",", ":"))
+
+    def tree_state(self, repo: str, ref: str, directory: str) -> str | None:
+        """The identity of everything under `directory` at `ref`, from the Git trees API with the whole tree (a
+        directory listing is capped and gives no completeness signal). None when nothing is there (404 or no entry);
+        a truncated tree, any other failure or a file where a directory was expected is an error."""
+        code, out, _err = self.gh.gh_call("api", "-i", f"repos/{repo}/git/trees/{ref_part(ref)}?recursive=1")
+        status, body = self.status_of(out)
+        where = f"{clean(directory, 200)[0]} at {ref[:12]}"
+        if status == 404:
+            return None
+        if code != 0 or not 200 <= status < 300:
+            raise ShipError(EXIT_ERROR, f"cannot read the tree for {where}: HTTP status {status or 'unknown'}")
+        try:
+            data = bounded.loads(body)
+            if data["truncated"] is not False or not isinstance(data["tree"], list):
+                raise ShipError(EXIT_ERROR, f"the tree for {where} is truncated or unreadable")
+            entries = [
+                {"path": e["path"], "type": e["type"], "mode": e["mode"], "sha": e["sha"]}
+                for e in data["tree"]
+                if e["path"] == directory or str(e["path"]).startswith(directory + "/")
+            ]
+        except (ValueError, KeyError, TypeError):
+            raise ShipError(EXIT_ERROR, f"unreadable tree answer for {where}") from None
+        if any(e["path"] == directory and e["type"] != "tree" for e in entries):
+            raise ShipError(EXIT_ERROR, f"{where} is a file where a directory was expected")
+        if not entries:
+            return None
+        return json.dumps(sorted(entries, key=lambda e: str(e["path"])), separators=(",", ":"))
 
     def read_text(self, repo: str, path: str, ref: str) -> str | None:
         """The raw text of a file at `ref`; None only for a clear HTTP 404 (read from the status line, never from text);
@@ -832,7 +887,11 @@ class Watcher:
                         return Result(
                             EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", "local workflow reference has unsupported characters"
                         )
-                    before, after = self.local_state(repo, local, base), self.local_state(repo, local, pin)
+                    is_workflow = local.endswith((".yml", ".yaml"))
+                    if is_workflow:  # a file: compared by its blob identity
+                        before, after = self.local_state(repo, local, base), self.local_state(repo, local, pin)
+                    else:  # an action directory: everything under it, from the whole Git tree, never a capped listing
+                        before, after = self.tree_state(repo, base, local), self.tree_state(repo, pin, local)
                     if before is None and after is None:
                         raise ShipError(EXIT_ERROR, f"cannot read {clean(ref, 200)[0]}")
                     if before != after:
@@ -1314,12 +1373,13 @@ class Watcher:
                 [line for t in open_threads for line in t.lines()],
             )
         # as close to the merge as possible, and every time: nothing is remembered from an earlier pull request
-        stop = (
-            self.require_conversation(repo, base) or self.regate(repo, pin) or self.base_moved(repo, number, pin, base)
-        )
+        stop = self.require_protection(repo, base) or self.regate(repo, pin) or self.base_moved(repo, number, pin, base)
         if stop is not None:
             return stop
-        return self.merge(repo, number, pin)
+        result = self.merge(repo, number, pin)
+        if result.code == EXIT_MERGED and self.race_accepted:
+            result.detail += " (base race accepted: strict status checks not enforced)"
+        return result
 
     def run_chain(
         self, repo: str, number: int, expect: str, attempt: Callable[[str, int, str, float], Result]
@@ -1333,6 +1393,7 @@ class Watcher:
             self.deadline, self.gh.limit = deadline, deadline  # every gh call is capped by what is left of this PR
             for round_ in (1, 2):
                 self.tip0, self.chain, self.last_base = "", None, ""
+                self.race_accepted = False
                 result = attempt(repo, number, expect, deadline)
                 if not result.retry:
                     return result
@@ -1354,10 +1415,25 @@ class Watcher:
     def one_queued(self, repo: str, number: int, expect: str = "") -> Result:
         return self.run_chain(repo, number, expect, lambda r, n, e, d: self.queued_attempt(r, n, e, d))
 
-    def require_conversation(self, repo: str, base: str) -> Result | None:
-        """A stop (exit 9) unless branch protection of `base` requires conversation resolution, read structurally; an
-        unreadable or oddly shaped answer is a refusal too. Only GitHub can make the thread check atomic with the
-        merge. `--best-effort-threads` keeps the old behavior with a NOTICE that names the race."""
+    def require_protection(self, repo: str, base: str) -> Result | None:
+        """Read branch protection of `base` right before the merge and refuse (exit 9) unless GitHub itself enforces
+        what no client-side read can:
+        - conversation resolution (a thread opened between the thread read and the merge call is stopped by GitHub);
+          `--best-effort-threads` keeps the old behavior with a NOTICE;
+        - strict required status checks (the head must be up to date with the base, so a push to the base between
+          the last check and the merge call makes GitHub refuse the merge); `--accept-base-race` accepts that race
+          with a loud NOTICE and a note in the result line.
+        An unreadable, oddly shaped or wrongly addressed answer counts as "not enforced"."""
+        data: Any = None
+        if not (self.best_effort_threads and self.accept_base_race):
+            code, out, _err = self.gh.gh_call("api", f"repos/{repo}/branches/{ref_part(base)}/protection")
+            try:
+                data = bounded.loads(out) if code == 0 else None
+            except ValueError:
+                data = None
+            about = data.get("url") if isinstance(data, dict) else None  # when it names a branch it must be this one
+            if isinstance(about, str) and not protection_url_ok(about, repo, base):
+                data = None
         if self.best_effort_threads:
             if not self.noticed:
                 self.noticed = True
@@ -1365,23 +1441,30 @@ class Watcher:
                     "NOTICE --best-effort-threads: the thread check is best-effort; a thread opened between its read "
                     f"and the merge call on {base} is not stopped"
                 )
-            return None
-        code, out, _err = self.gh.gh_call("api", f"repos/{repo}/branches/{ref_part(base)}/protection")
-        try:
-            data = bounded.loads(out) if code == 0 else None
+        else:
             section = data.get("required_conversation_resolution") if isinstance(data, dict) else None
-            enabled = isinstance(section, dict) and section.get("enabled") is True
-            about = data.get("url") if isinstance(data, dict) else None  # when it names a branch it must be this one
-            if isinstance(about, str) and f"/branches/{ref_part(base)}/protection" not in about:
-                enabled = False
-        except ValueError:
-            enabled = False
-        if not enabled:
-            return Result(
-                EXIT_PROTECTED,
-                "PROTECTED",
-                "conversation resolution is not required by branch protection; thread check would be best-effort",
-            )
+            if not (isinstance(section, dict) and section.get("enabled") is True):
+                return Result(
+                    EXIT_PROTECTED,
+                    "PROTECTED",
+                    "conversation resolution is not required by branch protection; thread check would be best-effort",
+                )
+        checks = data.get("required_status_checks") if isinstance(data, dict) else None
+        if not (isinstance(checks, dict) and checks.get("strict") is True):
+            if not self.accept_base_race:
+                return Result(
+                    EXIT_PROTECTED,
+                    "PROTECTED",
+                    "branch protection does not require strict (up to date) status checks; the base branch can move "
+                    "between the last check and the merge call",
+                )
+            self.race_accepted = True
+            if not self.race_noticed:
+                self.race_noticed = True
+                self.say(
+                    f"NOTICE --accept-base-race: strict status checks are not enforced on {base}; a push to it after "
+                    "the last check and before the merge call is merged unverified and nothing server-side stops it"
+                )
         return None
 
     def one(self, repo: str, number: int, expect: str = "") -> Result:
@@ -1453,6 +1536,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="repeatable: an exact command name (such as make or pytest) the gate's run steps may use; it is NOT "
         "followed to any file, so protect its inputs with --protect-path",
+    )
+    p.add_argument(
+        "--accept-base-race",
+        action="store_true",
+        help="merge even when branch protection does not require strict (up to date) status checks: a push to the base "
+        "between the last check and the merge call is then merged unverified. A NOTICE says so and the result line "
+        "records it",
     )
     p.add_argument(
         "--best-effort-threads",
@@ -1575,6 +1665,7 @@ def main(
         protect_paths=args.protect_path,
         best_effort_threads=args.best_effort_threads,
         gate_commands=args.gate_command,
+        accept_base_race=args.accept_base_race,
         timeout=args.timeout,
         interval=args.interval,
         max_polls=args.max_polls,
