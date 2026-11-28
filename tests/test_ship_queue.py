@@ -1531,6 +1531,7 @@ def test_a_protection_answer_about_another_branch_is_a_refusal(rig: Rig) -> None
             {
                 "url": "https://api.github.com/repos/o/r/branches/other/protection",
                 "required_conversation_resolution": {"enabled": True},
+                "required_status_checks": {"strict": True},
             }
         )
     }
@@ -1612,8 +1613,9 @@ def test_the_opt_out_merges_with_a_loud_line_and_marks_the_result(rig: Rig, queu
 def test_both_opt_outs_together_merge_without_reading_protection(rig: Rig) -> None:  # noqa: F811
     rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
     rig.state["full_protection"] = {"rc": 1, "err": "HTTP 500"}
-    code, out, _calls = rig.go(*args(False, "--accept-base-race", "--best-effort-threads"))
+    code, out, calls = rig.go(*args(False, "--accept-base-race", "--best-effort-threads"))
     assert code == 0 and out.count("NOTICE") == 2
+    assert not [c for c in calls if len(c) > 2 and c[1] == "api" and c[2].endswith("/protection")]
 
 
 def test_the_conversation_rule_is_still_checked_first(rig: Rig) -> None:  # noqa: F811
