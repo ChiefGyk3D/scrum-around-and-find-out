@@ -248,13 +248,14 @@ like any other line (they can be run by a shell), which can false-block shell ex
 that holds is in the code: `ask` raises on a paid request before any request, and the only paid path is the broker, which
 verifies a fresh signature for every call.
 
-The decoded-command rule is deliberately conservative: a decoder and an interpreter anywhere in the same submitted
-command are denied, even when they are in separate statements, reversed, wrapped, or apparently unrelated. The guard
-recognizes `base64`, `basenc`, `openssl`, `xxd` and `uudecode` by command name, regardless of their options, and keeps
-the existing escape-form checks for `printf` and `echo`. Shells, interpreters, compilers, task runners and remote-command
-tools count as execution sinks; version suffixes do not disguise their command names. A command with a decoder and a
-dynamic command word is also denied because the dynamic word could name a sink. The guard does not try to prove how
-bytes flow between commands. Split the work into separate commands or use a file between them.
+The decoded-command rule is deliberately conservative: encoded content and a possible execution target in distinct
+command positions are denied, even when they are in separate statements, reversed, wrapped, or apparently unrelated.
+The guard recognizes `base64`, `basenc`, `openssl`, `xxd` and `uudecode` by command name, regardless of their options,
+and keeps the existing escape-form checks for `printf` and `echo`. Shells, interpreters, compilers, task runners and
+remote-command tools count as execution targets; version suffixes do not disguise their command names. Quoted arguments
+and comments are not command positions. A command with a decoder and a dynamic command word is also denied because the
+dynamic word could name a target. The guard does not try to prove how bytes flow between commands. Split the work into
+separate commands or use a file between them.
 
 **Passing protected text as data (#486).** Do not put text that mentions a protected word inline in a Bash command: the
 guard cannot prove that inline text is data rather than shell syntax. Write an issue body or brief with the editor or

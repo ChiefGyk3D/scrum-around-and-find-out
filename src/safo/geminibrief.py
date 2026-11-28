@@ -1216,7 +1216,7 @@ SHELL_VENDOR = "the vendor API host or SDK"
 SHELL_KEY = "the key variable name"
 SHELL_STORE = "the secret-store project or config name"
 SHELL_BUILT = "a word built from escapes beside a network or secret tool"
-SHELL_DECODED = "a decoder and shell or interpreter in one command"
+SHELL_DECODED = "encoded content and a possible execution target in one command"
 SHELL_TOOL = "a secret tool run with a shell expansion"
 SHELL_BROKER_MODULE = "the broker client module run directly"
 SHELL_UNVERIFIED = "a command that could not be checked in time"
@@ -1316,6 +1316,7 @@ _DECODE_SINKS = _EXECUTING_NETWORK_TOOLS | frozenset(
         "zsh",
     }
 )
+_DECODE_WRAPPERS = shellunits.WRAPPERS | frozenset({"busybox", "chrt", "doas", "time", "sudo", "taskset"})
 _SHELL_DECODE_SINK = re.compile(
     rf"(?:\b(?:{'|'.join(sorted(map(re.escape, _DECODE_SINKS - {'.'})))})[\d.]*(?![\w-])|(?<!\S)\.(?=\s))",
     re.IGNORECASE,
@@ -1323,12 +1324,45 @@ _SHELL_DECODE_SINK = re.compile(
 PREFILTER += (("shell decoder", _SHELL_DECODER), ("shell decode sink", _SHELL_DECODE_SINK))
 
 
+def _command_name(word: shellunits.Word) -> str | None:
+    if word.value is None:
+        return None
+    name = word.value.rsplit("/", 1)[-1].lower()
+    known = _DECODE_COMMANDS | _DECODE_SINKS | {"python"}
+    return name if name in known else re.sub(r"\d+(?:\.\d+)*$", "", name)
+
+
+def _command_positions(unit: shellunits.Unit, tick: Callable[[], None]) -> list[int]:
+    """Indices of command words, including wrappers and the command they invoke."""
+    positions: list[int] = []
+    index = 0
+    while index < len(unit.words) and re.match(r"[A-Za-z_]\w*\+?=", unit.words[index].raw):
+        tick()
+        index += 1
+    while index < len(unit.words):
+        tick()
+        positions.append(index)
+        name = _command_name(unit.words[index])
+        if name in shellunits.RESERVED:
+            index += 1
+            continue
+        if name not in _DECODE_WRAPPERS:
+            break
+        rest = (
+            shellunits._skip_wrapper(name, unit.words[index + 1 :])
+            if name in shellunits.WRAPPERS
+            else unit.words[index + 1 :]
+        )
+        index = len(unit.words) - len(rest)
+    return positions
+
+
 def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -> bool:
     value = unit.words[index].value
     if value is None:
         return False
-    command = value.rsplit("/", 1)[-1].lower()
-    if command not in _DECODE_COMMANDS and not command.startswith("python"):
+    command = _command_name(unit.words[index])
+    if command not in _DECODE_COMMANDS and command != "python":
         return False
     if command in {"base64", "basenc", "openssl", "xxd", "uudecode"}:
         return True
@@ -1349,13 +1383,61 @@ def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -
         return escaped
     if command == "echo":
         return escaped and has_e
-    if command.startswith("python"):
+    if command == "python":
         return has_c
     return command == "perl" and has_e
 
 
+def _unreadable_decoded(command: str, tick: Callable[[], None]) -> bool:
+    """Fail closed for compound syntax only when exact, unquoted command-position names remain visible."""
+    visible: list[str] = []
+    quote = ""
+    escaped = False
+    comment = False
+    for char in command:
+        tick()
+        if comment:
+            visible.append("\n" if char == "\n" else " ")
+            comment = char != "\n"
+        elif escaped:
+            visible.append(" ")
+            escaped = False
+        elif char == "\\" and quote != "'":
+            visible.append(" ")
+            escaped = True
+        elif quote:
+            visible.append(" ")
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            visible.append(" ")
+            quote = char
+        elif char == "#" and (not visible or visible[-1].isspace()):
+            visible.append(" ")
+            comment = True
+        else:
+            visible.append(char)
+    text = "".join(visible)
+    boundary = r"(?:^|[;|&(){}]\s*)"
+    decoder = re.search(
+        boundary + r"(?:[^\s;|&(){}]*/)?(?:base64|basenc|openssl|xxd|uudecode)(?=\s|[;|&(){}]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    if decoder is None:
+        return False
+    sink_names = "|".join(sorted(map(re.escape, _DECODE_SINKS - {"."}), key=len, reverse=True))
+    sink = re.search(
+        boundary + rf"(?:[^\s;|&(){{}}]*/)?(?:{sink_names})(?:\d+(?:\.\d+)*)?(?=\s|[;|&(){{}}]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    dynamic = re.search(boundary + r"(?:\$|['\"]{2}|[^\s;|&(){}]*[?*\[])", text) is not None
+    return sink is not None or dynamic
+
+
 def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
-    """True when a decoder and a possible execution sink occur anywhere in the submitted command."""
+    """True when distinct command positions name a decoder and a possible execution target."""
     joined = _join(command)
     if _SHELL_DECODER.search(joined) is None:
         return False
@@ -1368,27 +1450,25 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
                 tick()
                 units.extend(shellunits.parse(heredoc.body, counter, tick, 1))
     except shellunits.Unreadable:
-        return True  # both candidate classes are present, but the shell tokenizer cannot prove the command safe
+        return _unreadable_decoded(joined, tick)
     decoders = 0
     decoder = False
     sink = False
     for unit in units:
         tick()
-        command_words = list(unit.words)
-        while command_words and re.match(r"[A-Za-z_]\w*\+?=", command_words[0].raw):
-            tick()
-            command_words = command_words[1:]
-        if not command_words or command_words[0].value in (None, ""):
+        positions = _command_positions(unit, tick)
+        if not positions or unit.words[positions[-1]].value in (None, ""):
             sink = True
-        for index, word in enumerate(unit.words):
+        for index in positions:
             tick()
-            if word.value is None:
-                continue
-            name = word.value.rsplit("/", 1)[-1].lower()
-            unversioned = re.sub(r"\d+(?:\.\d+)*$", "", name)
-            if name in _DECODE_SINKS or unversioned in _DECODE_SINKS:
+            name = _command_name(unit.words[index])
+            if name is None:
                 sink = True
-            if _decoder_word(unit, index, tick):
+                continue
+            is_decoder = _decoder_word(unit, index, tick)
+            if name in _DECODE_SINKS and (decoder or not is_decoder):
+                sink = True
+            if is_decoder:
                 decoder = True
                 decoders += 1
             if decoders > MAX_SHELL_DECODERS:
@@ -1404,7 +1484,7 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
     it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED.
 
-    A decoder and a shell or interpreter anywhere in the same command is always SHELL_DECODED, independent of
+    A decoder and a possible execution target in distinct command positions is always SHELL_DECODED, independent of
     protected words.
     The default is the old denial (#388): the secret tool with a project or config name, an expansion or a backtick, a
     word built from escapes, or a project or config name by itself, anywhere in the command. It is relaxed only on a

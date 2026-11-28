@@ -2,12 +2,13 @@
 
 ## Unreleased
 
-- The shell guard now unconditionally denies a command containing both a decoder and a shell or interpreter (#645),
-  independent of order, wrappers, connections or protected words. The conservative rule does not prove byte flow:
-  it recognizes concrete decoder command names regardless of option spelling; split the operations into separate
-  commands or use a file. Decoder look-alikes remain allowed only when the command has no sink word; the former
-  `base64 ...; python report.py` allowance is now denied. Tests cover input-redirection, separate-statement,
-  reversed-order, wrapper and option-spelling bypasses, plus harmless decoding with no interpreter anywhere.
+- The shell guard now unconditionally denies encoded content beside a possible execution target in distinct command
+  positions (#645), independent of order, wrappers, connections or protected words. The conservative rule does not
+  prove byte flow: it recognizes concrete decoder command names regardless of option spelling, while ignoring quoted
+  arguments and comments; split the operations into separate commands or use a file. Look-alikes remain allowed only
+  when the command has no target; the former `base64 ...; python report.py` allowance is now denied. Tests cover
+  input-redirection, separate-statement, reversed-order, wrapper and option-spelling bypasses, plus harmless decoding
+  with no interpreter anywhere.
 - Branch-protection baseline standard (#541): `scripts/apply-baseline.sh` now writes strict (up to date) and conversation resolution on, backs up the old rule (0600), reads the rule back and prints `ROLLBACK:` lines; new `--mode standard|basic|secret-scanning` (keeps the live `CI green` check names, BASIC gate for repositories without one, secret scanning for public repositories) with `--expect-branch`, `--expect-visibility`, `--expect-protection` refusals (exit 3) and read-back mismatch exit 4; `scripts/gen-protection-plan.py` turns an audit snapshot into an owner-run plan script (dry run by default). Docs: `docs/branch-protection-baseline.md`. Tests: `tests/test_protection_standard.py`.
 - `safo-protect-threads` (#627, epic #527): fail closed on paging: `matchingRefs` is read with `totalCount` and `pageInfo{hasNextPage}` and a rule whose matching branches are not all on the page (marker not exactly false, or count not equal to the nodes) is refused with exit 3, no write; after `--apply` the flag is also read back through REST `branches/BRANCH/protection` and `required_conversation_resolution` must be enabled, else exit 6 with the rollback printed. Backup behavior unchanged. Tests: `tests/test_protect_threads.py`.
 - `docs/port-ledger.md` (#622): the `safo-threads` row (#587) is Ported (SAFO `b499b33`, portable edition PR #70, merged), #489 and #519 are Ported (PE PR #49), #512, #538 and #558 name what PE PR #50 still lacks, 13 rows are Deferred with their blocking issue, and #537 stays Proposed because the portable edition has no issue for it; adds a Deferred section.
