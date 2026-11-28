@@ -116,7 +116,7 @@ def test_a_timeout_kills_the_group_before_the_leader_is_reaped(box: Box, monkeyp
     monkeypatch.setattr(os, "killpg", spy)
     with pytest.raises(Exception, match="timed out"):
         box.deps().create_issue("o/r", "t", "b")
-    assert seen == [True]
+    assert seen and all(seen)  # every repeat of the kill, too, comes before the reap
 
 
 # ---- 5. ledger writes --------------------------------------------------------------------------------------------

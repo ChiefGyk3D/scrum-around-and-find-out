@@ -52,6 +52,8 @@ FALLBACK_PATH = "/usr/bin:/bin"
 LOCK_SECONDS = 5.0
 LOCK_POLL = 0.02
 REAP_SECONDS = 5
+KILL_ROUNDS = 3  # the group signal is sent this many times, KILL_GAP apart, while the leader still reserves the id
+KILL_GAP = 0.02
 READ_PIECE = 65_536
 GROUP_OR_OTHER_WRITE = stat.S_IWGRP | stat.S_IWOTH
 SAFE_LC = re.compile(r"LC_[A-Z_]{1,30}")
@@ -306,8 +308,11 @@ def run_bounded(
     finally:
         sel.close()
         if need_kill:  # the leader is not reaped yet, so its pid cannot name another group
-            with contextlib.suppress(OSError):
-                os.killpg(proc.pid, signal.SIGKILL)
+            for attempt in range(KILL_ROUNDS):  # a descendant forked past one signal is caught by the next
+                if attempt:
+                    time.sleep(KILL_GAP)
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is not None:
                 with contextlib.suppress(OSError):
