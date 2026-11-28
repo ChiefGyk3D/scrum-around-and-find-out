@@ -7,15 +7,16 @@ setting where everything is configurable.
 
 ## How to read it
 
-Every row carries exactly one of four decisions:
+Every row carries exactly one of five decisions:
 
 - **Ported**: the work exists in the portable edition's `main`. Each such row was checked against that repository on
   2026-11-27; the Notes column names the file or merged pull request. Whether a port is configurable is said in Notes.
 - **Port as configurable**: it belongs there, an issue is filed, nothing is built yet. Thresholds, weights, models,
   paths and vendors are config values, never the maintainer's numbers.
 - **Not ported**: stays SAFO-only, with the reason.
+- **Deferred**: it belongs there, but an open issue blocks it; Notes names the blocker. Revisit when it closes.
 - **Proposed**: no issue there yet and no owner decision recorded; Notes says what is proposed. A proposal is not a
-  filing. Turn it into one of the three above when decided.
+  filing. Turn it into one of the others above when decided.
 
 The SAFO column links the SAFO issue or pull request, or the doc page where the item has no single issue. "PE" is the
 portable edition's repository. Rows are added as ports land; verify a row against both repositories before changing
@@ -32,6 +33,7 @@ its status. One row per SAFO issue or page: a shared portable-edition reference 
 | [`docs/plugins.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/plugins.md) and [`docs/routing.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/routing.md): several assistants behind one wrapper | Ported | [PE #12](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/12) via [PE PR #35](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/35) | Adapters for Claude, Codex, Copilot and paste-in; configurable. Their flags are unverified, [PE #36](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/36) open |
 | [#229](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/229): threat model for SAFO as a whole; [`docs/threat-model.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/threat-model.md) | Ported | [PE #8](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/8) via [PE PR #26](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/26) | `docs/threat-model.md` in the portable edition |
 | [#565](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/565), [#566](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/566): sister-project rule | Ported | [PE #41](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/41) via [PE PR #42](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/42), [PE PR #47](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/47) | Rule file in both repositories; [#573](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/573) updated the wording |
+| [#587](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/587): `safo-threads`, list, reply to and resolve review threads | Ported | [PE #55](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/55) via [PE PR #70](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/70) | SAFO commit `b499b33`. Ported as a plan builder in the package plus a launcher script outside it, because the portable edition's tests forbid any package module from launching a process. PE PR #70 is open, so the row stays here only until it merges; verify `main` before relying on it |
 
 ## Port as configurable (issue filed, not built)
 
@@ -53,25 +55,31 @@ its status. One row per SAFO issue or page: a shared portable-edition reference 
 | [#490](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/490): llm-local truncation guard and input caps | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) | Section 5 of the local-tier design; window size from config |
 | [#445](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/445): lead-discipline epic, including dispatching every ready item | Port as configurable | [PE #17](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/17) to [PE #21](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/21), [PE #7](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/7), [PE PR #46](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/46), [PE #48](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/48) | Parallelism cap, routing and retry are config; per-worker leases [PE #48](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/48) |
 
+## Deferred (blocked by an open issue)
+
+Decided 2026-11-27 under the secure-default rule: build nothing in the portable edition until the blocker closes, so that nothing unmeasured or unbuilt is copied. Each row names the blocking issue; the first column is the SAFO item.
+
+| SAFO item | Decision | Blocked by | Reason |
+| --- | --- | --- | --- |
+| [#540](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/540): weekly eval canary | Deferred | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) (open, design only) | SAFO #540 open; needs the eval harness first |
+| [#569](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/569): qwen3.5:4b truncation regression probe | Deferred | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) (open, design only) | needs the eval harness first; model name is config |
+| [#533](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/533): keep_alive measurement | Deferred | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) (open, design only) | a documented setting inside the local-tier work; no number carried over |
+| [#528](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/528): cap on agent hand-back report size | Deferred | [SAFO #528](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/528) (open) | not built in SAFO yet; nothing to port; cap in bytes from config |
+| [#529](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/529): reuse finished agents | Deferred | [SAFO #529](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/529) (open) | not built in SAFO yet; port as guidance when it lands |
+| [#530](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/530): stable prompt prefix | Deferred | [SAFO #530](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/530) (open) | not built in SAFO yet; port as guidance in `docs/` when it lands |
+| [#521](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/521): trim the skill listing | Deferred | [SAFO #521](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/521) (open) | not built in SAFO yet; port as guidance in `docs/` when it lands |
+| [#556](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/556): session-length nudge | Deferred | [SAFO #556](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/556) (open) | needs measurement in SAFO first; threshold from config |
+| [#567](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/567): measure handoff at a threshold | Deferred | [SAFO #567](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/567) (open) | not measured yet; port only if the measurement supports it |
+| [#504](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/504): track local-model share per project | Deferred | [SAFO #504](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/504) (open) | not built in SAFO yet; counts only, from the task log |
+| [#542](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/542): generated-file check before push | Deferred | [SAFO #542](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/542) (open) | not built in SAFO yet; generic to any repo that generates files |
+| [#541](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/541): branch-protection drift audit | Deferred | [SAFO #541](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/541) (open) | not built in SAFO yet; check name and standard from config |
+| [#536](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/536): Dependabot auto-merge after the 7-day hold | Deferred | [SAFO #536](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/536) (open) | not built in SAFO yet; hold days from config; merge stays a human or lead decision |
+
 ## Proposed (no issue in the portable edition yet)
 
 | SAFO item | Decision | Portable edition | Proposal |
 | --- | --- | --- | --- |
-| [#587](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/587): `safo-threads`, list, reply to and resolve review threads | Proposed | none yet | Port as configurable; nothing in it is specific to SAFO (any repo, bounded `gh` calls, strict dispositions file) |
-| [#540](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/540): weekly eval canary | Proposed | none yet | Port as configurable after [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) lands; interval and models from config |
-| [#569](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/569): qwen3.5:4b truncation regression probe | Proposed | none yet | Port as a generic truncation probe after [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); the model name is config |
-| [#533](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/533): keep_alive measurement | Proposed | none yet | Port as a documented setting inside [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); no number is carried over |
-| [#528](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/528): cap on agent hand-back report size | Proposed | none yet | Port as configurable; cap in bytes from config |
-| [#529](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/529): reuse finished agents | Proposed | none yet | Port as guidance; generic to any multi-agent use |
-| [#530](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/530): stable prompt prefix | Proposed | none yet | Port as guidance in `docs/`; a practice, not code |
-| [#521](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/521): trim the skill listing | Proposed | none yet | Port as guidance in `docs/` |
-| [#537](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/537): secret scan on briefs and reports | Proposed | none yet | Port as configurable, merged with [PE PR #32](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/32); same scanner applied to brief text |
-| [#556](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/556): session-length nudge | Proposed | none yet | Port as configurable after measurement here |
-| [#567](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/567): measure handoff at a threshold | Proposed | none yet | Port as configurable after it is measured here; not measured yet |
-| [#504](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/504): track local-model share per project | Proposed | none yet | Port as configurable; counts only, read from the task log |
-| [#542](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/542): generated-file check before push | Proposed | none yet | Port as configurable; generic to any repo that generates files |
-| [#541](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/541): branch-protection drift audit | Proposed | none yet | Port as configurable; required check name and standard from config |
-| [#536](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/536): Dependabot auto-merge after the 7-day hold | Proposed | none yet | Port as configurable; hold days from config; merge stays a human or lead decision |
+| [#537](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/537): secret scan on briefs and reports | Proposed | none yet (needs an issue) | Not decided as a port yet: SAFO #537 is closed and the scanner is in SAFO; the portable edition has no issue for a brief scan. Missing: a portable-edition issue. Proposal: port as configurable, merged with [PE PR #32](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/32); same scanner applied to brief text |
 
 ## Not ported (SAFO-only)
 
