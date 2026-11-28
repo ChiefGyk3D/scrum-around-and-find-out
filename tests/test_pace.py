@@ -36,6 +36,16 @@ def mode_of(used: float, elapsed: float, state: dict[str, Any] | None = None) ->
     return pace.decide(cache(used, at(elapsed)), at(elapsed), state)[0].mode
 
 
+def test_real_claude_cache_contract_uses_wk_and_document_capture_time() -> None:
+    now = at(50)
+    data = {
+        "captured_at": now - 90,
+        "windows": [{"label": "wk", "used_percent": 32, "resets_at": RESETS}],
+    }
+    decision = pace.decide(data, now)[0]
+    assert (decision.mode, decision.used, decision.age) == ("normal", 32, 90)
+
+
 # every threshold edge at 50 percent elapsed: pace = used / 50 (0.90 -> 45, 1.00 -> 50, 1.30 -> 65)
 @pytest.mark.parametrize(
     ("used", "elapsed", "expected"),
@@ -281,6 +291,47 @@ def test_other_classes_follow_the_table_and_unknown_routes_as_normal() -> None:
 # CLI
 def write_cache(path: Path, used: float, now: float, **kw: Any) -> None:
     path.write_text(json.dumps(cache(used, now, **kw)), encoding="utf-8")
+
+
+def test_cli_rejects_symlinked_cache_and_writable_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    now = at(50)
+    real_cache = tmp_path / "real.json"
+    linked_cache = tmp_path / "linked.json"
+    write_cache(real_cache, 10, now)
+    linked_cache.symlink_to(real_cache)
+
+    pace.run(["--cache", str(linked_cache), "--no-state"], now=now)
+    assert "mode=unknown" in capsys.readouterr().out
+
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"mode": "hard", "pending_since": None}), encoding="utf-8")
+    state.chmod(0o666)
+    pace.run(["--cache", str(real_cache), "--state", str(state), "--json"], now=now)
+    assert json.loads(capsys.readouterr().out)["mode"] == "normal"
+
+
+def test_save_state_does_not_use_predictable_pid_temp_file(tmp_path: Path) -> None:
+    state = tmp_path / "state.json"
+    predictable = tmp_path / f"{state.name}.{pace.os.getpid()}.tmp"
+    victim = tmp_path / "victim.json"
+    victim.write_text("leave me alone", encoding="utf-8")
+    predictable.symlink_to(victim)
+
+    pace.save_state(state, {"mode": "normal"})
+
+    assert victim.read_text(encoding="utf-8") == "leave me alone"
+    assert not state.is_symlink()
+    assert json.loads(state.read_text(encoding="utf-8")) == {"mode": "normal"}
+    assert state.stat().st_mode & 0o777 == 0o600
+
+
+def test_relative_xdg_state_home_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", "relative-state")
+    assert pace.default_state_path() == (
+        Path.home() / ".local" / "state" / "safo" / "pace-mode.json"
+    )
 
 
 def test_cli_prints_one_line_and_exits_0(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

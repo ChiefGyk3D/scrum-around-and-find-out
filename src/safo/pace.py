@@ -27,6 +27,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ from pathlib import Path
 from typing import Any
 
 from safo import bounded, output
+from safo.errors import ConfigError
+from safo.trust import read_trusted_regular_file
 
 WEEK_SECONDS = 7 * 24 * 3600
 STALE_SECONDS = 30 * 60
@@ -95,15 +98,23 @@ def _num(value: object) -> float | None:
 
 
 def _pick_weekly(data: object) -> tuple[dict[str, Any] | None, list[float]]:
-    """The newest `weekly` row (highest captured_at; several sessions share one account), and every window's used%."""
+    """The weekly row with its document capture time, and every window's used percentage."""
     if not isinstance(data, Mapping) or not isinstance(data.get("windows"), Sequence):
         return None, []
     rows = [w for w in data["windows"] if isinstance(w, Mapping)]
     used_all = [u for u in (_num(w.get("used_percent")) for w in rows) if u is not None]
-    weekly = [w for w in rows if w.get("label") == "weekly" and _num(w.get("captured_at")) is not None]
+    captured = _num(data.get("captured_at"))
+    weekly: list[dict[str, Any]] = []
+    for raw in rows:
+        if raw.get("label") not in ("wk", "weekly"):
+            continue
+        row = dict(raw)
+        row["captured_at"] = _num(raw.get("captured_at")) if _num(raw.get("captured_at")) is not None else captured
+        if row["captured_at"] is not None:
+            weekly.append(row)
     if not weekly:
         return None, used_all
-    return dict(max(weekly, key=lambda w: float(w["captured_at"]))), used_all
+    return max(weekly, key=lambda w: float(w["captured_at"])), used_all
 
 
 def _raw_mode(pace: float, used: float, elapsed: float, any_full: bool) -> str:
@@ -185,28 +196,37 @@ def default_cache_path() -> Path:
 
 
 def default_state_path() -> Path:
-    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "safo" / "pace-mode.json"
+    given = os.environ.get("XDG_STATE_HOME", "")
+    base = Path(given) if given and Path(given).is_absolute() else Path.home() / ".local" / "state"
+    return base / "safo" / "pace-mode.json"
 
 
 def read_json(path: Path) -> object:
     """The parsed file, or None when it is missing, unreadable or not JSON (the caller reads that as unknown)."""
     try:
-        return bounded.read_json(path)
-    except (OSError, ValueError):
+        return bounded.loads(read_trusted_regular_file(path, bounded.MAX_BYTES))
+    except (ConfigError, OSError, UnicodeError, ValueError):
         return None
 
 
 def save_state(path: Path, state: Mapping[str, Any]) -> None:
     """Atomic replace, mode 0600. A failure to save is ignored: hysteresis is lost, the mode is still right."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp: Path | None = None
+    fd: int | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        raw_fd, raw_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        fd, tmp = raw_fd, Path(raw_name)
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
             json.dump(state, handle)
         os.replace(tmp, path)
     except OSError:
-        tmp.unlink(missing_ok=True)
+        if fd is not None:
+            os.close(fd)
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def format_line(d: Decision) -> str:
