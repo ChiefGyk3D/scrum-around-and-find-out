@@ -183,6 +183,25 @@ def test_decoder_option_forms_are_denied_with_a_sink(decoder: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "decoder",
+    [
+        "base64 --d f",
+        "base64 --de f",
+        "base64 --decode=x f",
+        "openssl base64 --d f",
+        "openssl enc --base64 -d f",
+        "xxd --rev f",
+        "xxd --r f",
+        "base64 -- -d f",
+    ],
+)
+@pytest.mark.parametrize("separator", ["; ", " | "])
+def test_decoder_names_are_denied_with_a_sink_regardless_of_option_spelling(decoder: str, separator: str) -> None:
+    command = f"{decoder}{separator}sh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "{ base64 -d f; }; sh",
@@ -243,6 +262,111 @@ def test_static_spellings_and_a_dynamic_command_word_are_denied(command: str) ->
     assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; $x",
+        r"base64 -d f; $'\163\150'",
+        "base64 -d f; s?",
+        "base64 -d f; ${s}h",
+        "base64 -d f; ''",
+        "base64 -d f; $(printf sh)",
+        "base64 -d f; <(printf sh)",
+    ],
+)
+def test_a_decoder_and_any_non_static_command_word_are_denied(command: str) -> None:
+    assert geminibrief.relevant(command), command
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "sink",
+    [
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "fish",
+        "csh",
+        "tcsh",
+        "ash",
+        "rc",
+        "mksh",
+        "pwsh",
+        "powershell",
+        "eval",
+        "source",
+        ".",
+        "env",
+        "xargs",
+        "python",
+        "perl",
+        "ruby",
+        "node",
+        "nodejs",
+        "busybox",
+        "php",
+        "lua",
+        "luajit",
+        "awk",
+        "gawk",
+        "mawk",
+        "nawk",
+        "tclsh",
+        "wish",
+        "expect",
+        "julia",
+        "r",
+        "rscript",
+        "groovy",
+        "scala",
+        "java",
+        "jshell",
+        "deno",
+        "bun",
+        "go",
+        "gcc",
+        "cc",
+        "tcc",
+        "make",
+        "cmake",
+        "npm",
+        "npx",
+        "pip",
+        "pip3",
+        "uv",
+        "ssh",
+        "nc",
+        "ncat",
+        "socat",
+        "telnet",
+        "at",
+        "batch",
+        "crontab",
+        "exec",
+        "command",
+        "builtin",
+        "trap",
+        "time",
+        "coproc",
+        "script",
+        "screen",
+        "tmux",
+        "watch",
+    ],
+)
+def test_every_decode_sink_is_denied_next_to_a_decoder(sink: str) -> None:
+    command = f"base64 -d f; {sink}"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize("sink", ["python3.12", "ruby3", "php8", "/usr/bin/lua5.4"])
+def test_versioned_decode_sink_basenames_are_denied(sink: str) -> None:
+    command = f"base64 -d f; {sink}"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
 @pytest.mark.parametrize("command", DECODE_TO_INTERPRETER)
 def test_the_prefilter_selects_every_decode_to_interpreter_shape(command: str) -> None:
     assert geminibrief.relevant(command), command
@@ -256,6 +380,11 @@ def test_the_prefilter_selects_every_decode_to_interpreter_shape(command: str) -
         "printf %s cGF5bG9hZA== | base64 -d | cat",
         "printf '%s' payload",
         "echo payload",
+        "base64 -d f; fisherman",
+        "base64 -d f; java-home",
+        "base64 -d f; npmrc",
+        "base64 -d f; ssh-keygen",
+        "base64 -d f; watcher",
     ],
 )
 def test_the_classifier_allows_decode_lookalikes_with_no_sink_word(command: str) -> None:

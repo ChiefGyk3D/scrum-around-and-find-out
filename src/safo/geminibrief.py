@@ -1225,58 +1225,102 @@ _SHELL_KEY = re.compile(r"gemini[\W_]*api[\W_]*key")
 _SHELL_PROJECT = re.compile(r"(?<![\w-])image-gen(?![\w-])")
 _SHELL_CONFIG = re.compile(r"(?<![\w-])prd(?![\w-])")
 _SECRET_TOOL = re.compile(r"(?<![\w.-])doppler(?![\w-])")
+_EXECUTING_NETWORK_TOOLS = frozenset(
+    {
+        "bun",
+        "deno",
+        "go",
+        "nc",
+        "ncat",
+        "node",
+        "nodejs",
+        "perl",
+        "php",
+        "powershell",
+        "pwsh",
+        "ruby",
+        "socat",
+        "ssh",
+        "telnet",
+    }
+)
+_NETWORK_TOOL_NAMES = _EXECUTING_NETWORK_TOOLS | frozenset(
+    {"aria2c", "curl", "http", "httpie", "https", "lwp-request", "openssl", "wget"}
+)
 _NETWORK_TOOL = re.compile(
-    r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|openssl|ssh|telnet|python[\d.]*|node|nodejs|perl|ruby|php|go|deno|bun"
-    r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
+    rf"(?<![\w.-])(?:{'|'.join(sorted(map(re.escape, _NETWORK_TOOL_NAMES)))}|python[\d.]*)(?![\w-])"
 )
 _SHELL_DECODER = re.compile(
     r"\b(?:base64|openssl|xxd|basenc|uudecode|printf|echo|python[\d.]*|perl)\b",
     re.IGNORECASE,
 )
-_SHELL_DECODE_SINK = re.compile(
-    r"(?:\b(?:sh|bash|zsh|dash|ksh|eval|source|env|xargs|python[\d.]*|perl|ruby|node|nodejs|busybox)\b"
-    r"|(?<!\S)\.(?=\s))",
-    re.IGNORECASE,
-)
 MAX_SHELL_DECODERS = 32
 _DECODE_COMMANDS = frozenset({"base64", "basenc", "openssl", "xxd", "uudecode", "printf", "echo", "perl"})
-_DECODE_SINKS = frozenset(
+_DECODE_SINKS = _EXECUTING_NETWORK_TOOLS | frozenset(
     {
-        "sh",
-        "bash",
-        "zsh",
-        "dash",
-        "ksh",
-        "eval",
-        "source",
         ".",
-        "env",
-        "xargs",
-        "perl",
-        "ruby",
-        "node",
-        "nodejs",
+        "ash",
+        "at",
+        "awk",
+        "bash",
+        "batch",
+        "builtin",
         "busybox",
+        "cc",
+        "cmake",
+        "command",
+        "coproc",
+        "crontab",
+        "csh",
+        "dash",
+        "env",
+        "eval",
+        "exec",
+        "expect",
+        "fish",
+        "gawk",
+        "gcc",
+        "groovy",
+        "java",
+        "jshell",
+        "julia",
+        "ksh",
+        "lua",
+        "luajit",
+        "make",
+        "mawk",
+        "mksh",
+        "nawk",
+        "npm",
+        "npx",
+        "pip",
+        "python",
+        "r",
+        "rc",
+        "rscript",
+        "scala",
+        "screen",
+        "script",
+        "sh",
+        "source",
+        "tcc",
+        "tclsh",
+        "tcsh",
+        "time",
+        "tmux",
+        "trap",
+        "uv",
+        "watch",
+        "wish",
+        "xargs",
+        "zsh",
     }
 )
+_SHELL_DECODE_SINK = re.compile(
+    rf"(?:\b(?:{'|'.join(sorted(map(re.escape, _DECODE_SINKS - {'.'})))})[\d.]*(?![\w-])|(?<!\S)\.(?=\s))",
+    re.IGNORECASE,
+)
 PREFILTER += (("shell decoder", _SHELL_DECODER), ("shell decode sink", _SHELL_DECODE_SINK))
-
-
-def _option_has(options: set[str], letter: str, tick: Callable[[], None]) -> bool:
-    for option in options:
-        tick()
-        if not option.startswith("--") and letter in option[1:]:
-            return True
-    return False
-
-
-def _decode_option(options: set[str], letter: str, tick: Callable[[], None]) -> bool:
-    """Whether an option set names a decoder flag, including clusters and unambiguous long-option prefixes."""
-    for option in options:
-        tick()
-        if option.startswith("--dec") or (not option.startswith("--") and letter in option[1:]):
-            return True
-    return False
 
 
 def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -> bool:
@@ -1286,19 +1330,15 @@ def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -
     command = value.rsplit("/", 1)[-1].lower()
     if command not in _DECODE_COMMANDS and not command.startswith("python"):
         return False
-    options: set[str] = set()
+    if command in {"base64", "basenc", "openssl", "xxd", "uudecode"}:
+        return True
+    has_c = False
+    has_e = False
     for word in unit.words[index + 1 :]:
         tick()
-        if word.value is not None and word.value.startswith("-"):
-            options.add(word.value)
-    if command in {"base64", "basenc"}:
-        return _decode_option(options, "d", tick) or _option_has(options, "D", tick)
-    if command == "openssl":
-        return bool(options & {"-d", "--decode"})
-    if command == "xxd":
-        return _option_has(options, "r", tick) or "--revert" in options
-    if command == "uudecode":
-        return True
+        if word.value is not None and word.value.startswith("-") and not word.value.startswith("--"):
+            has_c = has_c or "c" in word.value[1:]
+            has_e = has_e or "e" in word.value[1:]
     raw_parts: list[str] = []
     for word in unit.words:
         tick()
@@ -1308,16 +1348,16 @@ def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -
     if command == "printf":
         return escaped
     if command == "echo":
-        return escaped and _option_has(options, "e", tick)
+        return escaped and has_e
     if command.startswith("python"):
-        return _option_has(options, "c", tick)
-    return command == "perl" and _option_has(options, "e", tick)
+        return has_c
+    return command == "perl" and has_e
 
 
 def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
-    """True when static words name both a decoder and an interpreter anywhere in the submitted command."""
+    """True when a decoder and a possible execution sink occur anywhere in the submitted command."""
     joined = _join(command)
-    if _SHELL_DECODER.search(joined) is None or _SHELL_DECODE_SINK.search(joined) is None:
+    if _SHELL_DECODER.search(joined) is None:
         return False
     try:
         counter = shellunits._Counter()
@@ -1334,12 +1374,19 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
     sink = False
     for unit in units:
         tick()
+        command_words = list(unit.words)
+        while command_words and re.match(r"[A-Za-z_]\w*\+?=", command_words[0].raw):
+            tick()
+            command_words = command_words[1:]
+        if not command_words or command_words[0].value in (None, ""):
+            sink = True
         for index, word in enumerate(unit.words):
             tick()
             if word.value is None:
                 continue
             name = word.value.rsplit("/", 1)[-1].lower()
-            if name in _DECODE_SINKS or name.startswith("python"):
+            unversioned = re.sub(r"\d+(?:\.\d+)*$", "", name)
+            if name in _DECODE_SINKS or unversioned in _DECODE_SINKS:
                 sink = True
             if _decoder_word(unit, index, tick):
                 decoder = True
@@ -1348,6 +1395,8 @@ def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
                 return True
             if decoder and sink:
                 return True
+        if decoder and sink:
+            return True
     return False
 
 
