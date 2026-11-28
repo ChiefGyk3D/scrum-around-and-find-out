@@ -305,6 +305,58 @@ def test_an_unreadable_command_with_a_decoder_and_sink_is_denied() -> None:
     assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; ./payload",
+        "base64 -d f; /tmp/payload",
+        "base64 -d f; /usr/bin/python3 payload.py",
+        "base64 -d f; custom-runner",
+        "base64 -d f; chmod +x payload",
+        "base64 -d f; install -m 755 payload target",
+    ],
+)
+def test_a_decoder_makes_every_non_data_command_or_executable_creation_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true \\\\\nprintf '%s' ZWNobyBQVU5FRAo= | b'a'se64 -d | s'h'",
+        "true \\\\\nbase64 -d f; echo $X",
+        "true \\\\\nbase64 -d f; echo *",
+    ],
+)
+def test_an_unreadable_decoder_command_with_any_dynamic_marker_is_denied(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "interpreter, flag",
+    [("python3", "-c"), ("perl", "-e"), ("perl", "-E"), ("ruby", "-e"), ("node", "-e"), ("php", "-r")],
+)
+def test_an_inline_interpreter_is_a_decoder_and_sink_only_when_paired_with_another_sink(
+    interpreter: str, flag: str
+) -> None:
+    inline = f"{interpreter} {flag} 'print(1)'"
+    assert geminibrief.shell_command_class(inline) is None
+    assert geminibrief.shell_command_class(f"{inline}; custom-runner") == geminibrief.SHELL_DECODED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; env $PROGRAM",
+        "base64 -d f; command $PROGRAM",
+        "base64 -d f; if true; then $PROGRAM; fi",
+        "base64 -d f; time $PROGRAM",
+    ],
+)
+def test_a_dynamic_command_word_after_a_wrapper_or_reserved_word_is_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
 def test_a_newline_is_a_decoder_and_sink_boundary() -> None:
     command = "base64 -d f\nsh"
     assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
@@ -461,11 +513,11 @@ def test_the_prefilter_selects_every_decode_to_interpreter_shape(command: str) -
         "printf %s cGF5bG9hZA== | base64 -d | cat",
         "printf '%s' payload",
         "echo payload",
-        "base64 -d f; fisherman",
-        "base64 -d f; java-home",
-        "base64 -d f; npmrc",
-        "base64 -d f; ssh-keygen",
-        "base64 -d f; watcher",
+        "echo encoded; fisherman",
+        "echo encoded; java-home",
+        "echo encoded; npmrc",
+        "echo encoded; ssh-keygen",
+        "echo encoded; watcher",
     ],
 )
 def test_the_classifier_allows_decode_lookalikes_with_no_sink_word(command: str) -> None:
