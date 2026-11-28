@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import stat
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -24,6 +25,7 @@ STUB = textwrap.dedent(
     #!{python}
     # fake gh and git: answers come from $FAKE_STATE (a JSON file); every call is appended to its "calls" list
     import json, os, sys
+    from urllib.parse import unquote
     path = os.environ["FAKE_STATE"]
     state = json.load(open(path))
     argv = os.path.basename(sys.argv[0]), *sys.argv[1:]
@@ -45,18 +47,185 @@ STUB = textwrap.dedent(
         reply(state["git"].get(rest[0], {{}}))
     key = " ".join(rest[:2])
     if key == "pr view":
-        reply({{"out": json.dumps(pop("views"))}})
+        state["last_view"] = pop("views")
+        state["last_pr"] = int(rest[2])
+        reply({{"out": json.dumps(state["last_view"])}})
     if key == "pr merge":
+        # the fake server: a merge must carry exactly one --match-head-commit equal to the PR's current head
+        pins = [rest[i + 1] for i, a in enumerate(rest) if a == "--match-head-commit" and i + 1 < len(rest)]
+        head = state.get("head_at_merge") or state.get("last_view", {{}}).get("headRefOid")
+        state.setdefault("merge_attempts", []).append(pins)
+        if len(pins) != 1 or pins[0] != head:
+            reply({{"rc": 1, "err": "Head branch was modified. Review and try the merge again."}})
         reply(pop("merges"))
     if key == "api graphql":
         reply({{"out": json.dumps(pop("threads"))}})
+    if rest[0] == "api" and "/check-runs" in rest[1]:
+        runs = [
+            {{
+                "name": i["name"],
+                "status": i["status"].lower(),
+                "conclusion": i["conclusion"].lower(),
+                "app_id": i.get("app_id", 15368),
+                "details_url": i.get("detailsUrl") or "https://github.com/o/r/actions/runs/777/job/1",
+            }}
+            for i in state.get("last_view", {{}}).get("statusCheckRollup", [])
+            if "name" in i
+        ]
+        if not state.get("derive_evidence", True) and "check_runs" not in state:
+            runs = []  # nothing is made up for the code under test: no evidence, no green
+        listed = pop("check_runs_seq") if "check_runs_seq" in state else state.get("check_runs", runs)
+        reply({{"out": "\\n".join(json.dumps(x) for x in listed)}})
+    if rest[0] == "api" and "/actions/runs/" in rest[1]:
+        run_id = rest[1].rsplit("/", 1)[1]
+        view_now = state.get("last_view", {{}})
+        run = {{
+            "path": ".github/workflows/ci.yml",
+            "head_sha": view_now.get("headRefOid"),
+            "event": "pull_request",
+            "status": "completed",
+            "conclusion": "success",
+            "repository": {{"full_name": "o/r"}},
+            "pull_requests": [
+                {{"number": state.get("last_pr"), "base": {{"ref": view_now.get("baseRefName")}}}}
+            ],
+            "head_branch": view_now.get("headRefName", "feat"),
+        }}
+        run.update(state.get("run_api", {{}}).get(run_id, {{}}))
+        reply({{"out": json.dumps(run)}})
+    if rest[0] == "api" and "/compare/" in rest[1]:
+        files = pop("changed_seq") if "changed_seq" in state else state.get("changed", [])
+        reply({{"out": "\\n".join(files)}})
+    url = next((a for a in rest if a.startswith("repos/")), "")
+    fref = next((a[4:] for a in rest if a.startswith("ref=")), "")
+    if rest[0] == "api" and "/contents/" in url:
+        assert "?" not in url and "-X" in rest and rest[rest.index("-X") + 1] == "GET", rest  # the ref is a field
+        cpath = unquote(url.split("/contents/")[1])
+        shown = state.get("path_override", {{}}).get(cpath, cpath)  # a test can make an answer be about another path
+        jq = rest[rest.index("--jq") + 1] if "--jq" in rest else ""
+        gone = cpath in state.get("missing", []) or cpath + "@" + fref in state.get("missing_at", [])
+        if gone and "-H" not in rest and cpath != ".github/workflows":
+            if "--jq" in rest:
+                reply({{"rc": 1, "err": "Not Found"}})
+            reply({{"rc": 1, "out": "HTTP/2.0 404 Not Found\\r\\n\\r\\n{{}}", "err": "gh: Not Found (HTTP 404)"}})
+        mode = state.get("shaky", {{}}).get(cpath + "@" + fref) or state.get("shaky", {{}}).get(cpath)
+        if mode and "-H" not in rest and "--jq" not in rest:  # a failing or odd answer for a local-state read
+            if mode in ("500", "403", "429"):
+                reply({{"rc": 1, "out": "HTTP/2.0 " + mode + " X\\r\\n\\r\\n{{}}", "err": "gh: Not Found (HTTP 404)"}})
+            if mode == "fail":
+                reply({{"rc": 1, "err": "boom"}})
+            if mode == "empty":
+                reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n"}})
+            if mode == "json":
+                reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\nnot json"}})
+            if mode == "nostatus":
+                reply({{"out": json.dumps({{"path": shown, "sha": "x"}})}})
+        if "-H" in rest:  # the raw text of a file, with the HTTP status line of `gh api -i`
+            assert "-i" in rest, rest
+            if cpath in state.get("missing_files", []):
+                reply({{"rc": 1, "out": "HTTP/2.0 404 Not Found\\r\\n\\r\\nnot found"}})
+            if cpath in state.get("error_files", []):
+                reply({{"rc": 1, "out": "HTTP/2.0 500 Server Error\\r\\n\\r\\nboom", "err": "Not Found 404"}})
+            default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: ubuntu-latest\\n")
+            if not cpath.endswith((".yml", ".yaml")):
+                default = "#!/bin/bash\\n# nothing to run\\n"
+            reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + state.get("texts", {{}}).get(cpath, default)}})
+        if cpath == ".github/workflows":
+            reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
+        if "join" in jq:  # the content sha of the gate file
+            reply({{"out": shown + "|" + state.get("blob_by_ref", {{}}).get(fref, "blobsha")}})
+        by_ref = state.get("local_by_ref", {{}}).get(fref, "same")
+        sha = state.get("local_by_path", {{}}).get(cpath + "@" + fref, by_ref)
+        if cpath in state.get("dirs", []):  # a directory answers with a list of entries, as the real API does
+            entries = [{{"path": cpath + "/e" + str(n), "sha": "s" + str(n), "type": "file"}} for n in range(3)]
+            reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps(entries)}})
+        kind = state.get("kinds", {{}}).get(cpath, "file")
+        reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps({{"path": shown, "sha": sha, "type": kind}})}})
+    if rest[0] == "api" and "/git/trees/" in url:
+        tref = unquote(url.split("/git/trees/")[1].split("?")[0])
+        if state.get("tree_status"):
+            reply({{"rc": 1, "out": "HTTP/2.0 " + str(state["tree_status"]) + " X\\r\\n\\r\\n{{}}"}})
+        listed = state.get("tree_by_ref", {{}}).get(tref)
+        if listed is None:
+            listed = []  # by default the repository has no links
+        modes = {{"040000": "tree", "100644": "blob", "100755": "blob", "120000": "blob", "160000": "commit"}}
+        hexdigits = "0123456789abcdef"
+        seen_paths = set()
+        impossible = []
+        if not isinstance(listed, list):
+            impossible.append("the tree is not a list")
+        for item in listed if isinstance(listed, list) else []:
+            ok = isinstance(item, dict) and all(isinstance(item.get(k), str) for k in ("path", "type", "mode", "sha"))
+            ok = ok and modes.get(item["mode"]) == item["type"]
+            ok = ok and len(item["sha"]) in (40, 64) and all(c in hexdigits for c in item["sha"])
+            ok = ok and item["path"] != "" and all(
+                part not in ("", ".", "..") for part in item["path"].split("/")
+            )
+            ok = ok and all(32 <= ord(c) != 127 and ord(c) not in (0x2028, 0x2029) for c in item["path"])
+            ok = ok and item["path"] not in seen_paths
+            if ok:
+                seen_paths.add(item["path"])
+            else:
+                impossible.append(str(item)[:80])
+        for first in seen_paths:  # a path that is a file (or link) and also the parent of another path
+            kinds_of = {{i["path"]: i["type"] for i in listed if isinstance(i, dict) and "path" in i}}
+            if kinds_of.get(first) != "tree" and any(other.startswith(first + "/") for other in seen_paths):
+                impossible.append("a file that is also a directory: " + first)
+        if impossible and not state.get("allow_invalid_tree"):
+            state.setdefault("impossible", []).extend(impossible)  # the Rig asserts that this stays empty
+        body = {{"sha": "x", "truncated": state.get("tree_truncated", False), "tree": listed}}
+        reply({{"out": "HTTP/2.0 200 OK\\r\\n\\r\\n" + json.dumps(body)}})
+    if rest[0] == "api" and rest[1].endswith("/protection"):
+        on = {{
+            "out": json.dumps(
+                {{
+                    "required_conversation_resolution": {{"enabled": True}},
+                    "required_status_checks": {{"strict": True, "contexts": []}},
+                }}
+            )
+        }}
+        item = pop("full_protection_seq") if "full_protection_seq" in state else state.get("full_protection", on)
+        try:  # a real answer says which branch it is about: the exact url, unless a test takes it away on purpose
+            body = json.loads(item["out"]) if item.get("rc", 0) == 0 and "out" in item else None
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and "url" not in body and not state.get("omit_url"):
+            body["url"] = "https://api.github.com/" + rest[1]
+            item = dict(item, out=json.dumps(body))
+        reply(item)
+    if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
+        tip = pop("base_tips") if "base_tips" in state else state.get("base_tip", "e" * 40)
+        asked = unquote(rest[1].split("/git/ref/heads/")[1])
+        named = state.get("ref_override", "refs/heads/" + asked)
+        reply({{"out": json.dumps({{"ref": named, "object": {{"sha": tip}}}})}})
+    if rest[0] == "api" and "update-branch" in rest[1]:
+        reply(state.get("update", {{}}))
+    if rest[0] == "api" and "/commits/" in rest[1] and "/pulls" not in rest[1]:
+        reply(
+            {{
+                "out": json.dumps(
+                    {{
+                        "parents": [{{"sha": p}} for p in state.get("parents", ["a" * 40, "e" * 40])],
+                        "committer": {{"login": state.get("committer", "web-flow")}},
+                        "commit": {{"verification": {{"verified": state.get("verified", True)}}}},
+                    }}
+                )
+            }}
+        )
     if rest[0] == "api" and "/reviews" in rest[1]:
         state.setdefault("reviews", [[]])
         reply({{"out": "\\n".join(json.dumps(i) for i in pop("reviews"))}})
     if rest[0] == "api" and "/pulls" in rest[1]:
         reply({{"out": json.dumps(state.get("commit_pulls", []))}})
     if rest[0] == "api":
-        reply(state["protection"])
+        item = state["protection"]
+        for base_name, other in state.get("protection_by_base", {{}}).items():
+            if "/branches/" + base_name + "/" in " ".join(rest):
+                item = other
+        if "-i" in rest:  # the HTTP status line comes on stdout, as `gh api -i` prints it
+            code = 200 if item.get("rc", 0) == 0 else item.get("http", 404 if "404" in item.get("err", "") else 500)
+            item = dict(item, out="HTTP/2.0 " + str(code) + " X\\r\\n\\r\\n" + item.get("out", ""))
+        reply(item)
     if key == "run view":
         reply({{"out": json.dumps(state["runs"][rest[2]])}})
     if key == "run rerun":
@@ -139,6 +308,11 @@ class Rig:
         }
         self.slept: list[float] = []
         self.now = 0.0
+        self.undecodable = ""  # a repository path whose contents are not text
+        self.raise_on = ""  # a gh subcommand pair (such as "pr merge") whose process times out
+        self.tick = 0.0  # fake seconds a gh call takes
+        self.tick_by: dict[str, float] = {}  # extra seconds for one gh subcommand pair, such as "pr merge"
+        self.timeouts: list[tuple[float, float | None]] = []  # (clock at the call, its timeout)
         monkeypatch.setenv("FAKE_STATE", str(self.state_path))
 
     def go(self, *argv: str) -> tuple[int, str, list[list[str]]]:
@@ -149,16 +323,29 @@ class Rig:
             self.slept.append(seconds)
             self.now += seconds
 
+        def run(argv: list[str], **kw: Any) -> Any:
+            self.timeouts.append((self.now, kw.get("timeout")))
+            if self.raise_on and " ".join(argv[1:3]) == self.raise_on:
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 0)
+            if self.undecodable and "-H" in argv and any(f"/contents/{self.undecodable}" in part for part in argv):
+                raise UnicodeDecodeError("utf-8", bytes([255]), 0, 1, "not text")
+            done = subprocess.run(argv, **kw)  # noqa: S603 (argv is the fake gh the rig wrote)
+            self.now += self.tick + self.tick_by.get(" ".join(argv[1:3]), 0.0)
+            return done
+
         code = ship.main(
             [*argv],
+            run=run,
             env={"PATH": str(self.bin), "FAKE_STATE": str(self.state_path)},
             out=out,
             err=err,
             sleep=sleep,
             clock=lambda: self.now,
         )
-        calls = json.loads(self.state_path.read_text(encoding="utf-8"))["calls"]
-        return code, out.getvalue() + err.getvalue(), calls
+        saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        # the fake never hands out a tree that GitHub could not make, unless a test asks for one (allow_invalid_tree)
+        assert not saved.get("impossible"), saved["impossible"]
+        return code, out.getvalue() + err.getvalue(), saved["calls"]
 
 
 @pytest.fixture
@@ -288,10 +475,13 @@ def test_base_branch_modified_is_retried_once(rig: Rig) -> None:
         {"rc": 1, "err": "Pull request is not mergeable: Base branch was modified. Review and try the merge again."},
         {"rc": 0},
     ]
-    rig.state["views"] = [view(GREEN), view(GREEN), view(GREEN), view(GREEN, state="MERGED")]
+    rig.state["views"] = [*[view(GREEN)] * 8, view(GREEN, state="MERGED")]
     code, out, calls = rig.go("5", "--repo", REPO)
     assert code == 0, out
     assert len(merges(calls)) == 2 and all(HEAD in m for m in merges(calls))
+    # the second merge came only after the whole chain ran again: gate, threads and protection read twice
+    assert len([c for c in calls if "/check-runs" in " ".join(c)]) >= 4
+    assert len([c for c in calls if c[1:3] == ["api", "graphql"]]) == 2
 
 
 def test_base_branch_modified_twice_is_a_refusal(rig: Rig) -> None:
@@ -444,6 +634,8 @@ def test_closed_pull_request_is_refused(rig: Rig) -> None:
 
 def test_several_pull_requests_print_one_result_line_each_and_the_worst_code_wins(rig: Rig) -> None:
     rig.state["views"] = [
+        view(GREEN),
+        view(GREEN),
         view(GREEN),
         view(GREEN),
         view(GREEN, state="MERGED"),
