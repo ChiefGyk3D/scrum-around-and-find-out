@@ -94,3 +94,32 @@ def test_status_prints_no_cause_line_when_there_is_nothing_to_count(tmp_path: Pa
     (folder / "log.jsonl").write_text(json.dumps(row("", decision="allow", health="healthy")) + "\n")
     text = "\n".join(guard_lines({"XDG_STATE_HOME": str(tmp_path / "state"), "HOME": str(tmp_path / "none")}))
     assert "oversized events" not in text and "shell checks not finished" not in text
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        row("input-parse", check_ms=5),
+        row("input-oversize", check_ms=5),
+        row("", decision="allow", health="healthy", check_ms=5),
+        row("gemini-deny", decision="deny", health="healthy", check_ms=5),
+        row("input-shell", health="healthy", check_ms=5),
+    ],
+    ids=["parse", "oversize", "no-diagnostic", "service-denial", "healthy-shell"],
+)
+def test_check_ms_is_valid_only_on_a_degraded_input_shell_row(bad: dict[str, Any]) -> None:
+    assert valid_record(row("input-shell", check_ms=5)), "the guard: the one allowed shape is valid"
+    assert valid_record({k: v for k, v in bad.items() if k != "check_ms"}), "without check_ms the row is fine"
+    assert not valid_record(bad)
+
+
+def test_an_input_shell_row_may_omit_check_ms() -> None:
+    assert valid_record(row("input-shell"))
+
+
+def test_an_oversized_probe_event_is_input_oversize(_private_home: Path) -> None:
+    from hooksdata import hooks
+
+    out = hooks("probe", home=_private_home, stdin='"' + "x" * (MAX_BYTES + 10) + '"')[1]
+    assert read_log(_private_home)[-1]["diagnostic"] == "input-oversize"
+    assert "too large" in out and "Nothing was denied" in out

@@ -349,7 +349,7 @@ def event_input(ctx: LocalContext) -> dict[str, Any]:
     """
     raw, oversize = read_event(EventStream(ctx))
     if oversize:
-        raise ValueError("oversized event")
+        raise OversizeEvent("oversized event")
     payload = loads(raw)
     if not isinstance(payload, dict):
         raise ValueError("invalid event")
@@ -1129,6 +1129,8 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
         code = "state-write"
         prune_state(folder, ctx.now.timestamp())
         ctx.say(session_output(session_message(doc, state, runner_status(ctx.env))))
+    except OversizeEvent:
+        diagnostic(ctx, "input-oversize", "SessionStart")
     except TimeoutError:
         diagnostic(ctx, "timeout" if code == "input-parse" else code, "SessionStart")
     except Exception:

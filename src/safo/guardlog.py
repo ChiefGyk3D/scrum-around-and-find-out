@@ -96,6 +96,7 @@ _CHECK_WARNINGS = {
 }
 _PROBE_CAUSES = {
     "input-parse": "its event could not be read",
+    "input-oversize": "its event was too large",
     "input-args": "its command line could not be read",
     "config": "agents.yaml could not be loaded",
     "probe": "the local model did not answer",
@@ -280,7 +281,12 @@ def valid_record(row: Any) -> bool:
     keys = {"ts", "decision", "mode", "model", "local_reachable", "local_step", "na", "rules", "health", "diagnostic"}
     if not isinstance(row, dict) or set(row) not in (keys, {*keys, "check_ms"}):
         return False
-    if "check_ms" in row and not (type(row["check_ms"]) is int and 0 <= row["check_ms"] <= CHECK_MS_CAP):
+    if "check_ms" in row and not (
+        type(row["check_ms"]) is int
+        and 0 <= row["check_ms"] <= CHECK_MS_CAP
+        and row["diagnostic"] == "input-shell"  # only a shell check that did not finish has a duration
+        and row["health"] != "healthy"
+    ):
         return False
     ts = row["ts"]
     try:
