@@ -78,6 +78,7 @@ if method == "PUT":
     strict = rsc["strict"] if rsc else None
     if os.environ.get("FAKE_CORRUPT") == name and rsc:
         strict = False
+    prior_rule = repo["rule"] or {{}}
     repo["rule"] = {{
         "required_status_checks": None if rsc is None else {{
             "strict": strict, "checks": [{{"context": c["context"], "app_id": c.get("app_id")}} for c in rsc["checks"]],
@@ -89,7 +90,14 @@ if method == "PUT":
         "allow_force_pushes": {{"enabled": body["allow_force_pushes"]}},
         "allow_deletions": {{"enabled": body["allow_deletions"]}},
         "required_conversation_resolution": {{"enabled": body["required_conversation_resolution"]}},
+        "block_creations": {{"enabled": body.get("block_creations", False)}},
+        "lock_branch": {{"enabled": body.get("lock_branch", False)}},
+        "allow_fork_syncing": {{"enabled": body.get("allow_fork_syncing", False)}},
+        "required_signatures": prior_rule.get("required_signatures", {{"enabled": False}}),
     }}
+    dropped = os.environ.get("FAKE_DROP_PRESERVED")
+    if dropped == "required_approving_review_count":
+        repo["rule"]["required_pull_request_reviews"][dropped] = 0
     save(); sys.exit(0)
 if method == "DELETE":
     repo["rule"] = None; save(); sys.exit(0)
@@ -116,6 +124,10 @@ def rule(
         "allow_force_pushes": {"enabled": False},
         "allow_deletions": {"enabled": False},
         "required_conversation_resolution": {"enabled": conv},
+        "block_creations": {"enabled": False},
+        "lock_branch": {"enabled": False},
+        "allow_fork_syncing": {"enabled": False},
+        "required_signatures": {"enabled": False},
     }
 
 
@@ -259,6 +271,36 @@ def test_standard_backup_is_private_and_the_rollback_line_restores_it(tmp_path: 
     assert body["required_status_checks"]["strict"] is False and body["required_conversation_resolution"] is True
     line = next(ln for ln in done.stdout.splitlines() if ln.startswith("ROLLBACK:"))
     assert f"gh api -X PUT repos/{OWNER}/r1/branches/main/protection --input {restore}" in line
+
+
+def test_backup_never_reuses_a_preexisting_loose_file(tmp_path: Path) -> None:
+    box = Sandbox(tmp_path, {"r1": repo_state(rule_=rule(["CI green"]))})
+    box.backups.mkdir()
+    stale = box.backups / f"{OWNER}__r1-fixed-fixed.rule.json"
+    stale.write_text("do not overwrite")
+    stale.chmod(0o666)
+
+    done = box.apply_one("r1", "standard", "--apply", SAFO_BACKUP_STAMP="fixed", SAFO_BACKUP_RANDOM="fixed")
+
+    assert done.returncode != 0
+    assert stale.read_text() == "do not overwrite"
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o666
+    assert box.writes() == []
+
+
+def test_read_back_rejects_a_dropped_preserved_review_setting(tmp_path: Path) -> None:
+    reviews = {
+        "required_approving_review_count": 2,
+        "dismiss_stale_reviews": True,
+        "require_code_owner_reviews": True,
+        "require_last_push_approval": True,
+    }
+    box = Sandbox(tmp_path, {"r1": repo_state(rule_=rule(["CI green"], reviews=reviews))})
+
+    done = box.apply_one("r1", "standard", "--apply", FAKE_DROP_PRESERVED="required_approving_review_count")
+
+    assert done.returncode == 4 and "MISMATCH" in done.stderr
+    assert not any("graphql" in c for c in box.calls())
 
 
 def test_standard_without_a_ci_green_check_is_refused_with_no_write(tmp_path: Path) -> None:
@@ -500,3 +542,51 @@ def test_the_generator_refuses_a_hostile_name_and_a_missing_audit(tmp_path: Path
     cmd[4] = str(tmp_path / "missing.txt")
     done = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603
     assert done.returncode != 0
+
+
+def test_the_generator_refuses_an_audit_filename_with_control_characters(tmp_path: Path) -> None:
+    audit = tmp_path / "audit\n# injected shell.sh"
+    audit.write_text(AUDIT)
+    out = tmp_path / "plan.sh"
+    cmd = [sys.executable, "-I", str(GEN), "--audit", str(audit), "--out", str(out), "--apply-script", str(SCRIPT)]
+
+    done = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603
+
+    assert done.returncode == 2
+    assert "control character" in done.stderr
+    assert not out.exists()
+
+
+def test_the_generator_identifies_real_protection_all_output_as_the_wrong_format(tmp_path: Path) -> None:
+    audit = tmp_path / "protection-all.txt"
+    audit.write_text(
+        "OK ChiefGyk3D/one [admins: can bypass, conversation resolution: required]\n"
+        "ChiefGyk3D/two: DRIFT force-push (force pushes are allowed) "
+        "[admins: can bypass, conversation resolution: required]\n"
+        "protection: 2 repositories read, 1 with drift\n"
+    )
+    out = tmp_path / "plan.sh"
+    cmd = [sys.executable, "-I", str(GEN), "--audit", str(audit), "--out", str(out), "--apply-script", str(SCRIPT)]
+
+    done = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603
+
+    assert done.returncode == 2
+    assert "safo protection --all" in done.stderr and "audit table" in done.stderr
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("drift", ["strict", "conv", "force", "del"])
+def test_the_generator_schedules_standard_for_each_standard_drift(tmp_path: Path, drift: str) -> None:
+    audit = tmp_path / "audit.txt"
+    audit.write_text(
+        HEADER_LINE
+        + "\n"
+        + f"drifted|PUBLIC|main|YES|['ci / CI green']|True|True|0|False|False|False|enabled|enabled|{drift}\n"
+    )
+    out = tmp_path / "plan.sh"
+    cmd = [sys.executable, "-I", str(GEN), "--audit", str(audit), "--out", str(out), "--apply-script", str(SCRIPT)]
+
+    done = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603
+
+    assert done.returncode == 0, done.stderr
+    assert "drifted|public|main|standard|rule" in out.read_text()

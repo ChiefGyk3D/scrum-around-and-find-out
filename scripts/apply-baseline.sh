@@ -172,16 +172,25 @@ read_rule() {
     fi
 }
 
-stamp=$(date -u +%Y%m%dT%H%M%SZ)
+stamp=${SAFO_BACKUP_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}
 backup_base() {
     local dir=${backup_dir:-${SAFO_BACKUP_DIR:-${XDG_STATE_HOME:-${HOME:?HOME is not set; pass --backup-dir}/.local/state}/safo/protection-backups}}
-    echo "$dir/${repo//\//__}-$stamp"
+    local random=${SAFO_BACKUP_RANDOM:-$RANDOM$RANDOM}
+    echo "$dir/${repo//\//__}-$stamp-$random"
 }
 
 write_private() { # file, content; the file is created 0600 in a 0700 directory
     local dir
     dir=$(dirname "$1")
-    (umask 077 && mkdir -p "$dir" && chmod 700 "$dir" && printf '%s\n' "$2" >"$1")
+    (
+        umask 077
+        mkdir -p "$dir"
+        chmod 700 "$dir"
+        set -o noclobber
+        exec 3>"$1"
+        chmod 600 "$1"
+        printf '%s\n' "$2" >&3
+    )
 }
 
 run_branch_mode() {
@@ -206,9 +215,8 @@ run_branch_mode() {
             die "$repo has no CI green check on $branch; use --mode basic for it (never guessed)"
     fi
     req_json=$(jq -c --arg mode "$mode" "$body_jq" <<<"$current")
-    local want
-    want=$(jq -c '{strict: (.required_status_checks.strict // false), conv: .required_conversation_resolution,
-        admins: .enforce_admins, contexts: ([.required_status_checks.checks[]?.context] | sort)}' <<<"$req_json")
+    local preserved_signatures
+    preserved_signatures=$(jq -c '(.required_signatures.enabled // false)' <<<"$current")
 
     local base restore_file rule_file
     base=$(backup_base)
@@ -239,12 +247,39 @@ run_branch_mode() {
         local got
         got=$(read_rule)
         [ "$got" != NONE ] || mismatch "the rule is gone after the write"
-        jq -e --argjson want "$want" '
-            (.allow_force_pushes.enabled == false) and (.allow_deletions.enabled == false)
-            and ((.required_status_checks.strict // false) == $want.strict)
-            and ((.required_conversation_resolution.enabled // false) == $want.conv)
-            and ((.enforce_admins.enabled // false) == $want.admins)
-            and (([.required_status_checks.checks[]?.context] | sort) == $want.contexts)' <<<"$got" >/dev/null ||
+        jq -e --argjson want "$req_json" --argjson signatures "$preserved_signatures" '
+            def reviews:
+              if . == null then null else
+                {dismiss_stale_reviews: (.dismiss_stale_reviews // false),
+                 require_code_owner_reviews: (.require_code_owner_reviews // false),
+                 required_approving_review_count: (.required_approving_review_count // 0),
+                 require_last_push_approval: (.require_last_push_approval // false)}
+              end;
+            def actual:
+              {required_status_checks:
+                 (if .required_status_checks == null then null else
+                    {strict: (.required_status_checks.strict // false),
+                     checks: ([.required_status_checks.checks[] |
+                       {context: .context} + (if .app_id != null then {app_id: .app_id} else {} end)] |
+                       sort_by(.context, .app_id))}
+                  end),
+               enforce_admins: (.enforce_admins.enabled // false),
+               required_pull_request_reviews: (.required_pull_request_reviews | reviews),
+               restrictions: .restrictions,
+               required_linear_history: (.required_linear_history.enabled // false),
+               allow_force_pushes: (.allow_force_pushes.enabled // false),
+               allow_deletions: (.allow_deletions.enabled // false),
+               required_conversation_resolution: (.required_conversation_resolution.enabled // false),
+               block_creations: (.block_creations.enabled // false),
+               lock_branch: (.lock_branch.enabled // false),
+               allow_fork_syncing: (.allow_fork_syncing.enabled // false)};
+            def expected:
+              $want |
+              if .required_status_checks == null then . else
+                .required_status_checks.checks |= sort_by(.context, .app_id)
+              end;
+            (actual == expected)
+            and ((.required_signatures.enabled // false) == $signatures)' <<<"$got" >/dev/null ||
             mismatch "the rule read back differs from the one written"
         force_bypass_check
         echo "OK $repo: $mode applied and read back"
@@ -356,10 +391,27 @@ call PUT "repos/$repo/branches/$branch/protection" "$protection"
 if $apply; then
     got=$(read_rule)
     [ "$got" != NONE ] || mismatch "the rule is gone after the write"
-    jq -e --argjson want "$(jq -c '{contexts: ([.required_status_checks.checks[].context] | sort)}' <<<"$protection")" '
-        .required_status_checks.strict == true and .required_conversation_resolution.enabled == true
-        and .allow_force_pushes.enabled == false and .allow_deletions.enabled == false
-        and (([.required_status_checks.checks[]?.context] | sort) == $want.contexts)' <<<"$got" >/dev/null ||
+    jq -e --argjson want "$protection" '
+        def reviews:
+          {dismiss_stale_reviews: (.dismiss_stale_reviews // false),
+           require_code_owner_reviews: (.require_code_owner_reviews // false),
+           required_approving_review_count: (.required_approving_review_count // 0),
+           require_last_push_approval: (.require_last_push_approval // false)};
+        {required_status_checks:
+           {strict: (.required_status_checks.strict // false),
+            checks: ([.required_status_checks.checks[] |
+              {context: .context} + (if .app_id != null then {app_id: .app_id} else {} end)] |
+              sort_by(.context, .app_id))},
+         enforce_admins: (.enforce_admins.enabled // false),
+         required_pull_request_reviews: (.required_pull_request_reviews | reviews),
+         restrictions: .restrictions,
+         required_linear_history: (.required_linear_history.enabled // false),
+         allow_force_pushes: (.allow_force_pushes.enabled // false),
+         allow_deletions: (.allow_deletions.enabled // false),
+         required_conversation_resolution: (.required_conversation_resolution.enabled // false)}
+        == ($want |
+          .required_status_checks.checks |= sort_by(.context, .app_id) |
+          .required_pull_request_reviews |= reviews)' <<<"$got" >/dev/null ||
         mismatch "the rule read back is not the baseline that was written"
 fi
 

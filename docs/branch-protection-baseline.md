@@ -34,7 +34,8 @@ Properties that hold in every non-`full` mode, and for the protection write in `
   and writes nothing. (`full` without `--apply` makes no call at all.)
 - **The check name is read, never guessed.** `standard` reads the live rule's required checks and stops if none is
   `CI green` or `<job> / CI green`; use `basic` for that repository.
-- **A backup first.** `--apply` writes the old rule to `<backup-dir>/<owner>__<repo>-<UTC stamp>.rule.json` and a PUT-ready
+- **A backup first.** `--apply` writes the old rule to
+  `<backup-dir>/<owner>__<repo>-<UTC stamp>-<random>.rule.json` and a PUT-ready
   `.restore.json`, mode 0600, in a 0700 directory (`--backup-dir`, else `SAFO_BACKUP_DIR`, else
   `$XDG_STATE_HOME/safo/protection-backups`).
 - **A read-back after each write.** The rule (or the repository's security settings) is read again and compared with what
@@ -50,8 +51,12 @@ Exit codes: 0 done, 1 error, 3 refused, 4 read-back mismatch.
 
 ## Generating the owner's rollout plan
 
-`scripts/gen-protection-plan.py` turns an audit snapshot (the `repo|vis|branch|prot|ctx|strict|conv|...` table) into one
-bash script. It writes a file (mode 0700) and runs nothing against GitHub.
+`scripts/gen-protection-plan.py` turns the private audit-table file stored under the safo-dev work area into one bash
+script. That file is a separate inventory artifact with the exact
+`repo|vis|branch|prot|ctx|strict|conv|rev|force|del|adm|ss|pp|drift` header and pipe-separated rows; it is not the
+human-readable output of `safo protection --all`. The generator identifies that command's output and refuses it with
+a format-specific error. It writes a new file (mode 0700), refuses to replace an existing output, and runs nothing
+against GitHub.
 
 ```bash
 python3 scripts/gen-protection-plan.py --audit audit.txt --out plan.sh --apply-script scripts/apply-baseline.sh \
@@ -61,7 +66,8 @@ bash plan.sh apply      # writes, one repository at a time
 ```
 
 Per repository: no rule becomes `basic` (expecting none); a rule with `CI green` but strict or conversation resolution
-off becomes `standard`; a rule without `CI green` becomes `basic`; each `--secret` name also gets `secret-scanning`.
+off, or force push or deletion allowed, becomes `standard`; a rule without `CI green` becomes `basic`; each `--secret`
+name also gets `secret-scanning`.
 Empty repositories and `--skip` names are listed as `SKIP` with the reason and never touched. In `apply`, a refused
 repository is skipped and the run goes on (final exit 1); the first failed write or read-back mismatch stops the whole
 run. Each repository's `ROLLBACK:` line is in the output and its backup is in the backup directory.

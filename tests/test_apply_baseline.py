@@ -21,6 +21,15 @@ WRITTEN_RULE = json.dumps(
             "strict": True,
             "checks": [{"context": "ci / CI green"}, {"context": "shell / CI green"}],
         },
+        "enforce_admins": {"enabled": False},
+        "required_pull_request_reviews": {
+            "required_approving_review_count": 0,
+            "dismiss_stale_reviews": True,
+            "require_code_owner_reviews": False,
+            "require_last_push_approval": False,
+        },
+        "restrictions": None,
+        "required_linear_history": {"enabled": False},
         "allow_force_pushes": {"enabled": False},
         "allow_deletions": {"enabled": False},
         "required_conversation_resolution": {"enabled": True},
@@ -147,6 +156,16 @@ def test_apply_reads_the_rule_back_and_stops_when_it_is_not_the_baseline(tmp_pat
         p.name.endswith(".restore.json") or p.name.endswith(".rule.json")
         for p in (tmp_path / ".local/state/safo/protection-backups").iterdir()
     )
+
+
+def test_full_read_back_rejects_a_dropped_review_setting(tmp_path: Path) -> None:
+    dropped = json.loads(WRITTEN_RULE)
+    dropped["required_pull_request_reviews"]["required_approving_review_count"] = 1
+
+    done, calls, _ = run(tmp_path, "--apply", rule_response=json.dumps(dropped))
+
+    assert done.returncode == 4 and "MISMATCH" in done.stderr
+    assert not any("allowed_actions=selected" in c for c in calls)
 
 
 def test_it_reads_the_force_push_bypass_back_over_graphql(tmp_path: Path) -> None:

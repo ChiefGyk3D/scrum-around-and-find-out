@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Generate an owner-runnable plan script from a branch-protection audit snapshot (issue #541).
+"""Generate an owner-runnable plan script from a branch-protection audit table (issue #541).
 
-The audit file is the table `safo protection --all` style audits produce: a header line starting `repo|vis|branch|`
-and one `repo|vis|branch|prot|ctx|strict|conv|rev|force|del|adm|ss|pp|drift` row per repository. From it this writes
+The input is the pipe-separated audit table stored in the private safo-dev work area, not the human-readable output of
+`safo protection --all`. It has the exact header and one row per repository described below. From it this writes
 one bash script that, per repository, calls `scripts/apply-baseline.sh` with the snapshot's default branch, visibility
 and protection state as expectations, so a repository that changed since the snapshot is refused:
 
@@ -29,13 +29,27 @@ from pathlib import Path
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 HEADER = "repo|vis|branch|"
+HEADER_LINE = "repo|vis|branch|prot|ctx|strict|conv|rev|force|del|adm|ss|pp|drift"
 
 
 def parse_audit(text: str) -> list[dict[str, str]]:
     lines = text.splitlines()
     start = next((i for i, ln in enumerate(lines) if ln.startswith(HEADER)), None)
     if start is None:
-        raise ValueError("no header line starting 'repo|vis|branch|' in the audit file")
+        if any(
+            ln.startswith(("OK ", "UNKNOWN ", "EXEMPT ", "protection: "))
+            or (": " in ln and any(word in ln for word in ("MISSING ", "DRIFT ")))
+            for ln in lines
+        ):
+            raise ValueError(
+                "this is human-readable `safo protection --all` output; --audit needs the private pipe-separated "
+                "audit table with a repo|vis|branch|... header"
+            )
+        raise ValueError(
+            "unknown audit format; expected the pipe-separated audit table with a repo|vis|branch|... header"
+        )
+    if lines[start] != HEADER_LINE:
+        raise ValueError(f"unknown audit-table header; expected {HEADER_LINE!r}")
     keys = lines[start].split("|")
     rows = []
     for ln in lines[start + 1 :]:
@@ -83,7 +97,7 @@ def plan(
             drift = set(r["drift"].split(","))
             if not has_ci_green(r["ctx"]):
                 actions.append(f"{name}|{vis}|{branch}|basic|rule")
-            elif drift & {"strict", "conv"}:
+            elif drift & {"strict", "conv", "force", "del"}:
                 actions.append(f"{name}|{vis}|{branch}|standard|rule")
         else:
             raise ValueError(f"{name}: unknown protection state {r['prot']!r}")
@@ -205,6 +219,14 @@ def render(
     return out
 
 
+def safe_snapshot_name(path: Path) -> str:
+    """Return a comment-safe basename, refusing names whose controls could create another shell line."""
+    name = path.name
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise ValueError("the audit filename contains a control character")
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0] if __doc__ else "")
     ap.add_argument("--audit", required=True, type=Path)
@@ -222,6 +244,7 @@ def main(argv: list[str]) -> int:
             if not sep or not why.strip():
                 raise ValueError(f"--skip needs NAME=REASON, got {item!r}")
             skips[name] = why.strip()
+        snapshot = safe_snapshot_name(ns.audit)
         rows = parse_audit(ns.audit.read_text(encoding="utf-8"))
         actions, skipped = plan(rows, skips, ns.secret)
     except (OSError, ValueError) as exc:
@@ -234,17 +257,14 @@ def main(argv: list[str]) -> int:
     text = render(
         actions,
         skipped,
-        snapshot=ns.audit.name,
+        snapshot=snapshot,
         apply_script=str(ns.apply_script.resolve()),
         owner=ns.owner,
         backup_dir=backup,
     )
-    fd = os.open(ns.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+    fd = os.open(ns.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
-    # 0o700 is owner-only, and a script needs the x bit.
-    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
-    os.chmod(ns.out, 0o700)
     counts: dict[str, int] = {}
     for a in actions:
         mode = a.split("|")[3]
