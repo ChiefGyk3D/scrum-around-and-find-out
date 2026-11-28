@@ -82,6 +82,10 @@ class Fake:
         self.read_rc = 0
         self.has_next = False
         self.branch = "main"
+        self.ref_extra = 0  # matching refs beyond the first page
+        self.ref_more: bool | None = None  # override for refs' hasNextPage
+        self.rest_enabled: bool | None = None  # None: follow the rule; else force the REST answer
+        self.rest_rc = 0
 
     def mutations(self) -> list[list[str]]:
         return [c for c in self.calls if any("mutation" in a for a in c)]
@@ -104,7 +108,7 @@ class Fake:
             nodes = [
                 {
                     **{k: v for k, v in r.items()},
-                    "matchingRefs": {"nodes": [{"name": ref}] if self.covers(r, ref) else []},
+                    "matchingRefs": self.refs(r, ref),
                 }
                 for r in self.rules
             ]
@@ -115,9 +119,25 @@ class Fake:
                 }
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps({"data": data}), "")
+        if args[-1] == f"repos/{REPO}/branches/{self.branch}/protection":
+            if self.rest_rc:
+                return subprocess.CompletedProcess(argv, self.rest_rc, "", "denied " + SECRET)
+            on = self.rules[0][pt.FLAG] if self.rest_enabled is None else self.rest_enabled
+            body = {"required_conversation_resolution": {"enabled": on}}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(body), "")
         if args[-1] == f"repos/{REPO}/rules/branches/{self.branch}":
             return subprocess.CompletedProcess(argv, 0, json.dumps(self.ruleset_rules), "")
         raise AssertionError(f"unexpected call {argv}")
+
+    def refs(self, r: dict[str, Any], ref: str) -> dict[str, Any]:
+        """matchingRefs as GraphQL shows it: the first page (at most 100), the total and the page marker."""
+        if not self.covers(r, ref):
+            names: list[str] = []
+        else:
+            names = [f"other{i}" for i in range(min(self.ref_extra, 99))] + [ref] if self.ref_extra else [ref]
+        total = len(names) + max(self.ref_extra - 99, 0)
+        more = total > len(names) if self.ref_more is None else self.ref_more
+        return {"totalCount": total, "pageInfo": {"hasNextPage": more}, "nodes": [{"name": n} for n in names]}
 
     @staticmethod
     def covers(r: dict[str, Any], ref: str) -> bool:
@@ -221,6 +241,56 @@ def test_a_second_page_of_rules_is_refused(tmp_path: Path, monkeypatch: pytest.M
     rig.fake.has_next = True
     code, _out, err = rig.apply()
     assert code == pt.EXIT_REFUSED and "more protection rules" in err and rig.fake.mutations() == []
+
+
+def test_more_than_a_page_of_matching_refs_is_refused_with_no_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = make(tmp_path, monkeypatch)
+    rig.fake.ref_extra = 150  # the real branch could be on page two
+    for argv in ((REPO,), (REPO, "--apply", "--backup-dir", str(rig.backups))):
+        code, _out, err = rig.go(*argv)
+        assert code == pt.EXIT_REFUSED and "matching branches" in err
+    assert rig.fake.mutations() == [] and not list(rig.backups.iterdir())
+
+
+def test_a_refs_page_marker_that_is_not_false_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = make(tmp_path, monkeypatch)
+    rig.fake.ref_more = True
+    code, _out, err = rig.apply()
+    assert code == pt.EXIT_REFUSED and "matching branches" in err
+    assert rig.fake.mutations() == [] and not list(rig.backups.iterdir())
+
+
+def test_a_refs_page_marker_that_is_missing_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = make(tmp_path, monkeypatch)
+    rig.fake.ref_more = None
+    original = rig.fake.refs
+    rig.fake.refs = lambda r, ref: {k: v for k, v in original(r, ref).items() if k != "pageInfo"}  # type: ignore[method-assign]
+    code, _out, err = rig.apply()
+    assert code == pt.EXIT_REFUSED and "matching branches" in err and rig.fake.mutations() == []
+
+
+def test_a_rest_read_back_that_shows_the_flag_off_is_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = make(tmp_path, monkeypatch)
+    rig.fake.rest_enabled = False  # GraphQL says true, REST disagrees
+    code, out, err = rig.apply()
+    assert code == pt.EXIT_VERIFY and "required_conversation_resolution" in err
+    assert "rollback" in out and "verified" not in out
+
+
+def test_a_rest_read_back_that_cannot_be_read_is_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = make(tmp_path, monkeypatch)
+    rig.fake.rest_rc = 1
+    code, out, err = rig.apply()
+    assert code == pt.EXIT_VERIFY and SECRET not in out + err and "rollback" in out
+
+
+def test_the_normal_path_reads_back_through_rest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = make(tmp_path, monkeypatch)
+    code, out, _ = rig.apply()
+    assert code == 0 and "verified" in out
+    assert any(c[-1] == f"repos/{REPO}/branches/main/protection" for c in rig.fake.calls)
 
 
 UNREADABLE = [
