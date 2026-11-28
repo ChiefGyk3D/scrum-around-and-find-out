@@ -918,9 +918,13 @@ def _ensure(
                 if sig != expected:
                     raise ConfigError("settings: changed invocation; migrate by hand")
                 if isinstance(command, str) and (wrapped := unwrap_guarded(command)) is not None and kept_entry is None:
+                    # Only the arguments of the SAME program are rewritten. A wrapper around another form (the legacy
+                    # `safo hooks guard`, say) is kept exactly as found: replacing its run would leave a probe of one
+                    # program and a run of another, which is no longer a wrapper we recognise.
+                    same = wrapped.split(" ", 1)[0] == entry["command"].split(" ", 1)[0]
                     kept_entry = (
                         existing
-                        if wrapped == entry["command"]
+                        if wrapped == entry["command"] or not same
                         else {**existing, "command": _replace_guarded_run(command, entry["command"])}
                     )
                 # Normalize all owned fields and collapse duplicates, leaving siblings untouched.

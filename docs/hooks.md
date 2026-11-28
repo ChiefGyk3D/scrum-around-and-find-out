@@ -44,7 +44,8 @@ lets a session start when the entry point is missing) is read as the `new` form 
 with the direct form after `exec` (`--agents` tails as for the plain form). The program probed must be the program run,
 and the command inside is plain text (no quotes, escapes, control characters, glob or shell syntax); any other shape is
 a foreign command. `install` never writes the wrapper but keeps one it finds, updating the agent paths inside it
-(#397); status and install share one function (`unwrap_guarded`) for this. It counts an entry as the guard by the SAME rule `install` accepts one (one function,
+when it wraps the same program as the line install would write (#397); a wrapper around another form, such as the
+legacy `safo hooks guard`, is kept exactly as found, never rewritten into a probe of one program and a run of another; status and install share one function (`unwrap_guarded`) for this. It counts an entry as the guard by the SAME rule `install` accepts one (one function,
 `entry_problems` in the hooks module of the safo package): the type is `command` and the matcher is `Agent|Task|Bash` (or the older
 `Agent|Task` that `install` migrates). A guard-shaped command under another matcher (`Read`, empty, a regex that
 leaves out Agent) or another type (`prompt`, `agent`, none) would never run, so status says `ineffective (wrong
