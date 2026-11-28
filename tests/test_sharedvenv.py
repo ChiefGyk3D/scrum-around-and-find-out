@@ -18,6 +18,7 @@ import zipfile
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -151,10 +152,14 @@ def test_venv_is_read_only_and_reuse_does_not_rebuild(tmp_path: Path, wheels: Pa
     writable = [p for p in venv.rglob("*") if not p.is_symlink() and p.stat().st_mode & 0o222]
     assert writable == []
     assert not venv.stat().st_mode & 0o222
-    inode = venv.stat().st_ino
-    second = cli(*build_args(lock, root, wheels))  # a rebuild would give the entry a new inode
-    assert (second.returncode, second.stdout) == (0, first.stdout)
-    assert venv.stat().st_ino == inode
+    held = os.open(venv, os.O_RDONLY)  # keeps the old inode live, so a rebuild could never reuse its number
+    try:
+        inode = os.fstat(held).st_ino
+        second = cli(*build_args(lock, root, wheels))  # a rebuild would give the entry a new inode
+        assert (second.returncode, second.stdout) == (0, first.stdout)
+        assert venv.stat().st_ino == inode
+    finally:
+        os.close(held)
     with pytest.raises(PermissionError):
         (venv / "lib" / "evil.txt").write_text("x")
 
@@ -1209,12 +1214,21 @@ def test_a_writable_entry_with_our_marker_is_rebuilt_but_a_foreign_one_is_refuse
     tmp_path: Path, wheels: Path, lock: Path
 ) -> None:
     root, venv = build_in(tmp_path, wheels, lock)
-    inode = venv.stat().st_ino
     venv.chmod(0o755)  # what an interruption after an unsealed publish used to leave behind
-    done = cli(*build_args(lock, root, wheels))
+    # A freed inode number can be reused at once (ext4), so an inode comparison proves nothing. A file only the old
+    # entry holds proves the rebuild by content; the open descriptor also keeps the old inode live while we compare.
+    sentinel = venv / "old-entry-sentinel"
+    sentinel.write_text("old\n")
+    held = os.open(venv, os.O_RDONLY)
+    try:
+        inode = os.fstat(held).st_ino
+        done = cli(*build_args(lock, root, wheels))
+        assert venv.stat().st_ino != inode  # both inodes live: cannot be a reused number
+    finally:
+        os.close(held)
     assert done.returncode == 0, done.stderr
     assert venv_of(done) == venv and not venv.stat().st_mode & 0o222
-    assert venv.stat().st_ino != inode  # rebuilt, not reused
+    assert not sentinel.exists()  # rebuilt, not reused
     marker = venv / sharedvenv.MARKER
     venv.chmod(0o755)
     marker.chmod(0o644)
@@ -1636,3 +1650,61 @@ def test_gc_converts_a_failure_inside_its_own_body(
     with pytest.raises(sharedvenv.Failed) as caught:
         sharedvenv.gc(tmp_path / "root", 1, False, 5)
     assert_clean(caught.value)
+
+
+def _planted(tmp_path: Path) -> tuple[Path, Path]:
+    """A directory holding modules named like the ones the child commands import; running one writes a marker."""
+    cwd = tmp_path / "planted"
+    cwd.mkdir()
+    marker = tmp_path / "ran.txt"
+    for name in ("venv", "pip", "ensurepip"):
+        (cwd / f"{name}.py").write_text(f"open({str(marker)!r}, 'a').write({name!r})\nraise SystemExit(0)\n")
+    return cwd, marker
+
+
+def test_planted_modules_in_the_callers_directory_never_run(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd, marker = _planted(tmp_path)
+    monkeypatch.chdir(cwd)
+    out = sharedvenv.ensure(tmp_path / "root", lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    assert not marker.exists(), marker.read_text()
+    assert out.exists()
+
+
+def test_every_child_is_isolated_and_runs_from_a_fixed_directory(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd, _ = _planted(tmp_path)
+    monkeypatch.chdir(cwd)
+    seen: list[tuple[list[str], object, object]] = []
+    real = subprocess.run
+
+    def spy(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.append((list(cmd), kw.get("cwd"), kw.get("stdin")))
+        return real(cmd, **kw)
+
+    monkeypatch.setattr("subprocess.run", spy)
+    sharedvenv.ensure(tmp_path / "root", lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    assert len(seen) >= 3  # identity, venv, pip
+    for cmd, where, stdin in seen:
+        assert "-I" in cmd, cmd
+        assert stdin == subprocess.DEVNULL, (cmd, stdin)
+        assert where is not None and Path(str(where)).is_absolute() and Path(str(where)) != cwd, (cmd, where)
+
+
+def test_a_relative_root_builds_under_the_intended_directory_and_leaves_the_work_directory_clean(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "base"
+    base.mkdir()
+    base.chmod(0o755)
+    monkeypatch.chdir(base)
+    out = sharedvenv.ensure(Path("relroot"), lock, py(), ["--no-index", "--find-links", str(wheels)], 300)
+    root = base / "relroot"
+    assert out.is_absolute() and root in out.parents, out
+    assert sorted(p.name for p in root.iterdir() if not p.name.startswith(".") and p.suffix != ".used") == [
+        out.parent.parent.name
+    ]
+    assert [p.name for p in root.iterdir() if p.name.startswith(".")] == [".lock"]  # no stage, no build directory left
+    assert sorted(p.name for p in base.iterdir()) == ["relroot"]  # nothing built relative to the child's directory

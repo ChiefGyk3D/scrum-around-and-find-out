@@ -426,18 +426,32 @@ Signature = tuple[str, int, int, int]
 
 
 def _run_child(
-    cmd: Sequence[str], *, env: dict[str, str], timeout: float, pass_fds: tuple[int, ...] = ()
+    cmd: Sequence[str],
+    *,
+    env: dict[str, str],
+    timeout: float,
+    cwd: str | os.PathLike[str],
+    pass_fds: tuple[int, ...] = (),
 ) -> tuple[int | None, bytes, bytes]:
     """Run a child with its output captured. Returns (status, stdout, stderr); the status is None on a timeout.
 
     A timeout exception carries the partial output and the command line, so it is never allowed to escape: it is
     caught, emptied, and the caller raises its own fixed error outside the handler (no cause, no context).
+
+    `cwd` is required and never the caller's directory: a module planted there must not be importable by the child.
     """
     timed_out = False
     done: subprocess.CompletedProcess[bytes] | None = None
     try:
         done = subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
-            list(cmd), env=env, timeout=timeout, capture_output=True, pass_fds=pass_fds, check=False
+            list(cmd),
+            env=env,
+            timeout=timeout,
+            capture_output=True,
+            pass_fds=pass_fds,
+            check=False,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as exc:
         exc.stdout = exc.stderr = exc.output = None
@@ -458,7 +472,10 @@ def identity(python: str) -> tuple[str, Signature, list[object]]:
     report: list[object] | None = None
     try:
         code, out, _ = _run_child(
-            [resolved, "-I", "-c", IDENTITY_CODE], env=_clean_env(Path("/nonexistent")), timeout=IDENTITY_TIMEOUT
+            [resolved, "-I", "-c", IDENTITY_CODE],
+            env=_clean_env(Path("/nonexistent")),
+            timeout=IDENTITY_TIMEOUT,
+            cwd="/",
         )
         if code == 0:
             lines = out.decode(errors="replace").strip().splitlines()
@@ -650,7 +667,9 @@ def build(
                 raise Refused("the private lockfile copy does not match the checked hash")
             req = f"/proc/self/fd/{fd}" if Path("/proc/self/fd").is_dir() else str(work / "req.txt")
             env = _clean_env(home)
-            code, _, _ = _run_child([python, "-m", "venv", "--clear", str(stage)], env=env, timeout=VENV_TIMEOUT)
+            code, _, _ = _run_child(
+                [python, "-I", "-m", "venv", "--clear", str(stage)], env=env, timeout=VENV_TIMEOUT, cwd=work
+            )
             if code is None:
                 raise Failed("the venv step timed out")
             if code != 0:
@@ -665,7 +684,7 @@ def build(
                 "--disable-pip-version-check", "--require-hashes", "--no-deps",
                 "--only-binary=:all:", *pip_args, "-r", req,
             ]  # fmt: skip
-            code, out, err = _run_child(install, env=env, timeout=PIP_TIMEOUT, pass_fds=(fd,))
+            code, out, err = _run_child(install, env=env, timeout=PIP_TIMEOUT, cwd=work, pass_fds=(fd,))
             if code is None:
                 raise Failed("the install step failed: pip timed out (its output was discarded)")
             if code != 0:
@@ -843,6 +862,9 @@ def ensure(
     check_timeout(timeout)
     for value in (root, lockfile, python):
         check_plain(value)
+    # Children run from the private build directory, so every path they are handed must be absolute before any child
+    # starts. abspath is lexical (it follows no link): the symlink and ownership checks then run on this final path.
+    root = Path(os.path.abspath(root))
     parse_pip_args(pip_args)
     data = read_lockfile(lockfile)
     check_hashes(data)
