@@ -34,6 +34,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [safo-codex-run repository checks](codex-run.md): what the wrapper checks in a worktree before codex starts, and the residual risk it does not close.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
 - [Protection audit](protection-audit.md): `safo protection --all` audits every board repository's default branch against the standard.
+- [Branch-protection baseline](branch-protection-baseline.md): the standard (CI green, strict, conversation resolution), the BASIC gate, secret scanning, and the owner-run rollout plan.
 - [Look before instructing](look-before-instructing.md): prior art, then the vendor's docs page, then the live system; never a click path from memory.
 - [Done means verified](done-means-verified.md): "done" needs an observation this turn through the user's path, plus the destructive-step checklist.
 - [Access planning](access-planning.md): plan the whole job, ask once for the union of scopes, no broader fallback, drop write scopes at the end.

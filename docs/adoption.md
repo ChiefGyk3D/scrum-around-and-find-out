@@ -137,6 +137,8 @@ around this Action with the same inputs it always had; bump the pin.
 A code owner file is only a file until branch protection makes GitHub enforce it. `safo protection` reads the default
 branch's protection back and says which required condition does not hold. It sends GET requests only, needs read access,
 and changes nothing; you apply the protection yourself.
+The script that applies the standard (up to date, conversation resolution, the BASIC gate, secret scanning) is
+`scripts/apply-baseline.sh`; see [Branch-protection baseline](branch-protection-baseline.md).
 
 ```bash
 safo protection --repo OWNER/NAME [--agent-login AGENT]      # exit 0, 1 or 2

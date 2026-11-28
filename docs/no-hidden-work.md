@@ -104,6 +104,10 @@ A rule that someone can get around does not hold the gate: a ruleset with any by
 and (only when asked for, see below) a classic rule that does not apply to administrators. One rule nobody can bypass is
 enough.
 
+The standard the baseline writes (owner decision, issue #541) is: `CI green` required, the branch up to date before merging
+(strict), conversation resolution on, no force push, no deletion; a repository with no `CI green` check gets the BASIC
+gate (no force push, no deletion). See [Branch-protection baseline](branch-protection-baseline.md).
+
 ```yaml
 rules:
   gate_check: CI green                # the check name; empty turns the rule off

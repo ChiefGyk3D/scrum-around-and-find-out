@@ -14,9 +14,21 @@ import yaml
 ROOT = Path(__file__).parent.parent
 SCRIPT = ROOT / "scripts" / "apply-baseline.sh"
 REPO = "ChiefGyk3D/scrum-around-and-find-out"
+# What GET returns after the baseline PUT: up to date, conversations resolved, both CI gates, no force push or deletion.
+WRITTEN_RULE = json.dumps(
+    {
+        "required_status_checks": {
+            "strict": True,
+            "checks": [{"context": "ci / CI green"}, {"context": "shell / CI green"}],
+        },
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+        "required_conversation_resolution": {"enabled": True},
+    }
+)
 
 
-def make_fake_gh(fail_on_cmd: str = "", graphql_response: str = "") -> str:
+def make_fake_gh(fail_on_cmd: str = "", graphql_response: str = "", rule: str = "") -> str:
     """Build a fake gh script that can fail on a specific command or return custom GraphQL responses."""
     script_lines = [
         "#!/bin/sh",
@@ -39,6 +51,7 @@ def make_fake_gh(fail_on_cmd: str = "", graphql_response: str = "") -> str:
         [
             'case "$*" in',
             '"api user"*) echo maintainer ;;',
+            f'"api repos/{REPO}/branches/main/protection") printf "%s" \'{rule or WRITTEN_RULE}\' ;;',
             "*selected-actions.json?ref=*) printf '%s' 'eyJnaXRodWJfb3duZWRfYWxsb3dlZCI6IHRydWV9' ;;",
             "esac",
             "exit 0",
@@ -52,14 +65,17 @@ def run(
     *args: str,
     fail_on_cmd: str = "",
     graphql_response: str = "",
+    rule_response: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     gh = bin_dir / "gh"
-    gh.write_text(make_fake_gh(fail_on_cmd=fail_on_cmd, graphql_response=graphql_response))
+    gh.write_text(
+        make_fake_gh(fail_on_cmd=fail_on_cmd, graphql_response=graphql_response, rule=rule_response or WRITTEN_RULE)
+    )
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     log = tmp_path / "gh.log"
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "LOG": str(log)}
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "LOG": str(log), "HOME": str(tmp_path)}
     done = subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True, text=True, check=False)  # noqa: S603, S607
     calls = log.read_text().splitlines() if log.exists() else []
     stdin = Path(f"{log}.stdin").read_text() if Path(f"{log}.stdin").exists() else ""
@@ -117,6 +133,20 @@ def test_branch_protection_requires_a_pull_request_and_both_ci_gates(tmp_path: P
         "dismiss_stale_reviews": True,
     }
     assert body["allow_force_pushes"] is False and body["allow_deletions"] is False
+    assert body["required_status_checks"]["strict"] is True, "the branch must be up to date before merging"
+    assert body["required_conversation_resolution"] is True
+
+
+def test_apply_reads_the_rule_back_and_stops_when_it_is_not_the_baseline(tmp_path: Path) -> None:
+    """The read-back after the protection PUT is part of the write: a rule that is not strict fails the run."""
+    stale = WRITTEN_RULE.replace('"strict": true', '"strict": false')
+    done, calls, _ = run(tmp_path, "--apply", rule_response=stale)
+    assert done.returncode == 4 and "MISMATCH" in done.stderr and "ROLLBACK:" in done.stderr
+    assert not any("allowed_actions=selected" in c for c in calls), "nothing runs after the mismatch"
+    assert any(
+        p.name.endswith(".restore.json") or p.name.endswith(".rule.json")
+        for p in (tmp_path / ".local/state/safo/protection-backups").iterdir()
+    )
 
 
 def test_it_reads_the_force_push_bypass_back_over_graphql(tmp_path: Path) -> None:
