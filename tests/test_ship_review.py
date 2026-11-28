@@ -92,7 +92,8 @@ def test_the_wait_never_outlasts_timeout(rig: Rig) -> None:  # noqa: F811
     rig.state["reviews"] = [[]]
     rig.state["threads"] = [threads("t.py")]
     code, out, calls = rig.go("5", "--repo", REPO, "--wait-for-review", "900", "--timeout", "30", "--interval", "20")
-    assert code == ship.EXIT_THREADS and "NOTICE" in out and sum(rig.slept) <= 30
+    # the whole per-PR time went on the wait: no gh call may start after it (the thread read would be one), so TIMEOUT
+    assert code == ship.EXIT_TIMEOUT and "NOTICE" in out and sum(rig.slept) <= 30
     assert merges(calls) == []
 
 
