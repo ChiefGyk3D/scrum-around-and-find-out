@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The shell guard now denies a decoder name plus any command-position word outside its data-command allowlist anywhere
+  in one submitted command (#645), including a path-named executable, an executable mode set by `chmod` or `install`,
+  an inline interpreter paired with another possible sink, and a dynamic command after a wrapper or reserved word.
+  The allowlist is the decoder commands, `cat`, `echo`, `printf`, `tee`, `head`, `tail`, `wc`, `grep`, `uniq`,
+  `cut`, `tr`, `ls`, `test`, `true`, `false`, `mkdir`, `cp`, `mv`, `rm`, `touch`, `cd`,
+  `pwd`, `read`, `sleep`, `date` and `id`. Unreadable input with a decoder and either a sink name or any dynamic shell
+  marker is denied. The guard does not prove byte flow: decoding and running must be split into separate submitted
+  commands or files. The denial remains `encoded content and a possible execution target in one command`.
 - Branch-protection baseline standard (#541): `scripts/apply-baseline.sh` now writes strict (up to date) and conversation resolution on, backs up the old rule (0600), reads the rule back and prints `ROLLBACK:` lines; new `--mode standard|basic|secret-scanning` (keeps the live `CI green` check names, BASIC gate for repositories without one, secret scanning for public repositories) with `--expect-branch`, `--expect-visibility`, `--expect-protection` refusals (exit 3) and read-back mismatch exit 4; `scripts/gen-protection-plan.py` turns an audit snapshot into an owner-run plan script (dry run by default). Docs: `docs/branch-protection-baseline.md`. Tests: `tests/test_protection_standard.py`.
 - `safo-protect-threads` (#627, epic #527): fail closed on paging: `matchingRefs` is read with `totalCount` and `pageInfo{hasNextPage}` and a rule whose matching branches are not all on the page (marker not exactly false, or count not equal to the nodes) is refused with exit 3, no write; after `--apply` the flag is also read back through REST `branches/BRANCH/protection` and `required_conversation_resolution` must be enabled, else exit 6 with the rollback printed. Backup behavior unchanged. Tests: `tests/test_protect_threads.py`.
 - `docs/port-ledger.md` (#622): the `safo-threads` row (#587) is Ported (SAFO `b499b33`, portable edition PR #70, merged), #489 and #519 are Ported (PE PR #49), #512, #538 and #558 name what PE PR #50 still lacks, 13 rows are Deferred with their blocking issue, and #537 stays Proposed because the portable edition has no issue for it; adds a Deferred section.

@@ -631,6 +631,8 @@ PREFILTER_TRIGGERS = {
     "vendor host": "curl https://generativelanguage.googleapis.com/x",
     "sdk": "import generativeai",
     "decode": "printf '\\x41' | sh",
+    "shell decoder": "base64 --decode | sh",
+    "shell decode sink": "base64 --decode | sh",
     "conceal": "$'\\x73afo' ask --paid",
     "broker module": "python3 -m safo.broker.client",
 }
@@ -661,7 +663,8 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION", "_RISK_FLAG",
         "RECORD_ID",
         # the Bash command check (#209) is its own scan of a shell command, not a brief detector
-        "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL",
+            "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL",
+            "_INLINE_DECODER_PREFILTER", "_DYNAMIC_SHELL_MARKER",
         # the broker client module reader (#299): gated by the "broker module" prefilter word or a risk line
         "_BM_ENTRY", "_BM_SCRIPT", "_BM_LOCAL", "_BM_IMPORT", "_BM_CODE", "_BM_DOTTED", "_BM_PATH", "_BM_RUNTIME",
         "_BM_FEED", "_BM_MFLAG", "_BM_OPTION", "_BM_PY_RE", "_BM_ANY_M", "_BM_DYNAMIC",
@@ -1431,6 +1434,8 @@ BLOCKED_SAMPLES = {
     "vendor host": "curl https://generativelanguage.googleapis.com/x\n",
     "sdk": "import generativeai\n",
     "decode": "printf '\\x41' | sh\n",
+    "shell decoder": "base64 --decode | sh\n",
+    "shell decode sink": "base64 --decode | sh\n",
     "conceal": "$'\\x73afo' $'\\x67emini' $'\\x61sk' $'\\x2d\\x2dpaid'\n",
     "broker module": "python3 -I -m safo.broker.client --model m --job j\n",
     "variable flow": "A=safo\nB=gemini\n$A $B ask --paid\n",

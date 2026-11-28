@@ -117,6 +117,512 @@ def test_the_classifier_leaves_ordinary_commands_alone(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
 
 
+DECODE_TO_INTERPRETER = [
+    "printf %s cGF5bG9hZA== | base64 -d | sh",
+    "printf %s cGF5bG9hZA== | openssl base64 -d | bash",
+    "printf %s 7061796c6f6164 | xxd -r -p | zsh",
+    r"printf '\x70\x61\x79\x6c\x6f\x61\x64' | dash",
+    r"echo -e '\160\141\171\154\157\141\144' | ksh",
+    "printf %s cGF5bG9hZA== | basenc --base64 --decode | env sh",
+    "printf %s payload | uudecode | xargs sh",
+    "python -c 'import base64; print(base64.b64decode(\"cGF5bG9hZA==\"))' | ruby",
+    'perl -e \'print pack("H*", "7061796c6f6164")\' | node',
+    'sh -c "$(printf %s cGF5bG9hZA== | base64 --decode)"',
+    "source <(printf %s 7061796c6f6164 | xxd -r -p)",
+    'python <<< "$(printf %s cGF5bG9hZA== | base64 -d)"',
+    "printf %s cGF5bG9hZA== | base64 -d > /tmp/payload; sh /tmp/payload",
+]
+
+
+@pytest.mark.parametrize("command", DECODE_TO_INTERPRETER)
+def test_the_classifier_denies_decoded_output_that_reaches_an_interpreter(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"printf %b '\0'164'\0'162'\0'165'\0'145 | sh",
+        r"printf %b '\0'164'\0'162 | sh",
+        r"printf %b $'\0'164$'\0'162$'\0'165$'\0'145 | sh",
+        r'printf %b "\\0"164"\\0"162"\\0"165"\\0"145 | sh',
+        r"printf %b '\0145\' '\0143' | sh",
+        r"""printf %b '\0'164""'\0'162'\0'165'\0'145 | sh""",
+        r"echo -e '\0'164'\0'162'\0'165'\0'145 | sh",
+        r"printf %b '\0'164'\0'162'\0'165'\0'145; sh",
+        r"printf %b '\0'164'\0'162; sh",
+        r"printf %b $'\0'164$'\0'162$'\0'165$'\0'145; sh",
+        r'printf %b "\\0"164"\\0"162"\\0"165"\\0"145; sh',
+        r"printf %b '\0145\' '\0143'; sh",
+        r"""printf %b '\0'164""'\0'162'\0'165'\0'145; sh""",
+        r"echo -e '\0'164'\0'162'\0'165'\0'145; sh",
+    ],
+)
+def test_quoted_word_fragments_cannot_hide_an_escape_decoder_from_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hello",
+        r'''printf '%s\n' "$a"''',
+        "python3 -c 'print(1)'",
+        "cat file | wc -l",
+        r"printf 'a\n' | wc -l",
+    ],
+)
+def test_escape_prefilter_controls_without_a_decoder_sink_pair_are_allowed(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d input > payload; sh < payload",
+        "base64 -d input; sh",
+        "sh; base64 -d input",
+    ],
+)
+def test_a_decoder_and_sink_are_denied_without_proving_connectivity_or_order(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; A=1 B=2 sh",
+        "A=1 B=2 base64 -d f; sh",
+        "A=1; base64 -d f; B=2 sh",
+        "base64 -d f; A=1; sh",
+    ],
+)
+def test_assignments_cannot_hide_a_decoder_or_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "decoder",
+    [
+        "base64 -di f",
+        "xxd -rp f",
+        "base64 --dec f",
+        "base64 --decode= f",
+        "openssl enc -d -base64 f",
+        "openssl base64 -d f",
+        "basenc --base64 -d f",
+        "uudecode f",
+    ],
+)
+def test_decoder_option_forms_are_denied_with_a_sink(decoder: str) -> None:
+    command = f"{decoder}; sh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "decoder",
+    [
+        "base64 --d f",
+        "base64 --de f",
+        "base64 --decode=x f",
+        "openssl base64 --d f",
+        "openssl enc --base64 -d f",
+        "xxd --rev f",
+        "xxd --r f",
+        "base64 -- -d f",
+    ],
+)
+@pytest.mark.parametrize("separator", ["; ", " | "])
+def test_decoder_names_are_denied_with_a_sink_regardless_of_option_spelling(decoder: str, separator: str) -> None:
+    command = f"{decoder}{separator}sh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "{ base64 -d f; }; sh",
+        "(base64 -d f); sh",
+        "if true; then base64 -d f; else sh; fi",
+        "while false; do base64 -d f; done; sh",
+        "for x in f; do base64 -d f; done; sh",
+        "case x in x) base64 -d f;; y) sh;; esac",
+        "f() { base64 -d f; }; sh",
+    ],
+)
+def test_compound_constructs_cannot_separate_a_decoder_from_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+DECODE_WRAPPERS = (
+    "command",
+    "builtin",
+    "exec",
+    "nice",
+    "nohup",
+    "timeout",
+    "stdbuf",
+    "time",
+    "sudo",
+    "doas",
+    "busybox",
+    "setsid",
+    "chrt",
+    "ionice",
+    "taskset",
+    "unbuffer",
+    "env",
+    "xargs",
+    "!",
+)
+
+
+@pytest.mark.parametrize("wrapper", DECODE_WRAPPERS)
+@pytest.mark.parametrize("wrapped", ["sink", "decoder"])
+def test_wrappers_cannot_hide_a_decoder_or_sink(wrapper: str, wrapped: str) -> None:
+    command = f"base64 -d input; {wrapper} sh" if wrapped == "sink" else f"{wrapper} base64 -d input; sh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "wrapped_sink",
+    [
+        "taskset -c 0 sh",
+        "chrt -f 1 sh",
+        "sudo -u x -- sh",
+        "doas -u x sh",
+        "timeout -k 1 5 sh",
+        "busybox sh",
+        "time -p sh",
+    ],
+)
+def test_wrapper_option_parsing_cannot_hide_a_sink_name(wrapped_sink: str) -> None:
+    command = f"base64 -d input; {wrapped_sink}"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/base64 -d f; sh",
+        "base64 -d f; ./sh",
+        "base64 -d f; \\sh",
+        'base64 -d f; "sh"',
+        "'base64' -d f; sh",
+        'base64 -d f; "$(printf sh)"',
+    ],
+)
+def test_static_spellings_and_a_dynamic_command_word_are_denied(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; $x",
+        r"base64 -d f; $'\163\150'",
+        "base64 -d f; s?",
+        "base64 -d f; ${s}h",
+        "base64 -d f; ''",
+        "base64 -d f; $(printf sh)",
+        "base64 -d f; <(printf sh)",
+    ],
+)
+def test_a_decoder_and_any_non_static_command_word_are_denied(command: str) -> None:
+    assert geminibrief.relevant(command), command
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+def test_a_dynamic_argument_without_a_decoder_is_allowed() -> None:
+    assert geminibrief.shell_command_class("python3 -c 'print(1)' $X") is None
+
+
+def test_an_unreadable_command_with_a_decoder_and_sink_is_denied() -> None:
+    command = 'base64 -d f; sh "'
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; ./payload",
+        "base64 -d f; /tmp/payload",
+        "base64 -d f; /usr/bin/python3 payload.py",
+        "base64 -d f; custom-runner",
+        "base64 -d f; chmod +x payload",
+        "base64 -d f; install -m 755 payload target",
+    ],
+)
+def test_a_decoder_makes_every_non_data_command_or_executable_creation_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize("command", ["sed -e e", "sort --compress-program=sh", "awk '{ print }'"])
+def test_code_loading_data_commands_are_sinks_beside_a_decoder(command: str) -> None:
+    assert geminibrief.shell_command_class(f"base64 -d f; {command}") == geminibrief.SHELL_DECODED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bas\\\ne64 -d f; sh",
+        "base64 \\\n-d f; sh",
+        "bas\\\ne64 -d f; echo $X '",
+    ],
+)
+def test_line_continuations_cannot_hide_a_decoder_from_the_prefilter(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true \\\\\nprintf '%s' ZWNobyBQVU5FRAo= | b'a'se64 -d | s'h'",
+        "true \\\\\nbase64 -d f; echo $X",
+        "true \\\\\nbase64 -d f; echo *",
+    ],
+)
+def test_an_unreadable_decoder_command_with_any_dynamic_marker_is_denied(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "interpreter, flag",
+    [("python3", "-c"), ("perl", "-e"), ("perl", "-E"), ("ruby", "-e"), ("node", "-e"), ("php", "-r")],
+)
+def test_an_inline_interpreter_is_a_decoder_and_sink_only_when_paired_with_another_sink(
+    interpreter: str, flag: str
+) -> None:
+    inline = f"{interpreter} {flag} 'print(1)'"
+    assert geminibrief.shell_command_class(inline) is None
+    assert geminibrief.shell_command_class(f"{inline}; custom-runner") == geminibrief.SHELL_DECODED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; python3 -c 'print(1)'",
+        "printf x | python3 -c 'import sys; sys.stdin.read()'",
+        "python3 -c 'print(1)' < input",
+        "python3 -c 'print(1)'; custom-runner",
+    ],
+)
+def test_inline_interpreters_are_sinks_when_the_command_has_another_execution_path(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "base64 -d f; env $PROGRAM",
+        "base64 -d f; command $PROGRAM",
+        "base64 -d f; if true; then $PROGRAM; fi",
+        "base64 -d f; time $PROGRAM",
+    ],
+)
+def test_a_dynamic_command_word_after_a_wrapper_or_reserved_word_is_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+def test_a_newline_is_a_decoder_and_sink_boundary() -> None:
+    command = "base64 -d f\nsh"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+def test_an_inline_interpreter_that_decodes_and_executes_is_denied() -> None:
+    command = "python3 -c 'import base64; exec(base64.b64decode(x))'"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+def test_a_plain_inline_interpreter_is_allowed() -> None:
+    assert geminibrief.shell_command_class("python3 -c 'print(1)'") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"find . -exec base64 -d f \; -exec sh \;",
+        r"find . -execdir sh -c x \; -exec base64 -d {} \;",
+        r"find . -ok sh \; -exec base64 -d {} \;",
+        "xargs base64 -d f | xargs sh",
+        "parallel base64 -d ::: f ::: sh",
+        "env -S 'base64 -d f' sh",
+        "env -S 'sh' base64 -d f",
+    ],
+)
+def test_exec_style_carriers_cannot_hide_decoder_or_sink_arguments(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo base64 | sh",
+        "printf '%s' xxd | bash",
+    ],
+)
+def test_decoder_names_in_non_decoder_arguments_are_denied_with_a_sink(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -name '*.txt'",
+        "xargs wc -l",
+        "base64 -d f > out",
+        "echo hello",
+        "python3 -c 'print(1)'",
+    ],
+)
+def test_carriers_and_decoders_without_a_decoder_sink_pair_are_allowed(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+@pytest.mark.parametrize(
+    "sink",
+    [
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "fish",
+        "csh",
+        "tcsh",
+        "ash",
+        "rc",
+        "mksh",
+        "pwsh",
+        "powershell",
+        "eval",
+        "source",
+        ".",
+        "env",
+        "xargs",
+        "python",
+        "perl",
+        "ruby",
+        "node",
+        "nodejs",
+        "busybox",
+        "php",
+        "lua",
+        "luajit",
+        "awk",
+        "gawk",
+        "mawk",
+        "nawk",
+        "tclsh",
+        "wish",
+        "expect",
+        "julia",
+        "r",
+        "rscript",
+        "groovy",
+        "scala",
+        "java",
+        "jshell",
+        "deno",
+        "bun",
+        "go",
+        "gcc",
+        "cc",
+        "tcc",
+        "make",
+        "cmake",
+        "npm",
+        "npx",
+        "pip",
+        "pip3",
+        "uv",
+        "ssh",
+        "nc",
+        "ncat",
+        "socat",
+        "telnet",
+        "at",
+        "batch",
+        "crontab",
+        "exec",
+        "command",
+        "builtin",
+        "trap",
+        "time",
+        "coproc",
+        "script",
+        "screen",
+        "tmux",
+        "watch",
+    ],
+)
+def test_every_decode_sink_is_denied_next_to_a_decoder(sink: str) -> None:
+    command = f"base64 -d f; {sink}"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize("sink", ["python3.12", "ruby3", "php8", "/usr/bin/lua5.4"])
+def test_versioned_decode_sink_basenames_are_denied(sink: str) -> None:
+    command = f"base64 -d f; {sink}"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED, command
+
+
+@pytest.mark.parametrize("command", DECODE_TO_INTERPRETER)
+def test_the_prefilter_selects_every_decode_to_interpreter_shape(command: str) -> None:
+    assert geminibrief.relevant(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf %s cGF5bG9hZA== | base64 -d > /tmp/payload",
+        "printf %s cGF5bG9hZA== | base64 -d | wc -c",
+        "printf %s cGF5bG9hZA== | base64 -d | cat",
+        "printf '%s' payload",
+        "echo payload",
+        "echo encoded; fisherman",
+        "echo encoded; java-home",
+        "echo encoded; npmrc",
+        "echo encoded; ssh-keygen",
+        "echo encoded; watcher",
+    ],
+)
+def test_the_classifier_allows_decode_lookalikes_with_no_sink_word(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+def test_a_decode_lookalike_with_a_sink_word_elsewhere_is_denied() -> None:
+    command = "base64 -d input > /tmp/payload; echo $(date); python report.py"
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "printf '\\x41' | base64 -d | xargs " + "-n 1 " * 10_000,
+        "printf '\\x41' | base64 -d " + "> " * 20_000,
+        "printf '\\x41' | base64 -d | sh '" + "x" * 60_000,
+    ],
+)
+def test_decode_classification_is_bounded_on_pathological_input(hostile: str) -> None:
+    command = hostile[: geminibrief.SHELL_CAP]
+    start = time.process_time()
+    try:
+        geminibrief.shell_command_class(command)
+    except Exception as err:  # pragma: no cover - the assertion records the hostile case if the guard ever raises
+        pytest.fail(f"classification raised {type(err).__name__}: {err}")
+    assert time.process_time() - start < 2.0
+
+
+def test_more_than_the_decoder_processing_cap_is_denied() -> None:
+    command = "; ".join(["base64 -d input"] * (geminibrief.MAX_SHELL_DECODERS + 1) + ["sh"])
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_DECODED
+
+
+def test_the_classifier_allows_a_plain_path_to_carry_issue_text() -> None:
+    assert geminibrief.shell_command_class("gh issue create --title update --body-file notes.md") is None
+
+
 def test_the_wrapper_is_not_exempt_when_it_carries_a_name() -> None:
     assert (
         geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is not None

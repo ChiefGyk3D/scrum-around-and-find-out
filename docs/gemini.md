@@ -248,6 +248,30 @@ like any other line (they can be run by a shell), which can false-block shell ex
 that holds is in the code: `ask` raises on a paid request before any request, and the only paid path is the broker, which
 verifies a fresh signature for every call.
 
+The decoded-command rule is deliberately conservative: when a decoder name occurs anywhere in a submitted command,
+every command-position word outside a small data-command allowlist is a possible execution sink. This includes a word
+containing `/`, an unknown or path-named executable, an executable mode set by `chmod` or `install`, a dynamic command
+after a wrapper or reserved word, and an inline interpreter (`python -c`, `perl -e`/`-E`, `ruby -e`, `node -e` or
+`php -r`) paired with any separate sink or non-data command. A plain inline interpreter with no other command and no
+decoder name remains allowed. Unreadable input is denied when the decoder prefilter matched and either any sink name or
+any `$`, backtick, quote, backslash or glob character occurs anywhere in the original command.
+
+The complete data-command allowlist is the decoder commands (`base64`, `basenc`, `openssl`, `xxd`, `uudecode`, plus the
+escape-decoding forms of `printf` and `echo`), `cat`, `echo`, `printf`, `tee`, `head`, `tail`, `wc`, `grep`, `uniq`,
+`cut`, `tr`, `ls`, `test`, `true`, `false`, `mkdir`, `cp`, `mv`, `rm`, `touch`, `cd`, `pwd`, `read`, `sleep`, `date`
+and `id`. `sed`, `sort` and `awk` were removed because their arguments can execute commands or load code. Order,
+wrappers, wrapper options, connections and apparent byte flow do not relax the rule. Decoding and running must be split
+into separate submitted commands or files.
+
+**Passing protected text as data (#486).** Do not put text that mentions a protected word inline in a Bash command: the
+guard cannot prove that inline text is data rather than shell syntax. Write an issue body or brief with the editor or
+Write tool, then pass only its path and plain options to the consuming tool. For example, use `gh issue create --title
+update --body-file PATH` (the title itself carries no protected word), or the equivalent `-F PATH`; use editing tools
+instead of an interpreter here-document. This does not relax the guard. Inline bodies and titles, interpreter
+here-documents, substitutions, decoded output handed to a shell or interpreter, and any command the guard cannot
+classify remain denied when the protected-word rule applies, because the guard cannot establish that their inline text
+will stay data.
+
 ## What is not built or not verified
 
 - Image generation is paid-only, and the free tier refuses a model listed under `image_models` in `gemini.yaml`; image

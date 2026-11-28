@@ -479,6 +479,14 @@ does not model (any parse doubt is a denial). The vendor host, the SDK, the key 
 never relaxed, wherever they stand, a comment or a commit message included. Each is a regression test in
 `tests/test_gemini_bash_narrow.py`; the denying shapes are built from fragments at run time.
 
+**Sanctioned file handoff (#486).** When an issue title, body or brief must mention a protected word, write that text to
+a file with the editor or Write tool and give the next tool only the path and plain options. For example, use `gh issue
+create --title update --body-file PATH` (with no protected word in the title), or `-F PATH`; use editing tools instead
+of an interpreter here-document. The path-only command passes because it contains no protected text, not because the
+guard has been relaxed. Inline bodies or titles that mention protected words, interpreter here-documents, command and
+process substitutions, decoded output connected to a shell or interpreter, and unclassified commands stay denied. The
+guard cannot prove that inline text is data, so it fails closed.
+
 **Not fixed by #388: a long line in a brief.** A brief line over 4000 characters that names the vendor is still refused
 unread. A line that is not read cannot be shown harmless (a whole program can fit in it), so that part of issue 388 stays
 open; see `tests/test_gemini_long_line.py`.
@@ -506,7 +514,7 @@ to check, and it never lets a command through that was not checked. Nothing here
 cap are chosen limits (`SHELL_CHECK_FLOOR_SECONDS`, `SHELL_CHECK_CAP_SECONDS` in `safo.modes.hooks`), not measured values.
 
 Not covered, by design: names built from variables (`a=generative; b=language; curl https://$a$b...` with no
-`doppler`), names decoded (`base64 -d | xargs curl`) or read from a file or the environment, a script or program the
+`doppler`), decoded names sent somewhere other than a shell or interpreter, names read from a file or the environment, a script or program the
 command merely runs, a shadowed Python module defined outside the command (a file named like an installed module on the
 import path), an alias or function defined by a shell startup file the guard never sees, and anything the folding and regexes do not name. The wrapper holds the real gates.
 

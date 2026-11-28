@@ -79,7 +79,7 @@ VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
 # must be added here (a test fails otherwise); the second field names it.
 # words built with escapes, printf -v, ANSI-C quoting: a brief that has them is read even without a Gemini word
 CONCEAL = re.compile(r"\$'[^']*\\|printf\s+-v\b|\\x[0-9a-fA-F]{2}|\\[0-7]{3}|\\u[0-9a-fA-F]{4}")
-PREFILTER = (
+PREFILTER: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("safo", re.compile("safo")),
     ("gemini", re.compile("gemini")),
     ("paid config", PAID_CONFIG),
@@ -267,6 +267,8 @@ def relevant(text: str) -> bool:
     lower case text. Words built with escapes (ANSI-C quoting, `printf -v`, hex or octal escapes) make a brief relevant
     on their own, since the words and the options may both be what the escapes hide."""
     concealed = False
+    shell_decoder = False
+    shell_sink = False
     for line in _join(text).splitlines():
         norm, _, low, pre_low, pre_raw = _views(line)
         raw = norm.lower()
@@ -277,6 +279,14 @@ def relevant(text: str) -> bool:
                 concealed = concealed or bool(pattern.search(raw) or pattern.search(pre_raw))
             elif name == "decode":
                 if pattern.search(raw) or pattern.search(pre_raw):
+                    return True
+            elif name == "shell decoder":
+                shell_decoder = shell_decoder or bool(pattern.search(raw) or pattern.search(pre_raw))
+                if shell_decoder and shell_sink:
+                    return True
+            elif name == "shell decode sink":
+                shell_sink = shell_sink or bool(pattern.search(low) or pattern.search(pre_low))
+                if shell_decoder and shell_sink:
                     return True
             elif pattern.search(low) or pattern.search(pre_low):
                 return True
@@ -1206,6 +1216,7 @@ SHELL_VENDOR = "the vendor API host or SDK"
 SHELL_KEY = "the key variable name"
 SHELL_STORE = "the secret-store project or config name"
 SHELL_BUILT = "a word built from escapes beside a network or secret tool"
+SHELL_DECODED = "encoded content and a possible execution target in one command"
 SHELL_TOOL = "a secret tool run with a shell expansion"
 SHELL_BROKER_MODULE = "the broker client module run directly"
 SHELL_UNVERIFIED = "a command that could not be checked in time"
@@ -1214,16 +1225,323 @@ _SHELL_KEY = re.compile(r"gemini[\W_]*api[\W_]*key")
 _SHELL_PROJECT = re.compile(r"(?<![\w-])image-gen(?![\w-])")
 _SHELL_CONFIG = re.compile(r"(?<![\w-])prd(?![\w-])")
 _SECRET_TOOL = re.compile(r"(?<![\w.-])doppler(?![\w-])")
-_NETWORK_TOOL = re.compile(
-    r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|openssl|ssh|telnet|python[\d.]*|node|nodejs|perl|ruby|php|go|deno|bun"
-    r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
+_EXECUTING_NETWORK_TOOLS = frozenset(
+    {
+        "bun",
+        "deno",
+        "go",
+        "nc",
+        "ncat",
+        "node",
+        "nodejs",
+        "perl",
+        "php",
+        "powershell",
+        "pwsh",
+        "ruby",
+        "socat",
+        "ssh",
+        "telnet",
+    }
 )
+_NETWORK_TOOL_NAMES = _EXECUTING_NETWORK_TOOLS | frozenset(
+    {"aria2c", "curl", "http", "httpie", "https", "lwp-request", "openssl", "wget"}
+)
+_NETWORK_TOOL = re.compile(
+    rf"(?<![\w.-])(?:{'|'.join(sorted(map(re.escape, _NETWORK_TOOL_NAMES)))}|python[\d.]*)(?![\w-])"
+)
+_SHELL_DECODER = re.compile(
+    r"\b(?:base64|b64decode|unhexlify|fromhex|atob|openssl|xxd|basenc|uudecode|decode(?=\s*\())\b"
+    r"|\bpack\s*\(\s*['\"]H\*|\\(?:x[0-9a-fA-F]{2}|[0-7]{3})",
+    re.IGNORECASE,
+)
+MAX_SHELL_DECODERS = 32
+_DECODE_COMMANDS = frozenset({"base64", "basenc", "openssl", "xxd", "uudecode", "printf", "echo"})
+_SHELL_DECODER_NAME = rf"\b(?:{'|'.join(sorted(map(re.escape, _DECODE_COMMANDS)))})\b"
+_INLINE_INTERPRETERS = frozenset({"python", "perl", "ruby", "node", "nodejs", "php"})
+_INLINE_DECODER_PREFILTER = re.compile(
+    r"(?:^|[;&|()\n]\s*)(?:[^\s;&|()]+/)?(?:python[\d.]*\s+[^;&|()\n]*-[^-\s]*c"
+    r"|(?:perl|ruby|node|nodejs)[\d.]*\s+[^;&|()\n]*-[^-\s]*[eE]|php[\d.]*\s+[^;&|()\n]*-[^-\s]*r)",
+    re.IGNORECASE,
+)
+_STRING_DECODER = r"\b(?:base64|b64decode|unhexlify|fromhex|atob|xxd|uudecode)\b|\bdecode\s*\(|\bpack\s*\(\s*['\"]H\*"
+_DECODE_DATA_COMMANDS = _DECODE_COMMANDS | frozenset(
+    {
+        "cat",
+        "cd",
+        "cp",
+        "cut",
+        "date",
+        "false",
+        "grep",
+        "head",
+        "id",
+        "ls",
+        "mkdir",
+        "mv",
+        "pwd",
+        "read",
+        "rm",
+        "sleep",
+        "tail",
+        "tee",
+        "test",
+        "touch",
+        "tr",
+        "true",
+        "uniq",
+        "wc",
+    }
+)
+_DYNAMIC_SHELL_MARKER = re.compile(r"[$`'\"\\*?\[\]{}]")
+_DECODE_SINKS = _EXECUTING_NETWORK_TOOLS | frozenset(
+    {
+        ".",
+        "ash",
+        "at",
+        "awk",
+        "bash",
+        "batch",
+        "builtin",
+        "busybox",
+        "cc",
+        "cmake",
+        "command",
+        "coproc",
+        "crontab",
+        "csh",
+        "dash",
+        "env",
+        "eval",
+        "exec",
+        "expect",
+        "fish",
+        "gawk",
+        "gcc",
+        "groovy",
+        "java",
+        "jshell",
+        "julia",
+        "ksh",
+        "lua",
+        "luajit",
+        "make",
+        "mawk",
+        "mksh",
+        "nawk",
+        "npm",
+        "npx",
+        "pip",
+        "python",
+        "r",
+        "rc",
+        "rscript",
+        "scala",
+        "screen",
+        "script",
+        "sh",
+        "source",
+        "tcc",
+        "tclsh",
+        "tcsh",
+        "time",
+        "tmux",
+        "trap",
+        "uv",
+        "watch",
+        "wish",
+        "xargs",
+        "zsh",
+    }
+)
+_SHELL_DECODE_SINK = re.compile(
+    rf"(?:\b(?:{'|'.join(sorted(map(re.escape, _DECODE_SINKS - {'.'})))})[\d.]*(?![\w-])|(?<!\S)\.(?=\s))",
+    re.IGNORECASE,
+)
+PREFILTER += (("shell decoder", _SHELL_DECODER), ("shell decode sink", _SHELL_DECODE_SINK))
+
+
+def _decoder_word(unit: shellunits.Unit, index: int, tick: Callable[[], None]) -> bool:
+    value = unit.words[index].value
+    if value is None:
+        return False
+    command = value.rsplit("/", 1)[-1].lower()
+    if command not in _DECODE_COMMANDS:
+        command = re.sub(r"\d+(?:\.\d+)*$", "", command)
+    if command not in _DECODE_COMMANDS and command not in _INLINE_INTERPRETERS:
+        return False
+    if command in {"base64", "basenc", "openssl", "xxd", "uudecode"}:
+        return True
+    has_c = False
+    has_e = False
+    for word in unit.words[index + 1 :]:
+        tick()
+        if word.value is not None and word.value.startswith("-") and not word.value.startswith("--"):
+            flags = word.value[1:].lower()
+            has_c = has_c or "c" in flags
+            has_e = has_e or "e" in flags
+    escaped = False
+    for word in unit.words[index + 1 :]:
+        tick()
+        escaped = escaped or ("\\" in word.value if word.value is not None else "\\" in word.raw)
+    if command == "printf":
+        return escaped
+    if command == "echo":
+        return escaped and has_e
+    inline_flag = has_c if command == "python" else has_e
+    if command == "php":
+        inline_flag = any(
+            word.value is not None and word.value.startswith("-") and "r" in word.value[1:]
+            for word in unit.words[index + 1 :]
+        )
+    return inline_flag
+
+
+def _makes_executable(unit: shellunits.Unit) -> bool:
+    """Whether chmod/install in this unit requests any executable mode."""
+    values = [word.value for word in unit.words]
+    if not values or any(value is None for value in values):
+        return False
+    words = [value for value in values if value is not None]
+    names = [word.rsplit("/", 1)[-1].lower() for word in words]
+    if "chmod" in names:
+        index = names.index("chmod")
+        return any(re.search(r"(?:^|[ugoa,+-])\+[^ ]*x|^[0-7]*[1357][0-7]*$", word) for word in words[index + 1 :])
+    if "install" not in names:
+        return False
+    index = names.index("install")
+    modes = [words[pos + 1] for pos in range(index + 1, len(words) - 1) if words[pos] in {"-m", "--mode"}]
+    modes.extend(word.split("=", 1)[1] for word in words[index + 1 :] if word.startswith("--mode="))
+    if not modes:
+        return True  # install's default mode is executable
+    return any(re.fullmatch(r"[0-7]*[1357][0-7]*", mode) is not None or "x" in mode for mode in modes)
+
+
+def _decoded_to_shell(command: str, tick: Callable[[], None]) -> bool:
+    """True when a decoder and a possible execution sink occur anywhere in the submitted command."""
+    has_continuation = "\\\n" in command
+    try:
+        joined = shellunits._join_continuations(command)
+    except shellunits.Unreadable:
+        joined = command
+    stripped = _strip(joined)
+    decoder_prefilter = (
+        _SHELL_DECODER.search(joined) is not None
+        or _SHELL_DECODER.search(stripped) is not None
+        or _INLINE_DECODER_PREFILTER.search(stripped) is not None
+    )
+    prefilter_sink = _SHELL_DECODE_SINK.search(joined) is not None or _SHELL_DECODE_SINK.search(stripped) is not None
+    quoted_decoder_with_sink = (
+        any(marker in joined for marker in "'\"\\")
+        and prefilter_sink
+        and (
+            re.search(_SHELL_DECODER_NAME, joined, re.IGNORECASE)
+            or re.search(_SHELL_DECODER_NAME, stripped, re.IGNORECASE)
+        )
+    )
+    dynamic = _DYNAMIC_SHELL_MARKER.search(joined) is not None
+    if (
+        not decoder_prefilter
+        and not quoted_decoder_with_sink
+        and not (has_continuation and (prefilter_sink or dynamic))
+    ):
+        return False
+    try:
+        counter = shellunits._Counter()
+        units = shellunits.parse(command, counter, tick)
+        for unit in units:
+            tick()
+            for heredoc in unit.heredocs:
+                tick()
+                units.extend(shellunits.parse(heredoc.body, counter, tick, 1))
+    except shellunits.Unreadable:
+        return prefilter_sink or dynamic
+    decoders = 0
+    decoder = False
+    sink = False
+    inline_decoder_units: set[int] = set()
+    decoder_units: set[int] = set()
+    for unit in units:
+        tick()
+        command_words = list(unit.words)
+        while command_words and re.match(r"[A-Za-z_]\w*\+?=", command_words[0].raw):
+            tick()
+            command_words = command_words[1:]
+        if not command_words or command_words[0].value in (None, ""):
+            sink = True
+        for index, word in enumerate(unit.words):
+            tick()
+            if word.value is None:
+                continue
+            name = word.value.rsplit("/", 1)[-1].lower()
+            unversioned = re.sub(r"\d+(?:\.\d+)*$", "", name)
+            decoder_word = _decoder_word(unit, index, tick)
+            if decoder_word and unversioned in _INLINE_INTERPRETERS:
+                inline_decoder_units.add(id(unit))
+                raw = " ".join(part.raw for part in unit.words)
+                if re.search(_STRING_DECODER, raw, re.IGNORECASE) is not None:
+                    sink = True
+            elif name in _DECODE_SINKS or unversioned in _DECODE_SINKS:
+                sink = True
+            if _SHELL_DECODER.search(word.value) is not None or decoder_word:
+                decoder = True
+                decoders += 1
+                decoder_units.add(id(unit))
+            if decoders > MAX_SHELL_DECODERS:
+                return True
+            if decoder and sink:
+                return True
+        if decoder and sink:
+            return True
+        if _makes_executable(unit):
+            sink = True
+    try:
+        effects: list[shellunits.Eff] = []
+        for unit in units:
+            shellunits.effective(unit, counter, tick, 0, effects)
+    except shellunits.Unreadable:
+        return decoder and (sink or prefilter_sink or dynamic)
+    non_data_units = {
+        id(effect.unit)
+        for effect in effects
+        if (re.sub(r"\d+(?:\.\d+)*$", "", effect.cmd.lower()) or effect.cmd.lower())
+        not in _DECODE_DATA_COMMANDS | _INLINE_INTERPRETERS
+    }
+    for effect_index, effect in enumerate(effects):
+        tick()
+        name = effect.cmd.lower()
+        if name not in _DECODE_DATA_COMMANDS and name not in _INLINE_INTERPRETERS:
+            name = re.sub(r"\d+(?:\.\d+)*$", "", name)
+        if not name:
+            continue
+        command_paths = [
+            word.value
+            for word in effect.unit.words
+            if word.value is not None and "/" in word.value and word.value.rsplit("/", 1)[-1] == effect.cmd
+        ]
+        if command_paths or _makes_executable(effect.unit):
+            sink = True
+        if id(effect.unit) in inline_decoder_units and name in _INLINE_INTERPRETERS:
+            other_decoder = bool(decoder_units - {id(effect.unit)})
+            reads_stdin = bool(
+                effect.unit.heredocs
+                or effect.unit.herestrings
+                or any(op.startswith("<") for op, _word in effect.unit.redirs)
+                or any(prior.unit.pipe == effect.unit.pipe for prior in effects[:effect_index])
+            )
+            if not other_decoder and not reads_stdin and not non_data_units:
+                continue
+        if name not in _DECODE_DATA_COMMANDS:
+            sink = True
+    return decoder and sink
 
 
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
     it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED.
 
+    A decoder and a possible execution target anywhere in the same command is always SHELL_DECODED, independent of
+    protected words.
     The default is the old denial (#388): the secret tool with a project or config name, an expansion or a backtick, a
     word built from escapes, or a project or config name by itself, anywhere in the command. It is relaxed only on a
     positive proof from `safo.shellproof`: the protected words sit in comments, or the whole command is made of
@@ -1238,6 +1556,8 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         return SHELL_UNVERIFIED  # before any normalization: the cost of the check never depends on a hostile length
     try:
         tick()
+        if _decoded_to_shell(command, tick):
+            return SHELL_DECODED
         found = _classify(command, tick, soft=True)
         if found is None or _classify(command, tick, soft=False) is not None:
             return found
